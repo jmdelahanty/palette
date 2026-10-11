@@ -218,3 +218,50 @@ def test_manifest_receipt_outside_the_recording_is_refused(tmp_path: Path) -> No
 
     with pytest.raises(ValueError):
         importer._manifest_finalization_receipt(recording)
+
+
+def _receipt_v2(artifacts=()) -> dict:
+    """The base receipt as Citrus sealer 3.1.0 writes it (receipt v2)."""
+    from fisheye.shared.unified_h5.common import canonical_json, digest
+
+    receipt = json.loads(json.dumps(RECEIPT))
+    contract = receipt["contract"]
+    contract.update(schema_version=2, citrus_artifacts=list(artifacts))
+    contract_digest = digest(canonical_json(contract))
+    receipt.update(
+        schema_version=2,
+        contract_sha256=contract_digest,
+        receipt_id="obsbindfin_" + contract_digest[7:],
+    )
+    return receipt
+
+
+def test_a_receipt_v2_admits_the_same_h5(tmp_path: Path) -> None:
+    from fisheye.shared.unified_h5 import UnifiedH5ContractError
+    from fisheye.shared.unified_h5.integrity import validate_external_receipt
+    from tests.unit.fisheye.unified_h5_fixtures import emit_fixture as emit
+
+    source = emit(tmp_path, "base")
+    with h5py.File(source, "r") as h5:
+        validate_external_receipt(h5, source_h5=source, receipt=_receipt_v2())
+        v1_with_artifacts = json.loads(json.dumps(RECEIPT))
+        v1_with_artifacts["contract"]["citrus_artifacts"] = []
+        with pytest.raises(UnifiedH5ContractError, match="external_receipt_contract"):
+            validate_external_receipt(h5, source_h5=source, receipt=v1_with_artifacts)
+
+
+def test_the_head_collection_revision_names_the_receipt(tmp_path: Path) -> None:
+    source, inventory = _transfer(tmp_path)
+    upgraded = json.dumps(_receipt_v2()).encode()
+    r2_receipt = f"recording_observation_bindings/receipts/r2/{OBSERVATION}.json"
+    (source / r2_receipt).parent.mkdir(parents=True)
+    (source / r2_receipt).write_bytes(upgraded)
+    head = _collection(upgraded)
+    head.update(schema_version=2, revision=2)
+    head["observation_contexts"][0]["finalized_receipt"]["relative_path"] = r2_receipt
+    r2 = "recording_observation_bindings/finalized_collection.r2.json"
+    (source / r2).write_text(json.dumps(head))
+    inventory.update({r2_receipt: {}, r2: {}})
+
+    camera, _, receipt = _context(source, inventory)
+    assert (camera, receipt) == ("CAM-42", r2_receipt)

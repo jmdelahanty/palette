@@ -112,3 +112,37 @@ Known caveats before applying:
 - `2026-06-23T21-45-13Z_arena_1_RedScare` has a source-video mtime that differs
   from the stored fingerprint at sub-microsecond precision; the size is the
   same. Migration records a fresh fingerprint for it.
+
+## Migration applied to the 112 (2026-10-09)
+
+The migrator was applied to all 112 archives after the fix above merged
+(#338). Before each write, it copied the root, `raw_video` and `analysis`
+`zarr.json` to a snapshot, and it refused the archive if a fresh plan differed
+from the dry run. All 112 ended `migrated_and_sealed`, and each one's persisted
+authority loads with the expected camera.
+
+Compared with the snapshots:
+
+- fps, total frames, width, height, camera id and colour range: unchanged on
+  all 112.
+- `video_pix_fmt`: the imageio `(tv)`/`(pc)` suffix was dropped. 4 Blindfish
+  archives went from `unknown` to the probed `yuv420p`.
+- File fingerprints were re-minted on 108. Only the RedScare archive noted
+  above has an mtime change.
+- Added `acquisition_authority_publication_status` on all 112. Added
+  `import_profile = metadata_only_analysis` on 84, the value the rest of the
+  store already carries.
+- No attributes were removed.
+
+## Clock backfill for the 108 (2026-10-11)
+
+A dry run after migration gave 108 `WOULD PUBLISH`, all from Orange
+`_meta.csv` files, and 4 failures. The failures are the 4 Blindfish_OMR
+archives, whose declared CSVs are missing. All 108 were published with the
+same procedure as the earlier backfills: a digest check against the dry run,
+then the write, then a direct and consolidated readback. None were refused.
+
+After this backfill: 256 of 272 analysis archives have a published clock. The
+other 16 are the 12 with no clock source, and the 4 Blindfish_OMR, which are
+left unpublished by decision. Their clock files are believed lost, and the
+frame-clock export refuses them with "No published acquisition frame clock".

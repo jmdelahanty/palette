@@ -27,6 +27,7 @@ from .common import (
     uint64,
 )
 from .hdf5_types import dataset_bytes
+from .pose import COMPONENT as POSE_COMPONENT, RECEIPT as POSE_RECEIPT, validate_pose_observations
 from .schema import (
     CORE_CATALOG,
     contract,
@@ -45,6 +46,8 @@ COMPONENT_RECEIPTS = {
     "correspondence": "/correspondence/receipt_json",
     "geometry": "/geometry/correspondence/receipt_json",
     "recording_association": "/metadata/recording_association/receipt_json",
+    # Optional per recording, required once declared; validated in .pose.
+    POSE_COMPONENT: POSE_RECEIPT,
 }
 
 
@@ -98,10 +101,13 @@ def validate_external_receipt(h5, *, source_h5: Path, receipt: dict) -> dict:
         "external_receipt",
     )
     expected = "citrus.recording_observation_finalized_receipt"
+    # Receipt v2 (Citrus sealer 3.1.0) adds only contract.citrus_artifacts. The
+    # transfer admission validates those rows against the sealed inventory.
+    version = receipt["schema_version"]
     require(
         receipt["schema_id"] == expected
-        and type(receipt["schema_version"]) is int
-        and receipt["schema_version"] == 1
+        and type(version) is int
+        and version in (1, 2)
         and receipt["canonicalization"] == "canonical_json_utf8_sort_keys_compact_v1",
         "external_receipt_schema",
     )
@@ -124,14 +130,16 @@ def validate_external_receipt(h5, *, source_h5: Path, receipt: dict) -> dict:
             "session_status",
             "finalized_at_utc",
             "h5_artifact",
+            *(("citrus_artifacts",) if version == 2 else ()),
         ),
         "external_receipt_contract",
     )
     require(
         body["schema_id"] == expected
         and type(body["schema_version"]) is int
-        and body["schema_version"] == 1
-        and body["session_status"] == "COMPLETE",
+        and body["schema_version"] == version
+        and body["session_status"] == "COMPLETE"
+        and (version == 1 or isinstance(body["citrus_artifacts"], list)),
         "external_receipt_not_complete",
     )
     contract_digest = digest(canonical_json(body))
@@ -228,6 +236,7 @@ class InternalIntegrity:
     component_outcomes: tuple[dict, ...]
     table_descriptors: Mapping[str, dict]
     nodes: Mapping[str, str]
+    pose_rows: int | None = None
 
 
 def validate_internal_integrity(h5) -> InternalIntegrity:
@@ -380,8 +389,10 @@ def validate_internal_integrity(h5) -> InternalIntegrity:
                 f"receipt_dependency_mismatch:{path}",
             )
             if kind == "component_receipt":
+                # The pose receipt reports first_error, not reason (.pose).
                 require(
-                    parsed.get("status") == "complete" and parsed.get("reason") == "",
+                    parsed.get("status") == "complete"
+                    and (component == POSE_COMPONENT or parsed.get("reason") == ""),
                     f"component_receipt_incomplete:{component}",
                 )
         else:
@@ -465,4 +476,5 @@ def validate_internal_integrity(h5) -> InternalIntegrity:
         tuple(outcomes["components"]),
         tables,
         nodes,
+        validate_pose_observations(h5, components, receipt_components),
     )

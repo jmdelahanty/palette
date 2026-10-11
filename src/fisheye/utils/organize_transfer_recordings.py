@@ -153,10 +153,15 @@ def _unified_h5_context(
         f"H5 association claims and acquisition binding disagree: {relative}",
     )
     require(UNIFIED_COLLECTION_PATH in inventory, "finalized observation collection missing from transfer")
-    collection = _strict_json_file(source / UNIFIED_COLLECTION_PATH)
+    # Orange may supersede revision 1 (finalized_collection.r<N>.json, e.g. the
+    # Citrus receipt v2 upgrade); the snapshot admission proved the chain, and
+    # the head revision names the current receipts.
+    revision, head_path = _head_collection(inventory)
+    collection = _strict_json_file(source / head_path)
     require(
         collection.get("schema_id") == "orange.recording.observation_binding_finalization"
-        and collection.get("schema_version") == 1
+        and collection.get("schema_version") == (1 if revision == 1 else 2)
+        and collection.get("revision", 1) == revision
         and collection.get("status") == "finalized"
         and collection.get("binding_status") == "bound"
         and collection.get("recording_id") == binding.acquisition_session_id,
@@ -194,6 +199,21 @@ def _unified_h5_context(
         observation_context_id=observation,
     )
     return binding.camera_serial, context, receipt
+
+
+def _head_collection(inventory: dict) -> tuple[int, str]:
+    """(revision, path) of the newest finalized observation collection."""
+
+    revisions = {1: UNIFIED_COLLECTION_PATH}
+    for relative in inventory:
+        match = re.fullmatch(
+            r"recording_observation_bindings/finalized_collection\.r([1-9][0-9]*)\.json",
+            relative,
+        )
+        if match is not None:
+            revisions[int(match.group(1))] = relative
+    head = max(revisions)
+    return head, revisions[head]
 
 
 def _camera_h5_context(
@@ -358,6 +378,26 @@ def build_transfer_organization_plan(
         receipt_by_camera[camera] = receipt
         producer_context[camera] = dict(metadata)
 
+    # Sealer 3.1.0 (snapshot v3): receipt-v2-declared Citrus artifacts, such as
+    # the stimulus video, belong to the camera whose H5 shares their Citrus
+    # session (the sealer requires citrus/<citrus_session_uuid>_<protocol>.h5).
+    for row in current.snapshot.get("citrus_artifacts", []):
+        relative = row["path"]
+        owners = [
+            camera
+            for camera, h5 in h5_by_camera.items()
+            if h5.startswith(f"citrus/{row['citrus_session_uuid']}_")
+        ]
+        require(
+            len(owners) == 1,
+            f"Citrus artifact has no single H5 camera owner: {relative}",
+        )
+        owner = camera_owners.setdefault(relative, (owners[0], "camera_citrus_artifact"))
+        require(
+            owner == (owners[0], "camera_citrus_artifact"),
+            f"Citrus artifact has conflicting ownership: {relative}",
+        )
+
     # Orange's realtime-products declaration (2026-10-08 on) names each camera's
     # own event logs, perf and diagnostic CSVs; they go only to that camera.
     for camera, relative in _declared_realtime_product_files(
@@ -365,8 +405,11 @@ def build_transfer_organization_plan(
     ):
         require(relative in inventory, f"declared realtime product is not delivered: {relative}")
         owner = camera_owners.setdefault(relative, (camera, "camera_realtime_product"))
+        # A declared file may already be this camera's own clip output (Orange
+        # declares the crop metadata CSV under crop_files); it keeps its output
+        # placement. Any other owner, or another camera, is a contradiction.
         require(
-            owner == (camera, "camera_realtime_product"),
+            owner in ((camera, "camera_realtime_product"), (camera, "camera_output")),
             f"realtime product file has conflicting ownership: {relative}",
         )
 
