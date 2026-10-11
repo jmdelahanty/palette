@@ -153,10 +153,15 @@ def _unified_h5_context(
         f"H5 association claims and acquisition binding disagree: {relative}",
     )
     require(UNIFIED_COLLECTION_PATH in inventory, "finalized observation collection missing from transfer")
-    collection = _strict_json_file(source / UNIFIED_COLLECTION_PATH)
+    # Orange may supersede revision 1 (finalized_collection.r<N>.json, e.g. the
+    # Citrus receipt v2 upgrade); the snapshot admission proved the chain, and
+    # the head revision names the current receipts.
+    revision, head_path = _head_collection(inventory)
+    collection = _strict_json_file(source / head_path)
     require(
         collection.get("schema_id") == "orange.recording.observation_binding_finalization"
-        and collection.get("schema_version") == 1
+        and collection.get("schema_version") == (1 if revision == 1 else 2)
+        and collection.get("revision", 1) == revision
         and collection.get("status") == "finalized"
         and collection.get("binding_status") == "bound"
         and collection.get("recording_id") == binding.acquisition_session_id,
@@ -194,6 +199,21 @@ def _unified_h5_context(
         observation_context_id=observation,
     )
     return binding.camera_serial, context, receipt
+
+
+def _head_collection(inventory: dict) -> tuple[int, str]:
+    """(revision, path) of the newest finalized observation collection."""
+
+    revisions = {1: UNIFIED_COLLECTION_PATH}
+    for relative in inventory:
+        match = re.fullmatch(
+            r"recording_observation_bindings/finalized_collection\.r([1-9][0-9]*)\.json",
+            relative,
+        )
+        if match is not None:
+            revisions[int(match.group(1))] = relative
+    head = max(revisions)
+    return head, revisions[head]
 
 
 def _camera_h5_context(
