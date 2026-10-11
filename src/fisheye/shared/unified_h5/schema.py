@@ -35,7 +35,15 @@ CONTRACT_HASHES = {
     "experimental_h5_correspondence_input_v2.schema.json": "a33e06819e966b7273015bfffe4aa0d01f24a04fb9ffac69abb29ed5c76329a3",
     "experimental_h5_correspondence_receipt_v2.schema.json": "8d2a414f46f6d6263f2609c55e15add9d7a2b61ad98349cf1ac3aef598b8d4e8",
     "experimental_h5_capacity_preflight_v1.schema.json": "d5d7ebf5249de35ce7234ddfec3c7cb51b57ac3b6fdcb25bf75724f25223d068",
+    # Admission revision 3 (bounding_boxes v2, agent-contracts PR 73).
+    "unified_h5_admission_v3.json": "c32282b68dc5d0057abe3b4144df27a19afbc69f4a920a64aabd09db6b8647b0",
+    "unified_h5_producer_policy_b2af7764.json": "b2af7764c7f27f6295007ba3049dcf8a35d0f84c5801f8a1ff56150c7f9e7fc1",
+    "experimental_h5_core_bounding_boxes_v2.json": "55f94f83e6f43824488161b7238846b2233933be871ac8044bef04d3fa6df4f8",
+    # Citrus 4d9d04d docs/schemas/experimental_h5_capacity_preflight_v1.schema.json,
+    # renamed here because its revision-2 predecessor keeps the original name.
+    "experimental_h5_capacity_preflight_v1_ba8333a3.schema.json": "ba8333a35526dc1fc655734d938b14a816fd143d2c5eb395ad17065f79718a54",
 }
+ADMISSION = "unified_h5_admission_v3.json"
 # Core catalogs by the chaser state table's schema_version. Only v2 (explicit
 # camera-id validity) is admitted; the original v1 catalog stays pinned
 # byte-for-byte for provenance and for the legacy adapter, never for admission.
@@ -47,6 +55,72 @@ CORE_CATALOGS = {
 ADMITTED_CHASER_VERSION = 2
 CORE_CATALOG = CORE_CATALOGS[ADMITTED_CHASER_VERSION]
 CHASER_STATES = "/components/chaser/states"
+BOUNDING_BOXES = "/observations/bounding_boxes"
+# Tables whose schema_version selects their definition: version -> the pinned
+# core catalog that defines it. The catalogs differ only in these tables, so
+# every other table resolves through CORE_CATALOG. A version outside
+# ADMITTED_TABLE_VERSIONS is refused before its layout is read.
+TABLE_VERSION_CATALOGS = {
+    CHASER_STATES: CORE_CATALOGS,
+    BOUNDING_BOXES: {
+        1: CORE_CATALOGS[ADMITTED_CHASER_VERSION],
+        2: "experimental_h5_core_bounding_boxes_v2.json",
+    },
+}
+ADMITTED_TABLE_VERSIONS = {
+    CHASER_STATES: frozenset({ADMITTED_CHASER_VERSION}),
+    BOUNDING_BOXES: frozenset({1, 2}),
+}
+# Admission revision 3 names each admitted catalog's table versions.
+_PIN_TABLES = {"chaser_state": CHASER_STATES, "bounding_boxes": BOUNDING_BOXES}
+
+
+def admitted_binding(h5, declared_policy_sha256: str) -> dict:
+    """The one admitted catalog binding for this file (admission revision 3).
+
+    Present versioned tables must carry their pinned versions; an absent table
+    does not constrain. The declared producer policy must be the one bound to
+    that catalog. Exactly one binding must remain, or the file is refused.
+    """
+    admission = contract(ADMISSION)
+    bindings = admission["admitted_catalog_bindings"]
+    declared = "sha256:" + declared_policy_sha256
+    matches = []
+    for name, pin in admission["core_definition_pins"].items():
+        if not isinstance(pin, dict) or not pin.get("admitted_by_this_revision"):
+            continue
+        tables_agree = all(
+            path not in h5 or table_version(h5, path) == pin["table_versions"][key]
+            for key, path in _PIN_TABLES.items()
+        )
+        if tables_agree and bindings[name]["producer_policy"]["file_sha256"] == declared:
+            matches.append(name)
+    require(len(matches) == 1, "capacity_preflight_producer_policy")
+    binding = bindings[matches[0]]
+    schema_sha = binding["capacity_preflight_schema"]["file_sha256"].removeprefix("sha256:")
+    (schema_name,) = [name for name, digest in CONTRACT_HASHES.items() if digest == schema_sha]
+    catalog_file = admission["core_definition_pins"][matches[0]]["catalog_path"].rsplit("/", 1)[-1]
+    return {
+        "catalog": matches[0],
+        "catalog_file": catalog_file,
+        "preflight_schema": schema_name,
+        **binding,
+    }
+
+
+def require_declared_core_tables(h5, declared_paths, catalog_file: str) -> None:
+    """The selected catalog's literal tables are present iff the preflight declares them.
+
+    Templated catalog paths (``/correspondence/{component}/sources``, enums) and
+    non-core tables follow their own contracts (admission revision 3,
+    ``admitted_catalog_bindings.declared_tables``).
+    """
+    declared = set(declared_paths)
+    for table in contract(catalog_file)["tables"]:
+        path = table["path"]
+        if "{" in path:
+            continue
+        require((path in declared) == (path in h5), f"declared_core_table_mismatch:{path}")
 CORRESPONDENCE_CATALOG = "experimental_h5_correspondence_tables_v2.json"
 
 
@@ -116,12 +190,12 @@ def validate_catalog_table(h5, path: str) -> dict:
 
 
 def table_version(h5, path: str) -> int | None:
-    """The chaser table's declared schema_version; only v2 is admitted."""
-    if path != CHASER_STATES or path not in h5:
+    """A versioned table's declared schema_version, if it is admitted."""
+    if path not in ADMITTED_TABLE_VERSIONS or path not in h5:
         return None
     version = h5[path].attrs.get("schema_version")
     require(
-        version is not None and int(version) == ADMITTED_CHASER_VERSION,
+        version is not None and int(version) in ADMITTED_TABLE_VERSIONS[path],
         f"unsupported_table_version:{path}",
     )
     return int(version)
@@ -138,7 +212,11 @@ def table_schema(path: str, version: int | None = None) -> dict:
     ):
         require(len(path.split("/")) == 4, f"unknown_table:{path}")
         template = "/correspondence/{component}/sources"
-    catalog = CORE_CATALOGS[version] if version is not None else CORE_CATALOG
+    catalog = (
+        TABLE_VERSION_CATALOGS[path][version]
+        if version is not None and path in TABLE_VERSION_CATALOGS
+        else CORE_CATALOG
+    )
     matches = [
         table
         for table in _contract(catalog)["tables"]

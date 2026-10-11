@@ -168,3 +168,31 @@ def test_grid_and_grating_rows_join_through_frame_sources(tmp_path, name):
         UnifiedH5ContractError, match=f"component_frame_source_unresolved:{name}"
     ):
         validate_component_correspondence(h5)
+
+
+def test_bounding_boxes_v1_resolves_through_the_admitted_core_catalog(tmp_path):
+    from fisheye.shared.unified_h5.schema import (
+        BOUNDING_BOXES,
+        CORE_CATALOG,
+        contract,
+        table_schema,
+        table_version,
+    )
+
+    path = _mutable_copy(tmp_path)
+    with h5py.File(path, "r") as h5:
+        assert table_version(h5, BOUNDING_BOXES) == 1
+    (expected,) = [t for t in contract(CORE_CATALOG)["tables"] if t["path"] == BOUNDING_BOXES]
+    assert table_schema(BOUNDING_BOXES, 1) == expected
+
+
+def test_an_unpinned_bounding_boxes_version_is_refused(tmp_path):
+    from fisheye.shared.unified_h5.schema import BOUNDING_BOXES, describe_table
+
+    path = _mutable_copy(tmp_path)
+    with h5py.File(path, "r+") as h5:
+        h5[BOUNDING_BOXES].attrs.modify("schema_version", np.uint64(3))
+    with h5py.File(path, "r") as h5, pytest.raises(
+        UnifiedH5ContractError, match="unsupported_table_version:/observations/bounding_boxes"
+    ):
+        describe_table(h5, BOUNDING_BOXES)
