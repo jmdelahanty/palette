@@ -1,6 +1,6 @@
 """Intake steps for ``workflows/intake.smk`` (runner design §6).
 
-``python -m fisheye.flow.intake <plan|import|register|status> --config RUNNER.json``
+``python -m fisheye.flow.intake <plan|import|register|status|pin-check|adopt-ledger> --config RUNNER.json``
 
 Every Palette fact comes from the ``python -m fisheye.intake`` CLI, run from
 a pinned deployment's ``scripts/py``: discovery and probes from the ws1 ops
@@ -186,7 +186,7 @@ def record_outcome(
 # plan: which deliveries this tick should drive.
 
 
-def plan(config: IntakeFlowConfig, *, runner: Exec = _exec) -> dict:
+def discover(config: IntakeFlowConfig, *, runner: Exec = _exec) -> dict:
     completed = runner(intake_cli(
         config.ops_deployment, "discover",
         "--staging-dir", str(config.staging_dir),
@@ -199,6 +199,21 @@ def plan(config: IntakeFlowConfig, *, runner: Exec = _exec) -> dict:
         raise RuntimeError(f"discover returned no JSON (exit {completed.returncode})") from exc
     if completed.returncode != EXIT_DONE:
         raise RuntimeError(f"discover failed (exit {completed.returncode}): {found.get('error')}")
+    return found
+
+
+def discover_targets(config: IntakeFlowConfig, *, runner: Exec = _exec) -> list[dict]:
+    """discover's targets, refusing when the registry could not be read."""
+
+    found = discover(config, runner=runner)
+    if found.get("registry_error"):
+        raise RuntimeError(f"registry unreadable, discover cannot drop retired deliveries: "
+                           f"{found['registry_error']}")
+    return list(found.get("targets", []))
+
+
+def plan(config: IntakeFlowConfig, *, runner: Exec = _exec) -> dict:
+    found = discover(config, runner=runner)
     drive, held, skipped = [], [], []
     for target in found.get("targets", []):
         sha = target["snapshot_sha"]
@@ -426,16 +441,7 @@ def _waiting_deliveries(config: IntakeFlowConfig, *, runner: Exec) -> dict[str, 
                 waiting[delivery.name] = json.loads(imported.read_text()).get("producer_git_sha")
             except ValueError:
                 waiting[delivery.name] = None
-    completed = runner(intake_cli(
-        config.ops_deployment, "discover",
-        "--staging-dir", str(config.staging_dir),
-        "--destination-root", str(config.destination_root),
-        "--registry", str(config.registry),
-    ))
-    found = json.loads(completed.stdout)
-    if found.get("registry_error"):
-        raise RuntimeError(f"registry unreadable, cannot tell what is waiting: {found['registry_error']}")
-    for target in found.get("targets", []):
+    for target in discover_targets(config, runner=runner):
         if target.get("import_recorded") and target.get("register_recorded") is not True:
             waiting.setdefault(target["snapshot_sha"], target.get("producer_git_sha"))
     return waiting
@@ -543,13 +549,34 @@ def _print_status(config: IntakeFlowConfig) -> None:
               f"register={row['register']:<8} {row['detail']}")
 
 
+def _adopt_ledger(config: IntakeFlowConfig, *, apply: bool, abandon: list[str]) -> int:
+    from fisheye.flow.adopt_ledger import AdoptRefused, adopt, parse_abandon
+
+    try:
+        report = adopt(config, apply=apply, abandon=parse_abandon(abandon))
+    except (AdoptRefused, RuntimeError) as exc:
+        print(f"adopt-ledger refused: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    out = config.flow_root / "adopt_ledger"
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"report-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{'apply' if apply else 'dry-run'}.json"
+    write_json_atomic(path, report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    print(f"report: {path}", file=sys.stderr)
+    return EXIT_DONE if report["apply_allowed"] else EXIT_REFUSED
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m fisheye.flow.intake")
-    parser.add_argument("command", choices=("plan", "import", "register", "status", "pin-check"))
+    parser.add_argument("command", choices=("plan", "import", "register", "status", "pin-check",
+                                            "adopt-ledger"))
     parser.add_argument("snapshot_sha", nargs="?")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--to-ops", type=Path, help="pin-check: target ws1 deployment")
     parser.add_argument("--to-lsf", type=Path, help="pin-check: target LSF deployment")
+    parser.add_argument("--apply", action="store_true", help="adopt-ledger: write runner state (default: dry run)")
+    parser.add_argument("--abandon", action="append", default=[], metavar="SHA:REASON",
+                        help="adopt-ledger: hold a delivery the operator abandoned (repeatable)")
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
@@ -568,6 +595,8 @@ def main(argv: list[str] | None = None) -> int:
         code, report = pin_check(config, args.to_ops, args.to_lsf)
         print(json.dumps(report, indent=2, sort_keys=True))
         return code
+    if args.command == "adopt-ledger":
+        return _adopt_ledger(config, apply=args.apply, abandon=args.abandon)
     if not args.snapshot_sha:
         parser.error(f"{args.command} needs a snapshot sha")
     step = import_step if args.command == "import" else register_step
