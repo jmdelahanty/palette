@@ -118,3 +118,25 @@ def test_changed_source_refuses_to_replace_immutable_current_ledger(tmp_path: Pa
 
     with pytest.raises(ValueError, match="different immutable canonical ledger"):
         write_acquisition_video_stream_inventory(root, recording_dir, manifest)
+
+
+def test_ledger_leaves_camera_time_to_the_frame_clock(tmp_path: Path) -> None:
+    recording_dir, manifest = _fixture(tmp_path)
+    root = zarr.open_group(str(tmp_path / "analysis.zarr"), mode="w", zarr_format=3)
+    write_acquisition_video_stream_inventory(
+        root, recording_dir, manifest, imported_at_utc="2026-08-15T12:00:00+00:00"
+    )
+    stream = root["analysis/acquisition_video_streams/streams/crop"]
+    run = stream[stream.attrs["canonical_ledger_path"]]
+
+    assert "source_timestamp_ns" not in run
+    assert "source_timestamp_sys_ns" not in run
+
+    # Ledgers published before the arrays were dropped still carry them; the
+    # record digest is unchanged, so they stay current and republish idempotently.
+    run.create_array("source_timestamp_ns", data=np.array([100, 110], dtype=np.int64))
+    again = write_acquisition_video_stream_inventory(
+        root, recording_dir, manifest, imported_at_utc="2026-08-15T13:00:00+00:00"
+    )
+    assert again["streams"]["crop"]["canonical_ledger"]["canonical_ledger_idempotent"] is True
+    assert validate_current_acquisition_crop_stream_ledger(root).row_count == 2

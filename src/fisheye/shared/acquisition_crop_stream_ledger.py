@@ -64,6 +64,9 @@ _CATEGORICAL_COLUMNS = (
     "detection_source",
     "selection_policy",
 )
+# Camera timestamps are deliberately absent: rows join the published
+# acquisition frame clock through source_recording_frame_ids. Ledgers published
+# before 2026-10-11 also carry source_timestamp_ns/_sys_ns; nothing reads them.
 _ARRAY_NAMES = (
     "source_crop_meta_row_indices",
     "source_recording_frame_ids",
@@ -72,8 +75,6 @@ _ARRAY_NAMES = (
     "source_session_crop_video_frame_indices",
     "source_crop_local_frame_ids",
     "source_camera_frame_ids",
-    "source_timestamp_ns",
-    "source_timestamp_sys_ns",
     "has_detection",
     "blank_frame",
     "source_crop_xywh",
@@ -263,8 +264,6 @@ def _parse_crop_metadata(
         "source_session_crop_video_frame_indices": [],
         "source_crop_local_frame_ids": [],
         "source_camera_frame_ids": [],
-        "source_timestamp_ns": [],
-        "source_timestamp_sys_ns": [],
         "has_detection": [],
         "blank_frame": [],
         "source_crop_xywh": [],
@@ -401,22 +400,6 @@ def _parse_crop_metadata(
                     default=-1,
                 )
             )
-            columns["source_timestamp_ns"].append(
-                _optional_int(
-                    row.get("timestamp"),
-                    column="timestamp",
-                    row_number=row_number,
-                    default=-1,
-                )
-            )
-            columns["source_timestamp_sys_ns"].append(
-                _optional_int(
-                    row.get("timestamp_sys"),
-                    column="timestamp_sys",
-                    row_number=row_number,
-                    default=-1,
-                )
-            )
             columns["has_detection"].append(has_detection)
             columns["blank_frame"].append(blank_frame)
             columns["source_crop_xywh"].append(crop_xywh)
@@ -454,12 +437,6 @@ def _parse_crop_metadata(
         ),
         "source_camera_frame_ids": np.asarray(
             columns["source_camera_frame_ids"], dtype=np.int64
-        ),
-        "source_timestamp_ns": np.asarray(
-            columns["source_timestamp_ns"], dtype=np.int64
-        ),
-        "source_timestamp_sys_ns": np.asarray(
-            columns["source_timestamp_sys_ns"], dtype=np.int64
         ),
         "has_detection": np.asarray(columns["has_detection"], dtype=bool),
         "blank_frame": np.asarray(columns["blank_frame"], dtype=bool),
