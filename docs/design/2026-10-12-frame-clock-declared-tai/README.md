@@ -128,7 +128,7 @@ v1 inferred TAI, null otherwise.
   "reason": null,
   "classification": "ieee1588_tai",
   "timescale": "TAI",
-  "origin": "1970-01-01T00:00:00 TAI",  // verbatim, with a space
+  "origin": "1970-01-01T00:00:00 TAI",
   "semantic_authority": "host_ptp_management_dataset_plus_camera_lock_evidence",
   "rule_id": "orange_camera_clock_classification_v3",
   "result": "direct_ptp_time_properties_pass",
@@ -137,7 +137,7 @@ v1 inferred TAI, null otherwise.
   "time_properties": {"currentUtcOffset": 37, "currentUtcOffsetValid": true, "ptpTimescale": true},
   "host_evidence_captured_at_utc": "...",
   "pmc_exit_status": 0,
-  "recording_started_at_utc": "... (recording.started_at_utc)",
+  "recording_started_at_utc": "<recording.started_at_utc>",
   "manifest_sha256": "sha256 of recording_session.json"
 },
 "palette_cross_check": {"measured_median_delta_ns": 0, "agrees": true}
