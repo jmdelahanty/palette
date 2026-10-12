@@ -1,11 +1,12 @@
 # Frame clock v2: read Orange's declared camera timescale
 
-Status: **proposal**. The scope comes from agent-contracts
+Status: **accepted and implemented** (2026-10-12). Jeremy confirmed the scope
+and both open questions directly to Palette: Q1 yes (a contradiction refuses
+publication), Q2 yes (`pmc_exit_status` must be 0). The scope is agent-contracts
 `orange-palette/camera_exposure_host_clock_v1_2026-10-12.md` (main `bde1d4f`,
-status approved), as relayed by Orange. Jeremy still has to confirm it to
-Palette directly before implementation. Owner: Palette intake (Palette H5
-import readiness). Classification: scientific/identity semantics change to
-the single frame-clock authority, so it gets a new record version.
+status approved). Owner: Palette intake (Palette H5 import readiness).
+Classification: a scientific/identity semantics change to the single
+frame-clock authority, so it gets a new record version.
 
 ## 1. What changes, and what does not
 
@@ -89,7 +90,7 @@ when `inference.result` is anything else (`fallback_inference_pass`,
 
 **Cross-check, declared case:** Palette still measures the median
 camera−system delta. It must lie within tolerance (1 s, as v1) of the
-declared offset plus the receive delay. A contradiction **refuses**
+declared offset; the ~9 ms receive delay is well inside that. A contradiction **refuses**
 publication (open question Q1).
 
 **Freshness (Orange's correction):** `captured_at_utc` can be hours or days
@@ -155,13 +156,32 @@ Without a usable declaration: `present`/`used`, plus `reason`
 - The 256 published v1 archives are never republished by this change.
   Republishing them as v2 would need its own decision.
 
-## 7. Open questions for Jeremy
+## 7. Decisions (Jeremy, 2026-10-12)
 
-- **Q1.** If Orange declares TAI but Palette's measured camera−system delta
-  disagrees, should Palette refuse (proposed, fail closed) or publish as
-  inferred with the disagreement recorded?
-- **Q2.** Should `orange_declaration.used` require `pmc_exit_status == 0`?
-  Proposed: yes.
+- **Q1: refuse.** If Orange declares TAI but Palette's measured
+  camera−system delta does not lie within 1 s of the declared offset,
+  `AcquisitionFrameClockError` refuses publication. A missing measurement
+  (no shared valid timestamps) also refuses.
+- **Q2: required.** A declaration counts only with `pmc_exit_status == 0`
+  and `host_ptp_management_evidence.available is true`.
+
+## 7a. Implementation notes
+
+- `AcquisitionFrameClockSource.orange_clock_declaration` is read at source
+  load and is never used by v1 rules.
+- `_build_record(source, schema_version)` chooses the rules.
+- `acquisition_frame_clock_source_sha256(source, schema_version=...)` is
+  called by the identity authority with the published record's version, so
+  v1 archives are rebuilt with v1 rules.
+- Publication stays idempotent: if the selected clock is an older version
+  and this source still rebuilds it exactly, it remains selected and no v2
+  run is written on replay.
+- Consumers accept either version: `provider_track_motion_source_handle`
+  uses `is_supported_acquisition_frame_clock_schema`, and
+  `provider_recording_timing_authority` stamps the record's own `schema_id`.
+- The `validated_behavior` export projection contract keeps its v1
+  `source_schema_id` label for now. v2 keeps every v1 evidence key, and the
+  PTP clock domain the export reads.
 
 ## 8. Tests (before code)
 
