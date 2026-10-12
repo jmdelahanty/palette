@@ -53,7 +53,6 @@ from fisheye.analysis.chaser_distance_io import (
     load_chaser_distance_run,
 )
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
-from fisheye.shared.heading_convention import image_angle_degrees, wrap_delta_degrees
 
 EPOCHS = ("pre", "chase", "post")
 VIRTUAL_ROT_DEG = (60.0, 120.0, 180.0, 240.0, 300.0)
@@ -68,14 +67,6 @@ VIRTUAL_C = "#8a8a8a"
 FRONT_C = "#3a7ca5"
 BEHIND_C = "#8a8a8a"
 EPOCH_C = {"pre": "#8a8a8a", "chase": "#c1435b", "post": "#1b3a6b"}
-
-
-def bearing_of(obj_xy, fish_xy, heading_deg):
-    dx = obj_xy[:, 0] - fish_xy[:, 0]
-    dy = obj_xy[:, 1] - fish_xy[:, 1]
-    precision = np.result_type(dx, dy)
-    relative = image_angle_degrees(dx, dy, dtype=precision) - heading_deg
-    return wrap_delta_degrees(relative, dtype=np.result_type(relative))
 
 
 def rotate_about(pt_xy, cx, cy, deg):
