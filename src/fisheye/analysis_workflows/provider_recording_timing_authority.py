@@ -19,7 +19,6 @@ from typing import Any, Mapping
 import numpy as np
 
 from fisheye.shared.acquisition_frame_clock import (
-    ACQUISITION_FRAME_CLOCK_SCHEMA_ID,
     AcquisitionFrameClockError,
     require_nominal_frame_timing,
     resolve_acquisition_frame_clock,
@@ -299,7 +298,7 @@ def _load_once(
         "nominal_fps": nominal_fps,
         "frame_count": frame_count,
         "acquisition_frame_clock": {
-            "schema_id": ACQUISITION_FRAME_CLOCK_SCHEMA_ID,
+            "schema_id": clock.record["schema_id"],
             "run_path": clock.group_path,
             "record_sha256": clock.record_sha256,
             "array_sha256": array_sha256,

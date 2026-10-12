@@ -44932,7 +44932,7 @@
       "enclosing_symbol": "fisheye.shared.acquisition_frame_clock:_publish_acquisition_frame_clock_locked",
       "file": "src/fisheye/shared/acquisition_frame_clock.py",
       "filters_expression": null,
-      "line": 1320,
+      "line": 1593,
       "parent_path_pattern": "<_owned_clock_run(root, run_name, owner)>",
       "path_pattern": "<_owned_clock_run(root, run_name, owner)>/<name>",
       "receiver_expression": null,
@@ -44940,7 +44940,7 @@
       "shape_expression": "shape(getattr(source, name))",
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-f2ed6e4d28b34c6d",
+      "site_id": "writer-8db6c0fe3f717937",
       "status": "current",
       "status_basis": "packaged Palette module without a maintenance marker",
       "surface_class": "production",
@@ -70419,7 +70419,7 @@
     "writer_wrapper_call_site_count": 998
   },
   "wrapper_analysis": {
-    "function_definition_count": 10658,
+    "function_definition_count": 10664,
     "writer_function_count": 247,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",
