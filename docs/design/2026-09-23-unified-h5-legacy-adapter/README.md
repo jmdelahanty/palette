@@ -343,8 +343,15 @@ Totals: 41 EXACT, 8 EXACT-narrow, 7 DERIVED. The collapse is lossy for `target_s
   recording_frame_id - 1`), which the canonical coordinate path already uses.
   Cross-cohort comparability with legacy-aligned results is not worth
   inheriting a known one-frame error. New recordings are the priority; legacy
-  re-alignment is optional. Event and step frames read through
-  `fisheye.shared.citrus_camera_frame_id`. Display time (when a state was
+  re-alignment is optional. Legacy event and step frames read through
+  `fisheye.shared.citrus_camera_frame_id`. **Unified recordings must not use
+  that rule (measured 2026-10-12).** There the trigger columns are Citrus's IPC
+  frame counter, documented as "not authoritative Orange acquisition
+  correspondence". On the twelve 2026-10-09 snow sessions it runs ahead of
+  `recording_frame_id` by a constant per session (117,216, 599,708 and
+  1,221,206 frames). The adapter maps event and step frames through
+  `/correspondence/frames/sources` by `stimulus_frame_num`, never by trigger
+  id. Display time (when a state was
   handed to the projector) is a separate column from this causal mapping; see
   Citrus `/timing/display_submissions/frame_submissions`.
 - **D13. Capacity: one dataset per table, streamed (decided 2026-09-23).**

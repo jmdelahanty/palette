@@ -9,6 +9,7 @@ from fisheye.analysis.stimulus_display_candidates import (
     cadence_ok_mask,
     clock_trusted_mask,
     display_candidates,
+    driven_states,
     orange_exposure_clock,
     ptp_camera_evidence,
 )
@@ -107,6 +108,34 @@ def test_candidate_range_spans_the_full_visibility_window() -> None:
     # 1_020 ms - 16.7 ms = 1_003.3 ms: the latest swap by then is state 10 (1_000 ms).
     np.testing.assert_array_equal(first, [NO_STATE, NO_STATE, 10, 10, NO_STATE, NO_STATE])
     assert age[2] == 1 * MS
+
+
+def test_driven_states_follow_citrus_correspondence_ids() -> None:
+    # Clock frames 1..6. Citrus held frame 2 for two states, skipped frame 4,
+    # and had no source frame for its first state.
+    first, last = driven_states(
+        np.arange(1, 7),
+        source_recording_frame_id=np.array([0, 2, 2, 3, 5, 6]),
+        source_recording_frame_valid=np.array([0, 1, 1, 1, 1, 1]),
+        stimulus_frame_num=np.arange(10, 16),
+    )
+    assert first.tolist() == [NO_STATE, 11, 13, NO_STATE, 14, 15]
+    assert last.tolist() == [NO_STATE, 12, 13, NO_STATE, 14, 15]
+
+
+def test_driven_states_refuse_ids_outside_the_clock_or_out_of_order() -> None:
+    kwargs = dict(source_recording_frame_valid=np.ones(2, dtype=bool), stimulus_frame_num=np.array([0, 1]))
+    with pytest.raises(StimulusDisplayCandidateError, match="not in the frame clock"):
+        driven_states(np.arange(1, 4), source_recording_frame_id=np.array([3, 4]), **kwargs)
+    with pytest.raises(StimulusDisplayCandidateError, match="must not decrease"):
+        driven_states(np.arange(1, 4), source_recording_frame_id=np.array([3, 2]), **kwargs)
+    first, last = driven_states(
+        np.arange(1, 4),
+        source_recording_frame_id=np.array([0, 0]),
+        source_recording_frame_valid=np.zeros(2, dtype=bool),
+        stimulus_frame_num=np.array([0, 1]),
+    )
+    assert first.tolist() == last.tolist() == [NO_STATE] * 3
 
 
 def test_publication_holds_the_archive_lock(tmp_path, monkeypatch) -> None:

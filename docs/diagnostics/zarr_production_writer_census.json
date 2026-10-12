@@ -23260,7 +23260,7 @@
       "enclosing_symbol": "fisheye.analysis.stimulus_display_candidates:_publish_locked",
       "file": "src/fisheye/analysis/stimulus_display_candidates.py",
       "filters_expression": null,
-      "line": 444,
+      "line": 514,
       "parent_path_pattern": "<require_runs_parent(root.require_group('analysis'), PARENT_NAME)>/<run_name>",
       "path_pattern": "<require_runs_parent(root.require_group('analysis'), PARENT_NAME)>/<run_name>/<name>",
       "receiver_expression": "run",
@@ -23268,7 +23268,7 @@
       "shape_expression": "shape(getattr(result, name))",
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-9397e8c2c42778af",
+      "site_id": "writer-d07e52cc6df8e921",
       "status": "current",
       "status_basis": "packaged Palette module without a maintenance marker",
       "surface_class": "production",
@@ -70419,7 +70419,7 @@
     "writer_wrapper_call_site_count": 998
   },
   "wrapper_analysis": {
-    "function_definition_count": 10657,
+    "function_definition_count": 10658,
     "writer_function_count": 247,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",
