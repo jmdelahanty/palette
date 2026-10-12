@@ -19,8 +19,13 @@ could have been visible while the frame was exposed:
   and the per-state swap table reference; consumers that assume a latency
   shift both bounds earlier by it.
 
-This is the display ("what was on screen") alignment. The causal mapping
-("which camera frame drove this state") is the separate correspondence map.
+This is the display ("what was on screen") alignment. The run also carries
+the causal ("driving frame") alignment: the states Citrus computed from each
+camera frame, read from Citrus's ``/correspondence/frames/sources``. That table
+names Orange's 1-based ``recording_frame_id`` for every state. The
+``triggering_camera_frame_id`` column is not used: in unified recordings it is
+Citrus's IPC frame counter, which runs ahead of ``recording_frame_id`` by a
+per-session offset.
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ from fisheye.shared.run_lineage_fingerprint import (
 )
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.unified_h5 import PROFILE as UNIFIED_PROFILE
+from fisheye.shared.unified_h5.correspondence import FRAME_SOURCES
 from fisheye.shared.unified_h5.display_submissions import load_stimulus_display_submissions
 from fisheye.shared.unified_h5.reference import UnifiedSource, open_unified_source
 from fisheye.shared.zarr_helpers import (
@@ -62,8 +68,9 @@ from fisheye.shared.zarr_run_completion import (
 
 PARENT_NAME = "stimulus_display_candidate_runs"
 SCHEMA_ID = "palette.stimulus_display_candidates"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 METHOD = "latest_submitted_within_full_visibility_window_v1"
+DRIVING_METHOD = "citrus_correspondence_source_recording_frame_id_v1"
 NO_STATE = -1
 
 # agent-contracts orange-palette/camera_exposure_host_clock_v1 (PR #78).
@@ -248,6 +255,47 @@ def display_candidates(
     return first_state.astype(np.int64), last_state.astype(np.int64), age.astype(np.int64)
 
 
+def driven_states(
+    recording_frame_id: np.ndarray,
+    *,
+    source_recording_frame_id: np.ndarray,
+    source_recording_frame_valid: np.ndarray,
+    stimulus_frame_num: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """First/last stimulus state computed from each camera frame.
+
+    Citrus repeats the last received camera frame id until a new one arrives,
+    so the states sharing an id form one contiguous run. ``NO_STATE`` means no
+    state was computed from that frame (Citrus skipped it, or it fell outside
+    the session).
+    """
+
+    frames = np.asarray(recording_frame_id, dtype=np.int64)
+    states = np.asarray(stimulus_frame_num, dtype=np.int64)
+    valid = np.asarray(source_recording_frame_valid, dtype=bool)
+    sources = np.asarray(source_recording_frame_id, dtype=np.int64)
+    if states.size and np.any(np.diff(states) <= 0):
+        _fail("Stimulus frame numbers must increase.")
+    sources, states = sources[valid], states[valid]
+    if sources.size and np.any(np.diff(sources) < 0):
+        _fail("Citrus source recording frame ids must not decrease.")
+    if frames.size and np.any(np.diff(frames) <= 0):
+        _fail("Clock recording frame ids must increase.")
+    position = np.searchsorted(frames, sources)
+    inside = position < frames.size
+    if not np.all(inside) or not np.array_equal(frames[position], sources):
+        _fail("Citrus names recording frame ids that are not in the frame clock.")
+    if not sources.size:
+        empty = np.full(frames.size, NO_STATE, dtype=np.int64)
+        return empty, empty.copy()
+    left = np.searchsorted(sources, frames, side="left")
+    right = np.searchsorted(sources, frames, side="right")
+    drove = right > left
+    first = np.where(drove, states[np.minimum(left, states.size - 1)], NO_STATE)
+    last = np.where(drove, states[np.maximum(right - 1, 0)], NO_STATE)
+    return first.astype(np.int64), last.astype(np.int64)
+
+
 # --------------------------------------------------------------------------
 # Archive-level build and publication
 # --------------------------------------------------------------------------
@@ -263,6 +311,8 @@ class StimulusDisplayCandidates:
     first_candidate_stimulus_frame_num: np.ndarray
     last_candidate_stimulus_frame_num: np.ndarray
     last_candidate_swap_age_ns: np.ndarray
+    first_driven_stimulus_frame_num: np.ndarray
+    last_driven_stimulus_frame_num: np.ndarray
     record: dict[str, Any] = field(default_factory=dict)
 
 
@@ -347,6 +397,15 @@ def build_stimulus_display_candidates(
         display_end_ns=int(submissions.last_swap_end_ns_epoch[submitted].max()),
     )
 
+    frame_sources = source.read_table(FRAME_SOURCES)
+    driven_first, driven_last = driven_states(
+        clock.recording_frame_id,
+        source_recording_frame_id=frame_sources["source_recording_frame_id"],
+        source_recording_frame_valid=frame_sources["source_recording_frame_valid"],
+        stimulus_frame_num=frame_sources["stimulus_frame_num"],
+    )
+    source_valid = np.asarray(frame_sources["source_recording_frame_valid"], dtype=bool)
+
     record = {
         "schema_id": SCHEMA_ID,
         "schema_version": SCHEMA_VERSION,
@@ -369,6 +428,12 @@ def build_stimulus_display_candidates(
             },
         },
         "ptp": ptp_evidence,
+        "driving": {
+            "method": DRIVING_METHOD,
+            "source_table": FRAME_SOURCES,
+            "states": int(source_valid.size),
+            "states_without_source_frame": int(np.count_nonzero(~source_valid)),
+        },
         "display": {
             "timing_semantics": submissions.timing_semantics,
             "display_refresh_rate_reported_hz": refresh_hz,
@@ -393,6 +458,7 @@ def build_stimulus_display_candidates(
             "clock_untrusted_frames": int(np.count_nonzero(~trusted)),
             "cadence_flagged_frames": int(np.count_nonzero(camera_valid & ~cadence)),
             "frames_with_candidates": int(np.count_nonzero(last != NO_STATE)),
+            "frames_driving_states": int(np.count_nonzero(driven_last != NO_STATE)),
         },
     }
     return StimulusDisplayCandidates(
@@ -404,6 +470,8 @@ def build_stimulus_display_candidates(
         first_candidate_stimulus_frame_num=first,
         last_candidate_stimulus_frame_num=last,
         last_candidate_swap_age_ns=age,
+        first_driven_stimulus_frame_num=driven_first,
+        last_driven_stimulus_frame_num=driven_last,
         record=record,
     )
 
@@ -417,6 +485,8 @@ ARRAYS = (
     "first_candidate_stimulus_frame_num",
     "last_candidate_stimulus_frame_num",
     "last_candidate_swap_age_ns",
+    "first_driven_stimulus_frame_num",
+    "last_driven_stimulus_frame_num",
 )
 
 
@@ -450,7 +520,7 @@ def _publish_locked(archive: Path, result: StimulusDisplayCandidates, *, run_nam
             "stimulus_run": record["stimulus_run"],
             "unified_reference_sha256": record["unified_reference_sha256"],
         }
-        parameters = {"method": METHOD, "thresholds_ns": record["thresholds_ns"], "display": record["display"]}
+        parameters = {"method": METHOD, "driving_method": DRIVING_METHOD, "thresholds_ns": record["thresholds_ns"], "display": record["display"]}
         write_run_lineage_attrs(
             run,
             build_run_lineage_payload(

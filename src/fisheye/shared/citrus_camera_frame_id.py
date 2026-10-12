@@ -6,6 +6,10 @@ Measured on 2026-10-11 across every legacy recording with bounding-box payloads,
 that id equals the 1-based ``recording_frame_id``; 0 means no frame was known.
 Palette frame axes are 0-based ``parent_frame_index``, so readers convert with
 ``id - 1`` here instead of indexing by the raw id (which lands one frame late).
+
+Legacy H5s only. In unified (v2) H5s the trigger columns are Citrus's IPC frame
+counter, which is offset from ``recording_frame_id`` per session; use
+``/correspondence/frames/sources`` there instead.
 """
 
 from __future__ import annotations
