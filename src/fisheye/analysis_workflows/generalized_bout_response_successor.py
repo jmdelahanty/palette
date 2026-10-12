@@ -36,6 +36,7 @@ from fisheye.analysis_workflows.core_paradigm_authority import (
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.heading_convention import wrap_delta_degrees
 
 SCHEMA_ID = "palette.analysis.generalized_chaser_bout_response"
 SCHEMA_VERSION = 1
@@ -123,10 +124,6 @@ def _freeze(value: Any) -> Any:
     if isinstance(value, list):
         return tuple(_freeze(item) for item in value)
     return value
-
-
-def _wrap_deg(value: np.ndarray) -> np.ndarray:
-    return (np.asarray(value, dtype=np.float64) + 180.0) % 360.0 - 180.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -717,7 +714,7 @@ def prepare_generalized_bout_response_successor(
         heading_valid[start_row[frame_available]]
         & heading_valid[end_row[frame_available]]
     )
-    turn[turn_valid] = _wrap_deg(
+    turn[turn_valid] = wrap_delta_degrees(
         heading[end_row[turn_valid]] - heading[start_row[turn_valid]]
     )
     pair_turn = np.repeat(turn, n_chasers)

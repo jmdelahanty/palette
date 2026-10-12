@@ -13,8 +13,14 @@ from fisheye.shared.heading_convention import (
     ANGLE_CONVENTION,
     HANDEDNESS,
     heading_degrees,
+    CHASER_CENTRED_BEARING,
+    MEGABOUTS_HEAD_YAW,
+    chaser_centred_bearing_degrees,
+    image_angle_degrees,
     left_axis,
+    megabouts_head_yaw_radians,
     wrap_delta_degrees,
+    wrap_delta_radians,
 )
 
 CONTRACTS = resource_files("fisheye.shared").joinpath("contracts")
@@ -57,3 +63,30 @@ def test_both_ends_of_the_range_are_one_heading():
     assert heading_degrees(-10.0, 0.0) == -180.0  # IEEE atan2(-0.0, negative)
     assert wrap_delta_degrees(180.0 - -180.0) == 0.0
     assert wrap_delta_degrees(179.0 - -179.0) == -2.0
+
+
+def test_radian_wrap_matches_the_degree_wrap():
+    assert wrap_delta_radians(np.pi) == -np.pi
+    assert wrap_delta_radians(-np.pi) == -np.pi
+    assert wrap_delta_radians(2.0 * np.pi) == 0.0
+    assert np.isnan(wrap_delta_radians(np.nan))
+
+
+def test_dtype_selects_the_arithmetic_precision():
+    forward = np.asarray([[0.3, -0.7]], dtype=np.float32)
+    native = np.rad2deg(np.arctan2(-forward[:, 1], forward[:, 0]))
+    shared = heading_degrees(forward[:, 0], forward[:, 1], dtype=np.float32)
+    assert shared.dtype == np.float32 and shared.tobytes() == native.tobytes()
+    assert heading_degrees(forward[:, 0], forward[:, 1]).dtype == np.float64
+    assert wrap_delta_degrees(np.float32(190.0), dtype=np.float32).dtype == np.float32
+    assert image_angle_degrees is heading_degrees
+
+
+def test_named_foreign_conventions():
+    assert MEGABOUTS_HEAD_YAW != CHASER_CENTRED_BEARING
+    # tail base straight below the head in the image (y down): the
+    # tail-base -> head vector points up, atan2(-1, 0) without a y flip.
+    assert megabouts_head_yaw_radians(0.0, 1.0) == -np.pi / 2
+    # straight ahead of the chaser, then to its right (clockwise positive).
+    assert chaser_centred_bearing_degrees(0.0, 5.0) == 0.0
+    assert chaser_centred_bearing_degrees(5.0, 0.0) == 90.0
