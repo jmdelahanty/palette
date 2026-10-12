@@ -929,7 +929,14 @@ def _verify_current_import_surfaces(
     if source is not None:
         # Reuse the clock owner's existing persisted grammar, including source
         # stat evidence and array digests. Never reconstruct a competing digest.
-        expected_clock = clock_contract.acquisition_frame_clock_source_sha256(source)
+        # Rebuild with the published record's own version (v1 rules for v1).
+        expected_clock = (
+            clock_contract.acquisition_frame_clock_source_sha256(
+                source, schema_version=int(clock.record["schema_version"])
+            )
+            if clock is not None
+            else None
+        )
         if clock is None or clock.record_sha256 != expected_clock:
             raise RecordingIdentityAuthorityError(
                 "published clock differs from its current source"

@@ -52,8 +52,31 @@ from fisheye.shared.zarr_run_completion import (
 )
 
 
-ACQUISITION_FRAME_CLOCK_SCHEMA_ID = "palette.acquisition_frame_clock.v1"
-ACQUISITION_FRAME_CLOCK_SCHEMA_VERSION = 1
+# v1: Palette infers the camera timescale. v2 (2026-10-12, agent-contracts
+# orange-palette/camera_exposure_host_clock_v1): Palette reads Orange's
+# declared TAI classification and TAI-UTC offset when Orange read them directly
+# from the PTP grandmaster, and records who decided. New publications are v2;
+# v1 records stay valid and are rebuilt with v1 rules (their digests are
+# recomputed from source on every live re-verification).
+ACQUISITION_FRAME_CLOCK_SCHEMA_IDS = {
+    1: "palette.acquisition_frame_clock.v1",
+    2: "palette.acquisition_frame_clock.v2",
+}
+ACQUISITION_FRAME_CLOCK_SCHEMA_VERSION = 2
+ACQUISITION_FRAME_CLOCK_SCHEMA_ID = ACQUISITION_FRAME_CLOCK_SCHEMA_IDS[
+    ACQUISITION_FRAME_CLOCK_SCHEMA_VERSION
+]
+ORANGE_DIRECT_PTP_RESULT = "direct_ptp_time_properties_pass"
+_CAMERA_SEMANTIC_AUTHORITIES = ("orange_declared", "palette_inferred")
+
+
+def is_supported_acquisition_frame_clock_schema(schema_id: Any, schema_version: Any) -> bool:
+    """True for a (schema_id, schema_version) pair this code reads."""
+
+    return (
+        type(schema_version) is int
+        and ACQUISITION_FRAME_CLOCK_SCHEMA_IDS.get(schema_version) == schema_id
+    )
 ACQUISITION_FRAME_CLOCK_RUNS_PATH = "analysis/acquisition_frame_clock_runs"
 ACQUISITION_FRAME_CLOCK_RECORD_ATTR = "acquisition_frame_clock_record"
 ACQUISITION_FRAME_CLOCK_SHA256_ATTR = "acquisition_frame_clock_sha256"
@@ -94,6 +117,10 @@ class AcquisitionFrameClockSource:
     system_timestamp_valid: np.ndarray
     clock_surfaces: Mapping[str, Mapping[str, Any]]
     clock_semantic_evidence: Mapping[str, Any]
+    # Orange's camera clock declaration as read from recording_session.json
+    # (see _orange_clock_declaration); None when the source was rebuilt from a
+    # published record. v1 records never read it.
+    orange_clock_declaration: Mapping[str, Any] | None = None
 
     @property
     def row_count(self) -> int:
@@ -257,6 +284,210 @@ def _valid_clock_delta_summary(
     }
 
 
+def _ptp_tai_camera_semantics(semantic_status: str) -> dict[str, Any]:
+    return {
+        "source_field": "timestamp",
+        "source_api": "Emergent::CEmergentFrame.timestamp",
+        "producer": "camera_firmware_via_emergent_esdk",
+        "orange_transformation": "none",
+        "clock_role": "camera_embedded_frame_time",
+        "clock_domain": "camera_hardware_ptp_clock",
+        "unit": "nanosecond",
+        "time_reference_kind": "absolute_epoch",
+        "origin": "1970-01-01T00:00:00_TAI",
+        "timescale": "IEEE-1588_PTP_TAI",
+        "semantic_status": semantic_status,
+        "validity_array": "camera_timestamp_valid",
+    }
+
+
+def _orange_session_manifest_path(recording_dir: Path) -> Path | None:
+    for candidate in (
+        recording_dir / "raw" / "acquisition" / "recording_session.json",
+        recording_dir / "recording_session.json",
+    ):
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def _orange_clock_declaration(recording_dir: Path, camera_id: str) -> dict[str, Any]:
+    """Orange's declared camera clock block, verbatim, plus where it came from.
+
+    Never raises: a missing or unreadable manifest is ``present: False`` and
+    the v2 record then falls back to Palette's inference.
+    """
+
+    path = _orange_session_manifest_path(recording_dir)
+    if path is None:
+        return {"present": False, "reason": "no_recording_session_json"}
+    data = path.read_bytes()
+    manifest_evidence = {
+        "locator": _recording_relative_locator(recording_dir, path),
+        "size_bytes": len(data),
+        "sha256": sha256(data).hexdigest(),
+    }
+    try:
+        manifest = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return {"present": False, "reason": "unreadable_recording_session_json",
+                "manifest": manifest_evidence}
+    contract = manifest.get("timestamp_clock_contract") if isinstance(manifest, Mapping) else None
+    clocks = contract.get("clocks") if isinstance(contract, Mapping) else None
+    key = f"camera_{str(camera_id).removeprefix('Cam')}"
+    block = clocks.get(key) if isinstance(clocks, Mapping) else None
+    if not isinstance(block, Mapping):
+        return {"present": False, "reason": f"no_clock_declaration:{key}",
+                "manifest": manifest_evidence}
+    recording = manifest.get("recording") if isinstance(manifest.get("recording"), Mapping) else {}
+    started = recording.get("started_at_utc")
+    return {
+        "present": True,
+        "clock_key": key,
+        "block": copy.deepcopy(dict(block)),
+        "recording_started_at_utc": started if isinstance(started, str) else None,
+        "manifest": manifest_evidence,
+    }
+
+
+def _declaration_refusal(block: Mapping[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    """(reason Orange's declaration cannot be used or None, the fields read)."""
+
+    inference = block.get("inference") if isinstance(block.get("inference"), Mapping) else {}
+    snapshot = (
+        block.get("evidence_snapshot") if isinstance(block.get("evidence_snapshot"), Mapping) else {}
+    )
+    host = (
+        snapshot.get("host_ptp_management_evidence")
+        if isinstance(snapshot.get("host_ptp_management_evidence"), Mapping)
+        else {}
+    )
+    properties = (
+        host.get("time_properties") if isinstance(host.get("time_properties"), Mapping) else {}
+    )
+    checks = inference.get("checks")
+    offset = inference.get("expected_tai_minus_utc_seconds")
+    fields = {
+        "classification": block.get("classification"),
+        "timescale": block.get("timescale"),
+        "origin": block.get("origin"),
+        "semantic_authority": block.get("semantic_authority"),
+        "rule_id": inference.get("rule_id"),
+        "result": inference.get("result"),
+        "expected_tai_minus_utc_seconds": offset,
+        "checks": copy.deepcopy(dict(checks)) if isinstance(checks, Mapping) else None,
+        "time_properties": {
+            name: properties.get(name)
+            for name in ("currentUtcOffset", "currentUtcOffsetValid", "ptpTimescale")
+        },
+        "host_evidence_available": host.get("available"),
+        "host_evidence_captured_at_utc": host.get("captured_at_utc"),
+        "pmc_exit_status": host.get("pmc_exit_status"),
+    }
+    if fields["classification"] != "ieee1588_tai":
+        return f"classification:{fields['classification']!r}", fields
+    if fields["timescale"] != "TAI":
+        return f"timescale:{fields['timescale']!r}", fields
+    if fields["result"] != ORANGE_DIRECT_PTP_RESULT:
+        return f"result:{fields['result']!r}", fields
+    if not isinstance(checks, Mapping) or not checks:
+        return "checks_missing", fields
+    for name, value in checks.items():
+        if value is not True:
+            return f"check_false:{name}", fields
+    if type(offset) is not int:
+        return "offset_not_integer", fields
+    if fields["host_evidence_available"] is not True:
+        return "host_evidence_unavailable", fields
+    if type(fields["pmc_exit_status"]) is not int or fields["pmc_exit_status"] != 0:
+        return f"pmc_exit_status:{fields['pmc_exit_status']!r}", fields
+    current = properties.get("currentUtcOffset")
+    if type(current) is not int or current != offset:
+        return f"current_utc_offset:{current!r}", fields
+    if properties.get("currentUtcOffsetValid") is not True:
+        return "current_utc_offset_not_valid", fields
+    if properties.get("ptpTimescale") is not True:
+        return "ptp_timescale_not_true", fields
+    return None, fields
+
+
+def _v2_clock_semantics(
+    source: "AcquisitionFrameClockSource",
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """v2 surfaces: Orange's direct declaration when usable, else v1 inference.
+
+    A usable declaration that Palette's own camera-system delta contradicts
+    refuses the publication (fail closed) instead of being downgraded.
+    """
+
+    v1_surfaces = json_attr_safe_mapping(source.clock_surfaces)
+    v1_evidence = json_attr_safe_mapping(source.clock_semantic_evidence)
+    v1_camera = dict(v1_surfaces["camera_timestamp_ns"])
+    declaration = source.orange_clock_declaration
+    if declaration is None:
+        raise AcquisitionFrameClockError(
+            "A v2 frame-clock record needs the source's Orange clock declaration."
+        )
+    record: dict[str, Any] = {
+        "present": bool(declaration.get("present")),
+        "used": False,
+        "reason": declaration.get("reason"),
+        "manifest": declaration.get("manifest"),
+        "clock_key": declaration.get("clock_key"),
+        "recording_started_at_utc": declaration.get("recording_started_at_utc"),
+    }
+    cross_check = None
+    if declaration.get("present"):
+        reason, fields = _declaration_refusal(declaration["block"])
+        record.update(fields)
+        record["reason"] = reason
+        if reason is None:
+            offset_ns = int(fields["expected_tai_minus_utc_seconds"]) * 1_000_000_000
+            delta = _valid_clock_delta_summary(
+                source.camera_timestamp_ns,
+                source.camera_timestamp_valid,
+                source.system_timestamp_ns,
+                source.system_timestamp_valid,
+            )
+            agrees = bool(
+                delta is not None
+                and abs(int(delta["median_ns"]) - offset_ns) < 1_000_000_000
+                and int(delta["maximum_ns"]) - int(delta["minimum_ns"]) < 1_000_000_000
+            )
+            cross_check = {
+                "measured_camera_system_delta_ns": delta,
+                "declared_tai_minus_utc_ns": offset_ns,
+                "tolerance_ns": 1_000_000_000,
+                "agrees": agrees,
+            }
+            if not agrees:
+                raise AcquisitionFrameClockError(
+                    "Orange declares camera timestamps as TAI with TAI-UTC "
+                    f"{fields['expected_tai_minus_utc_seconds']} s, but the measured "
+                    f"camera-system delta {delta} contradicts it."
+                )
+            record["used"] = True
+    if record["used"]:
+        camera = _ptp_tai_camera_semantics("producer_declared_by_orange_ptp_time_properties")
+        camera["semantic_authority"] = "orange_declared"
+        camera["tai_minus_utc_seconds"] = int(record["expected_tai_minus_utc_seconds"])
+    else:
+        camera = {
+            **v1_camera,
+            "semantic_authority": "palette_inferred",
+            "tai_minus_utc_seconds": (
+                37 if v1_camera.get("timescale") == "IEEE-1588_PTP_TAI" else None
+            ),
+        }
+    surfaces = {**v1_surfaces, "camera_timestamp_ns": camera}
+    evidence = {
+        **v1_evidence,
+        "orange_declaration": record,
+        "palette_cross_check": cross_check,
+    }
+    return surfaces, evidence
+
+
 def _clock_semantics(
     recording_dir: Path,
     *,
@@ -372,20 +603,9 @@ def _clock_semantics(
         }
 
     if ptp_operationally_inferred:
-        camera_semantics: dict[str, Any] = {
-            "source_field": "timestamp",
-            "source_api": "Emergent::CEmergentFrame.timestamp",
-            "producer": "camera_firmware_via_emergent_esdk",
-            "orange_transformation": "none",
-            "clock_role": "camera_embedded_frame_time",
-            "clock_domain": "camera_hardware_ptp_clock",
-            "unit": "nanosecond",
-            "time_reference_kind": "absolute_epoch",
-            "origin": "1970-01-01T00:00:00_TAI",
-            "timescale": "IEEE-1588_PTP_TAI",
-            "semantic_status": "inferred_from_recording_evidence_not_sdk_declared",
-            "validity_array": "camera_timestamp_valid",
-        }
+        camera_semantics: dict[str, Any] = _ptp_tai_camera_semantics(
+            "inferred_from_recording_evidence_not_sdk_declared"
+        )
     else:
         camera_semantics = {
             "source_field": "timestamp",
@@ -545,6 +765,7 @@ def _load_csv_source(
         system_timestamp_valid=system_valid,
         clock_surfaces=clock_surfaces,
         clock_semantic_evidence=semantic_evidence,
+        orange_clock_declaration=_orange_clock_declaration(recording_dir, str(camera_id)),
     )
 
 
@@ -635,6 +856,7 @@ def _load_parquet_source(
         system_timestamp_valid=system_valid,
         clock_surfaces=clock_surfaces,
         clock_semantic_evidence=semantic_evidence,
+        orange_clock_declaration=_orange_clock_declaration(recording_dir, str(camera_id)),
     )
 
 
@@ -818,10 +1040,21 @@ def _source_evidence(source: AcquisitionFrameClockSource) -> dict[str, Any]:
     }
 
 
-def _build_record(source: AcquisitionFrameClockSource) -> dict[str, Any]:
+def _build_record(
+    source: AcquisitionFrameClockSource,
+    schema_version: int = ACQUISITION_FRAME_CLOCK_SCHEMA_VERSION,
+) -> dict[str, Any]:
+    if schema_version == 1:
+        surfaces, evidence = source.clock_surfaces, source.clock_semantic_evidence
+    elif schema_version == 2:
+        surfaces, evidence = _v2_clock_semantics(source)
+    else:
+        raise AcquisitionFrameClockError(
+            f"Unsupported acquisition frame-clock schema_version {schema_version!r}."
+        )
     return {
-        "schema_id": ACQUISITION_FRAME_CLOCK_SCHEMA_ID,
-        "schema_version": ACQUISITION_FRAME_CLOCK_SCHEMA_VERSION,
+        "schema_id": ACQUISITION_FRAME_CLOCK_SCHEMA_IDS[schema_version],
+        "schema_version": schema_version,
         "camera_id": source.camera_id,
         "row_count": source.row_count,
         "frame_domain": {
@@ -829,10 +1062,8 @@ def _build_record(source: AcquisitionFrameClockSource) -> dict[str, Any]:
             "parent_frame_index": "zero_based_complete_video_frame_index",
             "sampled_row_join": "raw_video/original_frame_indices -> parent_frame_index",
         },
-        "clock_surfaces": json_attr_safe_mapping(source.clock_surfaces),
-        "clock_semantic_evidence": json_attr_safe_mapping(
-            source.clock_semantic_evidence
-        ),
+        "clock_surfaces": json_attr_safe_mapping(surfaces),
+        "clock_semantic_evidence": json_attr_safe_mapping(evidence),
         "missing_timestamp_sentinel": int(MISSING_TIMESTAMP_SENTINEL),
         "source": _source_evidence(source),
         "array_sha256": _array_digests(source),
@@ -844,18 +1075,29 @@ def acquisition_frame_clock_sha256(record: Mapping[str, Any]) -> str:
     return sha256(strict_json_dumps(record).encode("utf-8")).hexdigest()
 
 
-def acquisition_frame_clock_source_sha256(source: AcquisitionFrameClockSource) -> str:
-    """Validate a live source and hash the publisher's unchanged record grammar."""
+def acquisition_frame_clock_source_sha256(
+    source: AcquisitionFrameClockSource,
+    *,
+    schema_version: int = ACQUISITION_FRAME_CLOCK_SCHEMA_VERSION,
+) -> str:
+    """Validate a live source and hash the publisher's record grammar.
+
+    Re-verification passes the published record's ``schema_version`` so a v1
+    publication is rebuilt with v1 rules, byte for byte.
+    """
 
     _validate_source(source, expected_frame_count=None)
-    return acquisition_frame_clock_sha256(_validate_record(_build_record(source)))
+    return acquisition_frame_clock_sha256(
+        _validate_record(_build_record(source, schema_version))
+    )
 
 
 def _validate_record(record: Mapping[str, Any], digest: str | None = None) -> dict[str, Any]:
     canonical = json_attr_safe_mapping(record)
-    if canonical.get("schema_id") != ACQUISITION_FRAME_CLOCK_SCHEMA_ID:
+    version = canonical.get("schema_version")
+    if canonical.get("schema_id") not in ACQUISITION_FRAME_CLOCK_SCHEMA_IDS.values():
         raise AcquisitionFrameClockError("Unsupported acquisition frame-clock schema_id.")
-    if canonical.get("schema_version") != ACQUISITION_FRAME_CLOCK_SCHEMA_VERSION:
+    if not is_supported_acquisition_frame_clock_schema(canonical.get("schema_id"), version):
         raise AcquisitionFrameClockError("Unsupported acquisition frame-clock schema_version.")
     if not str(canonical.get("camera_id") or "").strip():
         raise AcquisitionFrameClockError("Acquisition frame clock has no camera_id.")
@@ -897,6 +1139,28 @@ def _validate_record(record: Mapping[str, Any], digest: str | None = None) -> di
         if surface.get("validity_array") != validity_array:
             raise AcquisitionFrameClockError(
                 f"Acquisition frame-clock semantics for {name} bind the wrong validity array."
+            )
+    if version == 2:
+        camera = clock_surfaces["camera_timestamp_ns"]
+        authority = camera.get("semantic_authority")
+        if authority not in _CAMERA_SEMANTIC_AUTHORITIES:
+            raise AcquisitionFrameClockError(
+                "A v2 frame clock must say who decided the camera timescale."
+            )
+        evidence = canonical.get("clock_semantic_evidence")
+        declaration = evidence.get("orange_declaration") if isinstance(evidence, Mapping) else None
+        if not isinstance(declaration, Mapping) or declaration.get("used") is not (
+            authority == "orange_declared"
+        ):
+            raise AcquisitionFrameClockError(
+                "A v2 frame clock's declaration evidence differs from its camera authority."
+            )
+        if authority == "orange_declared" and (
+            camera.get("timescale") != "IEEE-1588_PTP_TAI"
+            or type(camera.get("tai_minus_utc_seconds")) is not int
+        ):
+            raise AcquisitionFrameClockError(
+                "An Orange-declared camera clock must be TAI with an integer offset."
             )
     array_digests = canonical.get("array_sha256")
     if not isinstance(array_digests, Mapping) or set(array_digests) != set(_ARRAY_NAMES):
@@ -1254,6 +1518,15 @@ def _publish_acquisition_frame_clock_locked(
         selected = resolve_acquisition_frame_clock(root)
         if selected is not None and selected.record_sha256 == digest:
             return selected
+        # A clock published by an earlier record version stays selected when
+        # this source still rebuilds it exactly under that version's rules:
+        # replaying an import never republishes an unchanged clock.
+        if selected is not None and selected.record.get("schema_version") != record[
+            "schema_version"
+        ] and selected.record_sha256 == acquisition_frame_clock_source_sha256(
+            source, schema_version=int(selected.record["schema_version"])
+        ):
+            return selected
 
     owner = str(uuid.uuid4())
     run_name = f"acquisition_frame_clock_{digest[:16]}"
@@ -1281,7 +1554,7 @@ def _publish_acquisition_frame_clock_locked(
     provenance = build_writer_run_provenance(
         command="import:publish_acquisition_frame_clock",
         params={
-            "schema_id": ACQUISITION_FRAME_CLOCK_SCHEMA_ID,
+            "schema_id": record["schema_id"],
             "record_sha256": digest,
             "camera_id": source.camera_id,
             "row_count": source.row_count,
@@ -1309,8 +1582,8 @@ def _publish_acquisition_frame_clock_locked(
         lifecycle = _OwnedClockLifecycle(root, run_name, owner)
         mark_run_started(lifecycle, run_name=run_name, stage="acquisition_frame_clock")
         for key, value in {
-            "schema_id": ACQUISITION_FRAME_CLOCK_SCHEMA_ID,
-            "schema_version": ACQUISITION_FRAME_CLOCK_SCHEMA_VERSION,
+            "schema_id": record["schema_id"],
+            "schema_version": record["schema_version"],
             ACQUISITION_FRAME_CLOCK_RECORD_ATTR: record,
             ACQUISITION_FRAME_CLOCK_SHA256_ATTR: digest,
             "immutable": True,
@@ -1522,6 +1795,9 @@ def import_acquisition_frame_clock(
 
 
 __all__ = [
+    "ACQUISITION_FRAME_CLOCK_SCHEMA_IDS",
+    "ORANGE_DIRECT_PTP_RESULT",
+    "is_supported_acquisition_frame_clock_schema",
     "ACQUISITION_FRAME_CLOCK_RECORD_ATTR",
     "ACQUISITION_FRAME_CLOCK_RUNS_PATH",
     "ACQUISITION_FRAME_CLOCK_SCHEMA_ID",
