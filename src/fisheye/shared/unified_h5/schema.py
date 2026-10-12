@@ -42,70 +42,223 @@ CONTRACT_HASHES = {
     # Citrus 4d9d04d docs/schemas/experimental_h5_capacity_preflight_v1.schema.json,
     # renamed here because its revision-2 predecessor keeps the original name.
     "experimental_h5_capacity_preflight_v1_ba8333a3.schema.json": "ba8333a35526dc1fc655734d938b14a816fd143d2c5eb395ad17065f79718a54",
+    # Admission revision 4 (frame identity v1; agent-contracts PR 88, Citrus PR 24).
+    "unified_h5_admission_v4.json": "e702df25e5164548c72fa94a683922836567245ed7b7880316ea8ead2d33a0a4",
+    "unified_h5_producer_policy_3c9866ed.json": "3c9866eda2f78c4aa37d1b68a9f4b6245aab8415b3ce8e3412cb3cbf5ab7eb78",
+    "experimental_h5_core_frame_identity_v1.json": "4365821df9cdde35d0417fec5b656de12607c211e24232b408e87344883a8264",
+    "experimental_h5_capacity_preflight_v2.schema.json": "3f78bff9fd51207d035ed9a2feb32660f5232b91d3674389882a4914fbf6bbc3",
+    "experimental_h5_correspondence_receipt_v3.schema.json": "7143f9cff038b4dda1c184e5f0ca7b1b924b541074d24b25b9b0d67dab9d34b4",
 }
-ADMISSION = "unified_h5_admission_v3.json"
-# Core catalogs by the chaser state table's schema_version. Only v2 (explicit
-# camera-id validity) is admitted; the original v1 catalog stays pinned
-# byte-for-byte for provenance and for the legacy adapter, never for admission.
-# Only the chaser table differs between them.
+# The admission revision a file is judged under is chosen by its capacity
+# preflight's schema_version: preflight v1 files (no catalog_id) keep revision
+# 3 and its (chaser_state, bounding_boxes) pair key; preflight v2 files carry
+# catalog_id and are selected by revision 4's full table-version map. Any other
+# preflight version is refused. A later catalog needs only its pins here.
+ADMISSIONS_BY_PREFLIGHT_VERSION = {
+    1: "unified_h5_admission_v3.json",
+    2: "unified_h5_admission_v4.json",
+}
+ADMISSION = ADMISSIONS_BY_PREFLIGHT_VERSION[1]
+# Every pinned core catalog. The original v1 catalog stays pinned byte-for-byte
+# for provenance and for the legacy adapter, never for admission.
+CORE_CATALOG_FILES = (
+    "experimental_h5_core_v1.json",
+    "experimental_h5_core_chaser_v2.json",
+    "experimental_h5_core_bounding_boxes_v2.json",
+    "experimental_h5_core_frame_identity_v1.json",
+)
 CORE_CATALOGS = {
     1: "experimental_h5_core_v1.json",
     2: "experimental_h5_core_chaser_v2.json",
 }
 ADMITTED_CHASER_VERSION = 2
+# Table-independent catalog sections (component outcomes, attributes) are
+# identical across the pinned catalogs; tests assert it.
 CORE_CATALOG = CORE_CATALOGS[ADMITTED_CHASER_VERSION]
 CHASER_STATES = "/components/chaser/states"
 BOUNDING_BOXES = "/observations/bounding_boxes"
-# Tables whose schema_version selects their definition: version -> the pinned
-# core catalog that defines it. The catalogs differ only in these tables, so
-# every other table resolves through CORE_CATALOG. A version outside
-# ADMITTED_TABLE_VERSIONS is refused before its layout is read.
-TABLE_VERSION_CATALOGS = {
-    CHASER_STATES: CORE_CATALOGS,
-    BOUNDING_BOXES: {
-        1: CORE_CATALOGS[ADMITTED_CHASER_VERSION],
-        2: "experimental_h5_core_bounding_boxes_v2.json",
-    },
-}
-ADMITTED_TABLE_VERSIONS = {
-    CHASER_STATES: frozenset({ADMITTED_CHASER_VERSION}),
-    BOUNDING_BOXES: frozenset({1, 2}),
-}
-# Admission revision 3 names each admitted catalog's table versions.
+# Admission revision 3 names each admitted catalog's pair of table versions.
 _PIN_TABLES = {"chaser_state": CHASER_STATES, "bounding_boxes": BOUNDING_BOXES}
+CORRESPONDENCE_RECEIPT_SCHEMAS = {
+    2: "experimental_h5_correspondence_receipt_v2.schema.json",
+    3: "experimental_h5_correspondence_receipt_v3.schema.json",
+}
 
 
-def admitted_binding(h5, declared_policy_sha256: str) -> dict:
-    """The one admitted catalog binding for this file (admission revision 3).
+def _template(path: str) -> str | None:
+    if path.startswith("/definitions/enums/") and len(path.split("/")) == 4:
+        return "/definitions/enums/{component}"
+    if (
+        path.startswith("/correspondence/")
+        and path.endswith("/sources")
+        and path != "/correspondence/frames/sources"
+    ):
+        return "/correspondence/{component}/sources" if len(path.split("/")) == 4 else None
+    return path
 
-    Present versioned tables must carry their pinned versions; an absent table
-    does not constrain. The declared producer policy must be the one bound to
-    that catalog. Exactly one binding must remain, or the file is refused.
+
+def table_template(path: str) -> str:
+    """The catalog path a concrete core table path is defined under."""
+    template = _template(path)
+    require(template is not None, f"unknown_table:{path}")
+    return template
+
+
+def catalog_table_versions(catalog_file: str) -> dict[str, int]:
+    """A pinned catalog's {catalog table path -> schema_version} map."""
+    return {t["path"]: t["schema_version"] for t in _contract(catalog_file)["tables"]}
+
+
+@lru_cache(maxsize=1)
+def _table_definitions() -> dict:
+    """(catalog path, schema_version) -> its one definition over every pinned catalog.
+
+    A version names one definition: two catalogs that define the same
+    (path, version) differently are a pin error, refused here.
     """
-    admission = contract(ADMISSION)
+    definitions = {}
+    for name in CORE_CATALOG_FILES:
+        for table in _contract(name)["tables"]:
+            key = (table["path"], table["schema_version"])
+            require(
+                definitions.setdefault(key, table) == table,
+                f"conflicting_table_definition:{key[0]}:{key[1]}",
+            )
+    return definitions
+
+
+def _admitted_catalogs(admission: dict) -> dict[str, dict]:
+    pins = admission["core_definition_pins"]
+    return {
+        name: pin
+        for name, pin in pins.items()
+        if isinstance(pin, dict) and pin.get("admitted_by_this_revision")
+    }
+
+
+def _catalog_file(pin: dict) -> str:
+    return pin["catalog_path"].rsplit("/", 1)[-1]
+
+
+@lru_cache(maxsize=1)
+def admitted_table_versions() -> dict[str, frozenset[int]]:
+    """Catalog path -> the versions some admitted catalog of some revision pins."""
+    versions: dict[str, set[int]] = {}
+    for admission_name in ADMISSIONS_BY_PREFLIGHT_VERSION.values():
+        for pin in _admitted_catalogs(_contract(admission_name)).values():
+            for path, version in catalog_table_versions(_catalog_file(pin)).items():
+                versions.setdefault(path, set()).add(version)
+    return {path: frozenset(values) for path, values in versions.items()}
+
+
+def preflight_admission(document: dict) -> str:
+    """The admission revision a capacity preflight's schema_version selects."""
+    version = document.get("schema_version")
+    require(
+        type(version) is int and version in ADMISSIONS_BY_PREFLIGHT_VERSION,
+        "capacity_preflight_unknown_schema_version",
+    )
+    return ADMISSIONS_BY_PREFLIGHT_VERSION[version]
+
+
+def _present_declared_versions(h5, declared_paths) -> dict[str, int]:
+    """{declared, present core table path -> its schema_version}."""
+    known = admitted_table_versions()
+    observed = {}
+    for path in declared_paths:
+        if path in h5 and _template(path) in known:
+            observed[path] = table_version(h5, path)
+    return observed
+
+
+def _map_matches(observed: dict[str, int], catalog_versions: dict[str, int]) -> bool:
+    return all(
+        catalog_versions.get(table_template(path)) == version
+        for path, version in observed.items()
+    )
+
+
+def admitted_binding(h5, declared_policy_sha256: str, preflight: dict | None = None) -> dict:
+    """The one admitted catalog binding for this file.
+
+    The capacity preflight's schema_version selects the admission revision.
+    Revision 3 (preflight v1): present (chaser_state, bounding_boxes) versions
+    and the declared producer policy select one pair-keyed catalog. Revision 4
+    (preflight v2): the declared, present core tables' {path -> schema_version}
+    map must equal an admitted catalog's map, the declared catalog_id must name
+    that same catalog (otherwise ``catalog_id_mismatch``), and the declared
+    policy must be the one bound to it. Absent and undeclared tables do not
+    constrain. Exactly one binding must remain, or the file is refused.
+    """
+    if preflight is None:
+        preflight = {"schema_version": 1}
+    admission_name = preflight_admission(preflight)
+    admission = contract(admission_name)
     bindings = admission["admitted_catalog_bindings"]
+    catalogs = _admitted_catalogs(admission)
     declared = "sha256:" + declared_policy_sha256
-    matches = []
-    for name, pin in admission["core_definition_pins"].items():
-        if not isinstance(pin, dict) or not pin.get("admitted_by_this_revision"):
-            continue
-        tables_agree = all(
-            path not in h5 or table_version(h5, path) == pin["table_versions"][key]
-            for key, path in _PIN_TABLES.items()
+    if admission["core_definition_pins"]["selection"]["key"] == "table_version_map":
+        declared_paths = [table.get("path") for table in preflight.get("tables", [])]
+        observed = _present_declared_versions(
+            h5, [path for path in declared_paths if isinstance(path, str)]
         )
-        if tables_agree and bindings[name]["producer_policy"]["file_sha256"] == declared:
-            matches.append(name)
-    require(len(matches) == 1, "capacity_preflight_producer_policy")
+        matches = [
+            name
+            for name, pin in catalogs.items()
+            if _map_matches(observed, catalog_table_versions(_catalog_file(pin)))
+        ]
+        catalog_id = preflight.get("catalog_id")
+        chosen = [name for name in matches if catalogs[name].get("catalog_id") == catalog_id]
+        require(
+            catalog_id is not None and len(chosen) == 1, "catalog_id_mismatch"
+        )
+        require(
+            bindings[chosen[0]]["producer_policy"]["file_sha256"] == declared
+            and bindings[chosen[0]].get("catalog_id") == catalog_id,
+            "capacity_preflight_producer_policy",
+        )
+        matches = chosen
+    else:
+        matches = []
+        for name, pin in catalogs.items():
+            tables_agree = all(
+                path not in h5 or table_version(h5, path) == pin["table_versions"][key]
+                for key, path in _PIN_TABLES.items()
+            )
+            if tables_agree and bindings[name]["producer_policy"]["file_sha256"] == declared:
+                matches.append(name)
+        require(len(matches) == 1, "capacity_preflight_producer_policy")
     binding = bindings[matches[0]]
     schema_sha = binding["capacity_preflight_schema"]["file_sha256"].removeprefix("sha256:")
     (schema_name,) = [name for name, digest in CONTRACT_HASHES.items() if digest == schema_sha]
-    catalog_file = admission["core_definition_pins"][matches[0]]["catalog_path"].rsplit("/", 1)[-1]
+    receipt_pin = admission["correspondence_definition_pins"]["receipt_schema"]
     return {
         "catalog": matches[0],
-        "catalog_file": catalog_file,
+        "catalog_file": _catalog_file(catalogs[matches[0]]),
         "preflight_schema": schema_name,
+        "admission": admission_name,
+        "correspondence_receipt_version": receipt_pin["schema_version"],
         **binding,
     }
+
+
+def require_selected_catalog_versions(h5, catalog_file: str) -> None:
+    """Every present core table carries the selected catalog's version for it."""
+    versions = catalog_table_versions(catalog_file)
+    known = admitted_table_versions()
+
+    def visit(name, node):
+        path = "/" + name
+        if not isinstance(node, h5py.Dataset):
+            return
+        template = _template(path)
+        if template in versions and template in known:
+            require(
+                table_version(h5, path) == versions[template],
+                f"table_version_not_in_selected_catalog:{path}",
+            )
+
+    h5.visititems(visit)
 
 
 def require_declared_core_tables(h5, declared_paths, catalog_file: str) -> None:
@@ -190,38 +343,34 @@ def validate_catalog_table(h5, path: str) -> dict:
 
 
 def table_version(h5, path: str) -> int | None:
-    """A versioned table's declared schema_version, if it is admitted."""
-    if path not in ADMITTED_TABLE_VERSIONS or path not in h5:
+    """A core table's declared schema_version, refused unless some admitted catalog pins it."""
+    if path not in h5:
+        return None
+    versions = admitted_table_versions().get(_template(path))
+    if versions is None:
         return None
     version = h5[path].attrs.get("schema_version")
     require(
-        version is not None and int(version) in ADMITTED_TABLE_VERSIONS[path],
+        version is not None and int(version) in versions,
         f"unsupported_table_version:{path}",
     )
     return int(version)
 
 
 def table_schema(path: str, version: int | None = None) -> dict:
-    template = path
-    if path.startswith("/definitions/enums/") and len(path.split("/")) == 4:
-        template = "/definitions/enums/{component}"
-    elif (
-        path.startswith("/correspondence/")
-        and path.endswith("/sources")
-        and path != "/correspondence/frames/sources"
-    ):
-        require(len(path.split("/")) == 4, f"unknown_table:{path}")
-        template = "/correspondence/{component}/sources"
-    catalog = (
-        TABLE_VERSION_CATALOGS[path][version]
-        if version is not None and path in TABLE_VERSION_CATALOGS
-        else CORE_CATALOG
-    )
-    matches = [
-        table
-        for table in _contract(catalog)["tables"]
-        if table["path"] == template
-    ]
+    """The pinned definition of ``path`` at ``version`` (any pinned catalog).
+
+    A (path, version) pair names one definition across every pinned catalog;
+    without a version the revision 2 core catalog's definition is returned.
+    """
+    template = table_template(path)
+    if version is None:
+        matches = [
+            table for table in _contract(CORE_CATALOG)["tables"] if table["path"] == template
+        ]
+    else:
+        definition = _table_definitions().get((template, version))
+        matches = [] if definition is None else [definition]
     require(len(matches) == 1, f"unknown_table:{path}")
     result = deepcopy(matches[0])
     result["path"] = path
