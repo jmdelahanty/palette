@@ -115,6 +115,7 @@ from fisheye.analysis.stimulus_response_omr import (
     compute_global_omr_metrics,
     compute_step_omr_metrics,
 )
+from fisheye.shared.heading_convention import wrap_delta_radians
 
 
 # ---------------------------------------------------------------------------
@@ -1137,8 +1138,7 @@ def compute_concentric_per_frame(
         angle_to_center_rad = np.arctan2(dy, dx)
         heading_rad = np.deg2rad(heading_deg)
         radial_diff = heading_rad - angle_to_center_rad
-        # Wrap to [-pi, pi].
-        radial_diff = (radial_diff + np.pi) % (2 * np.pi) - np.pi
+        radial_diff = wrap_delta_radians(radial_diff, dtype=radial_diff.dtype)
         radial_heading[i] = np.rad2deg(radial_diff)
 
         # Decompose speed into radial and tangential.

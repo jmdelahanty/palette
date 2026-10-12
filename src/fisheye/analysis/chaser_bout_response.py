@@ -85,6 +85,7 @@ from fisheye.shared.plot_artifacts import write_interactive_plot_spec_artifact, 
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
 from fisheye.shared.system_metadata import get_git_info
 from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
+from fisheye.shared.heading_convention import image_angle_degrees, wrap_delta_degrees
 
 
 SCHEMA_ID = "palette.chaser_bout_response.v1"
@@ -232,10 +233,6 @@ class ChaserBoutResponseResult:
     diagnostics: dict[str, Any]
 
 
-def _wrap_deg(values: np.ndarray) -> np.ndarray:
-    return (np.asarray(values, dtype=np.float64) + 180.0) % 360.0 - 180.0
-
-
 def bearing_deg(rel_xy: np.ndarray, heading_deg: np.ndarray) -> np.ndarray:
     """Egocentric bearing to a reference, in the heading's frame.
 
@@ -248,8 +245,8 @@ def bearing_deg(rel_xy: np.ndarray, heading_deg: np.ndarray) -> np.ndarray:
     """
 
     rel = np.asarray(rel_xy, dtype=np.float64)
-    angle = np.degrees(np.arctan2(-rel[:, :, 1], rel[:, :, 0]))
-    return _wrap_deg(angle - np.asarray(heading_deg, dtype=np.float64).reshape(-1)[:, None])
+    angle = image_angle_degrees(rel[:, :, 0], rel[:, :, 1])
+    return wrap_delta_degrees(angle - np.asarray(heading_deg, dtype=np.float64).reshape(-1)[:, None])
 
 
 def _resolve_swim_bout_run(
@@ -559,7 +556,7 @@ def _compute(
     bout_valid = onset_ok & end_ok & (epoch_index >= 0)
 
     turn = np.full(n_bouts, np.nan, dtype=np.float64)
-    turn[end_ok & onset_ok] = _wrap_deg(heading_deg[bout_end] - heading_deg[bout_start])[end_ok & onset_ok]
+    turn[end_ok & onset_ok] = wrap_delta_degrees(heading_deg[bout_end] - heading_deg[bout_start])[end_ok & onset_ok]
 
     d_onset = np.where(onset_ok[:, None], dist[bout_start, :], np.nan)
     b_onset = np.where(onset_ok[:, None], bearing[bout_start, :], np.nan)

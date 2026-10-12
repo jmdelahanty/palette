@@ -127,6 +127,7 @@ from fisheye.shared.zarr.subject_shape_bundle_source import (
     load_subject_shape_bundle_source,
     require_bound_subject_shape_bundle_source,
 )
+from fisheye.shared.heading_convention import heading_degrees, left_axis
 
 
 SUBJECT_SHAPE_COORDINATE_CONTRACT = "canonical_v2"
@@ -3253,7 +3254,7 @@ def derive_canonical_subject_shape_body_frame(
             reasons[row] = "degenerate_forward_axis"
             continue
         row_forward = direction / norm
-        row_left = np.asarray([row_forward[1], -row_forward[0]], dtype=np.float64)
+        row_left = np.asarray(left_axis(row_forward[0], row_forward[1]), dtype=np.float64)
         if float(np.dot(eye_left - eye_right, row_left)) <= 0.0:
             reasons[row] = "left_right_unresolved"
             continue
@@ -3264,7 +3265,7 @@ def derive_canonical_subject_shape_body_frame(
         reasons[row] = "ok"
     heading = np.asarray(
         [
-            math.degrees(math.atan2(-float(value[1]), float(value[0])))
+            float(heading_degrees(float(value[0]), float(value[1])))
             if is_valid
             else np.nan
             for value, is_valid in zip(forward, valid, strict=True)
@@ -3443,9 +3444,7 @@ def _validate_heading_semantics_values(
     ) or valid.shape != (identity.leading_dimension,):
         _fail("Subject-shape heading arrays do not share the exact row identity.")
     expected = np.full(heading.shape, np.nan, dtype=np.float64)
-    expected[valid] = np.degrees(
-        np.arctan2(-forward[valid, 1], forward[valid, 0])
-    )
+    expected[valid] = heading_degrees(forward[valid, 0], forward[valid, 1])
     if not np.allclose(heading, expected, rtol=0.0, atol=1e-5, equal_nan=True):
         _fail("body_frame/heading_deg differs from its declared forward-axis formula.")
 
