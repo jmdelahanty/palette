@@ -331,6 +331,22 @@ Totals: 41 EXACT, 8 EXACT-narrow, 7 DERIVED. The collapse is lossy for `target_s
   and then as a versioned alignment method stamped on each run, with cohort
   analyses refusing to mix versions silently. The code cost of a switch is
   small (about 5 consumers read these fields); the cost is comparability.
+- **D12 amendment (2026-10-11): do not reproduce the legacy alignment.**
+  Measured on every legacy recording with bounding-box payloads (212 of 212,
+  100% of payloads), Citrus's camera frame id (`triggering_camera_frame_id`,
+  events `camera_frame_id`, `payload_frame_id`) is Orange's 1-based
+  `recording_frame_id`. The legacy aligner (`camera_to_metadata_index`,
+  `chaser_distance_runs._load_frame_alignment`) indexes it as a 0-based frame,
+  so it pairs every stimulus state with the camera frame after the one that
+  drove it. The adapter must therefore not copy that alignment "bit-for-bit".
+  It uses `/correspondence/frames/sources` (`source_acquisition_frame_index =
+  recording_frame_id - 1`), which the canonical coordinate path already uses.
+  Cross-cohort comparability with legacy-aligned results is not worth
+  inheriting a known one-frame error. New recordings are the priority; legacy
+  re-alignment is optional. Event and step frames read through
+  `fisheye.shared.citrus_camera_frame_id`. Display time (when a state was
+  handed to the projector) is a separate column from this causal mapping; see
+  Citrus `/timing/display_submissions/frame_submissions`.
 - **D13. Capacity: one dataset per table, streamed (decided 2026-09-23).**
   Citrus has removed the whole-table 64 MiB / 2,000,000-row limits (commits
   78f835f and df2747b on `agent/unified-h5-streamed-correspondence-20260923`,

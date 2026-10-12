@@ -341,19 +341,19 @@ def _make_stimulus_zarr(
     event_names = []
     step_indices = []
     stimulus_modes = []
-    camera_frames = []
+    camera_frames = []  # Citrus ids: 1-based recording_frame_id = frame index + 1
 
     for s in steps:
         # STEP_START
         event_names.append("STEP_START")
         step_indices.append(s.get("index", steps.index(s)))
         stimulus_modes.append(s["mode"])
-        camera_frames.append(s["start"])
+        camera_frames.append(s["start"] + 1)
         # STEP_END
         event_names.append("STEP_END")
         step_indices.append(s.get("index", steps.index(s)))
         stimulus_modes.append(s["mode"])
-        camera_frames.append(s["end"])
+        camera_frames.append(s["end"] + 1)
 
     events = stim_run.create_group("events")
     # Variable-length UTF-8 strings for zarr v3.
@@ -429,7 +429,7 @@ def _make_modern_stimulus_zarr(root: zarr.Group) -> None:
     events.create_array("event_type_id", data=np.array([11, 12, 11, 12], dtype=np.int32))
     events.create_array("current_step_index", data=np.array([0, 0, 1, 1], dtype=np.int32))
     events.create_array("stimulus_mode_id", data=np.array([4, 4, 3, 3], dtype=np.int32))
-    events.create_array("camera_frame_id", data=np.array([0, 50, 50, 100], dtype=np.uint64))
+    events.create_array("camera_frame_id", data=np.array([1, 51, 51, 101], dtype=np.uint64))
     events.create_array(
         "name_or_context",
         data=_fixed_uint8_strings(["baseline", "baseline", "grating", "grating"], width=32),
@@ -595,8 +595,9 @@ class TestParseProtocolSteps:
             "step_name": "canonical_grating",
             "stimulus_mode_id": 3,
             "stimulus_mode": "MOVING_GRATING",
-            "start_camera_frame": 12,
-            "end_camera_frame": 42,
+            # Imported step attrs keep raw Citrus ids (frame index + 1).
+            "start_camera_frame": 13,
+            "end_camera_frame": 43,
             "duration_s": 1.0,
             "raw_protocol_params_json": json.dumps({
                 "parameters": {

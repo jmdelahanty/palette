@@ -51,6 +51,7 @@ from fisheye.analysis.stimulus_epoch_schema import (
     stimulus_epoch_logical_content_sha256,
     validate_legacy_stimulus_epoch_source,
 )
+from fisheye.shared.citrus_camera_frame_id import CITRUS_CAMERA_FRAME_ID_RULE
 from fisheye.shared.run_lineage_fingerprint import (
     LINEAGE_PAYLOAD_SCHEMA_ID,
     LINEAGE_PAYLOAD_SCHEMA_VERSION,
@@ -981,8 +982,17 @@ def _require_run_manifest_document(
         or not _is_sha256(source_stimulus["fingerprint"])
     ):
         raise ValueError("Stimulus-epoch run-manifest stimulus binding is invalid.")
+    raw_event_schema = source_stimulus["event_schema"]
+    if (
+        isinstance(raw_event_schema, Mapping)
+        and raw_event_schema.get("frame_index_rule") == CITRUS_CAMERA_FRAME_ID_RULE
+    ):
+        # Optional on runs written from 2026-10-11 (see stimulus_epoch_schema).
+        raw_event_schema = {
+            key: value for key, value in raw_event_schema.items() if key != "frame_index_rule"
+        }
     event_schema = _exact_mapping(
-        source_stimulus["event_schema"],
+        raw_event_schema,
         fields={"events_path", "event_name_fields", "frame_fields"},
         label="source-event schema",
     )
