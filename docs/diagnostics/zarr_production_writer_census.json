@@ -23257,10 +23257,10 @@
       "dtype": null,
       "dtype_expression": null,
       "dynamic_name": true,
-      "enclosing_symbol": "fisheye.analysis.stimulus_display_candidates:publish_stimulus_display_candidate_run",
+      "enclosing_symbol": "fisheye.analysis.stimulus_display_candidates:_publish_locked",
       "file": "src/fisheye/analysis/stimulus_display_candidates.py",
       "filters_expression": null,
-      "line": 436,
+      "line": 444,
       "parent_path_pattern": "<require_runs_parent(root.require_group('analysis'), PARENT_NAME)>/<run_name>",
       "path_pattern": "<require_runs_parent(root.require_group('analysis'), PARENT_NAME)>/<run_name>/<name>",
       "receiver_expression": "run",
@@ -23268,13 +23268,13 @@
       "shape_expression": "shape(getattr(result, name))",
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-576c5f5310d38e10",
+      "site_id": "writer-9397e8c2c42778af",
       "status": "current",
       "status_basis": "packaged Palette module without a maintenance marker",
       "surface_class": "production",
       "write_lifecycle": "append_or_build_then_publish",
       "write_lifecycle_basis": "production output; exact write mode unverified",
-      "writer_symbol": "fisheye.analysis.stimulus_display_candidates:publish_stimulus_display_candidate_run",
+      "writer_symbol": "fisheye.analysis.stimulus_display_candidates:_publish_locked",
       "zarr_format_expression": null
     },
     {
@@ -70419,7 +70419,7 @@
     "writer_wrapper_call_site_count": 998
   },
   "wrapper_analysis": {
-    "function_definition_count": 10656,
+    "function_definition_count": 10657,
     "writer_function_count": 247,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",
@@ -70453,7 +70453,7 @@
       "fisheye.analysis.import_stimulus_to_zarr:_materialize_protocol_frame_correspondence_proxy",
       "fisheye.analysis.import_stimulus_to_zarr:_materialize_protocol_semantic_snapshot",
       "fisheye.analysis.provider_chaser_distance_candidates:_write_array",
-      "fisheye.analysis.stimulus_display_candidates:publish_stimulus_display_candidate_run",
+      "fisheye.analysis.stimulus_display_candidates:_publish_locked",
       "fisheye.analysis.stimulus_epoch_runs:_write_array",
       "fisheye.analysis.stimulus_response:_write_exact_rows_table",
       "fisheye.analysis.stimulus_response:_write_rows_table",

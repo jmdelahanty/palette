@@ -107,3 +107,20 @@ def test_candidate_range_spans_the_full_visibility_window() -> None:
     # 1_020 ms - 16.7 ms = 1_003.3 ms: the latest swap by then is state 10 (1_000 ms).
     np.testing.assert_array_equal(first, [NO_STATE, NO_STATE, 10, 10, NO_STATE, NO_STATE])
     assert age[2] == 1 * MS
+
+
+def test_publication_holds_the_archive_lock(tmp_path, monkeypatch) -> None:
+    import zarr
+
+    from fisheye.analysis import stimulus_display_candidates as module
+    from fisheye.shared.zarr_helpers import archive_publication_lock_held_by_current_thread
+
+    archive = tmp_path / "rec_analysis.zarr"
+    zarr.open_group(str(archive), mode="w", zarr_format=3)
+    seen = []
+    monkeypatch.setattr(
+        module, "_publish_locked",
+        lambda path, result, run_name: seen.append(archive_publication_lock_held_by_current_thread(path)) or "ok",
+    )
+    assert module.publish_stimulus_display_candidate_run(archive, None, run_name="r") == "ok"
+    assert seen == [True]
