@@ -55,6 +55,9 @@ def test_first_submission_holds_and_never_submitted_states() -> None:
         result.first_display_frame_index, [160_074, 160_075, 160_077, -1, 160_078]
     )
     assert result.first_swap_end_ns_session[1] == 3 * 8_333_333
+    base = 1_760_000_000_000_000_000
+    assert result.last_swap_end_ns_epoch[1] == base + 4 * 8_333_333
+    assert result.last_swap_end_ns_epoch[3] == NOT_SUBMITTED
     assert result.first_swap_end_ns_epoch[3] == NOT_SUBMITTED
     assert (result.never_submitted_count, result.held_state_count) == (1, 1)
     assert (result.display_rate_target_hz, result.glfw_swap_interval) == (120.0, 0)
