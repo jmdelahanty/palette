@@ -1303,6 +1303,30 @@ def load_published_acquisition_frame_clock(
 NOMINAL_FRAME_TIME_TOLERANCE_FRAMES = 0.5
 
 
+def camera_tai_minus_utc(resolved: ResolvedAcquisitionFrameClock) -> dict[str, Any]:
+    """The published clock's TAI-UTC offset for camera timestamps, and who decided it.
+
+    v2 records carry it on the camera surface: ``orange_declared`` when Orange
+    declared a TAI camera clock (and Palette's cross-check agreed),
+    ``palette_inferred`` when Palette's own PTP evidence labelled it TAI. A v1
+    record that labelled the camera ``IEEE-1588_PTP_TAI`` counts as
+    ``palette_inferred`` with 37 s. Otherwise ``seconds`` is None: the camera
+    timestamps have no known relation to UTC.
+    """
+
+    camera = resolved.record["clock_surfaces"]["camera_timestamp_ns"]
+    if resolved.record.get("schema_version") == 2:
+        seconds = camera.get("tai_minus_utc_seconds")
+        authority = camera.get("semantic_authority")
+    elif camera.get("timescale") == "IEEE-1588_PTP_TAI":
+        seconds, authority = 37, "palette_inferred"
+    else:
+        seconds, authority = None, None
+    if type(seconds) is not int:
+        return {"seconds": None, "authority": None}
+    return {"seconds": seconds, "authority": authority}
+
+
 def nominal_frame_time_deviation_s(
     camera_timestamp_ns: np.ndarray,
     camera_timestamp_valid: np.ndarray,
@@ -1795,6 +1819,7 @@ def import_acquisition_frame_clock(
 
 
 __all__ = [
+    "camera_tai_minus_utc",
     "ACQUISITION_FRAME_CLOCK_SCHEMA_IDS",
     "ORANGE_DIRECT_PTP_RESULT",
     "is_supported_acquisition_frame_clock_schema",
