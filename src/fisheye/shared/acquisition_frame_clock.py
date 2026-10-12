@@ -301,6 +301,47 @@ def _ptp_tai_camera_semantics(semantic_status: str) -> dict[str, Any]:
     }
 
 
+def _device_defined_camera_semantics(semantic_status: str) -> dict[str, Any]:
+    return {
+        "source_field": "timestamp",
+        "source_api": "Emergent::CEmergentFrame.timestamp",
+        "producer": "camera_firmware_via_emergent_esdk",
+        "orange_transformation": "none",
+        "clock_role": "camera_embedded_frame_time",
+        "clock_domain": "camera_hardware_clock",
+        "unit": "nanosecond",
+        "time_reference_kind": "device_defined_unknown_epoch",
+        "origin": "unspecified",
+        "timescale": "unspecified",
+        "semantic_status": semantic_status,
+        "validity_array": "camera_timestamp_valid",
+    }
+
+
+def _ptp_status_readback(recording_dir: Path, camera_id: str) -> dict[str, Any] | None:
+    """``cameras.<serial>.ptp_status_readback`` from ptp_sync_summary.json, verbatim.
+
+    This is Orange's sampled PTP port-state readback ({first, last, changes,
+    samples}). v1 reads status keys Orange never wrote and so never sees it;
+    v2 records and checks it. Never raises: absent is None.
+    """
+
+    summary_path = _clock_summary_path(recording_dir)
+    summary = _safe_json_object(summary_path) if summary_path is not None else {}
+    readback = _matching_camera_summary(summary, camera_id).get("ptp_status_readback")
+    return copy.deepcopy(dict(readback)) if isinstance(readback, Mapping) else None
+
+
+def _readback_is_stable_slave(readback: Mapping[str, Any]) -> bool:
+    changes = readback.get("changes")
+    return (
+        readback.get("first") == "Slave"
+        and readback.get("last") == "Slave"
+        and type(changes) is int
+        and changes == 0
+    )
+
+
 def _orange_session_manifest_path(recording_dir: Path) -> Path | None:
     for candidate in (
         recording_dir / "raw" / "acquisition" / "recording_session.json",
@@ -312,12 +353,19 @@ def _orange_session_manifest_path(recording_dir: Path) -> Path | None:
 
 
 def _orange_clock_declaration(recording_dir: Path, camera_id: str) -> dict[str, Any]:
-    """Orange's declared camera clock block, verbatim, plus where it came from.
+    """v2-only inputs: Orange's declared camera clock block (verbatim, plus
+    where it came from) and the camera's PTP status readback.
 
     Never raises: a missing or unreadable manifest is ``present: False`` and
     the v2 record then falls back to Palette's inference.
     """
 
+    declaration = _orange_clock_declaration_block(recording_dir, camera_id)
+    declaration["ptp_status_readback"] = _ptp_status_readback(recording_dir, camera_id)
+    return declaration
+
+
+def _orange_clock_declaration_block(recording_dir: Path, camera_id: str) -> dict[str, Any]:
     path = _orange_session_manifest_path(recording_dir)
     if path is None:
         return {"present": False, "reason": "no_recording_session_json"}
@@ -428,6 +476,14 @@ def _v2_clock_semantics(
         raise AcquisitionFrameClockError(
             "A v2 frame-clock record needs the source's Orange clock declaration."
         )
+    readback = declaration.get("ptp_status_readback")
+    stable_slave = None if readback is None else _readback_is_stable_slave(readback)
+    readback_evidence = {
+        "present": readback is not None,
+        "value": readback,
+        "stable_slave": stable_slave,
+        "rule": "first == last == 'Slave' and changes == 0",
+    }
     record: dict[str, Any] = {
         "present": bool(declaration.get("present")),
         "used": False,
@@ -466,11 +522,24 @@ def _v2_clock_semantics(
                     f"{fields['expected_tai_minus_utc_seconds']} s, but the measured "
                     f"camera-system delta {delta} contradicts it."
                 )
+            if stable_slave is False:
+                raise AcquisitionFrameClockError(
+                    "Orange declares camera timestamps as TAI, but the camera's PTP "
+                    f"status readback {readback} is not a stable Slave."
+                )
             record["used"] = True
     if record["used"]:
         camera = _ptp_tai_camera_semantics("producer_declared_by_orange_ptp_time_properties")
         camera["semantic_authority"] = "orange_declared"
         camera["tai_minus_utc_seconds"] = int(record["expected_tai_minus_utc_seconds"])
+    elif stable_slave is False and v1_camera.get("timescale") == "IEEE-1588_PTP_TAI":
+        # v1 inferred TAI without seeing the port-state readback; a readback
+        # that is not a stable Slave contradicts that inference.
+        camera = {
+            **_device_defined_camera_semantics("ptp_inference_contradicted_by_status_readback"),
+            "semantic_authority": "palette_inferred",
+            "tai_minus_utc_seconds": None,
+        }
     else:
         camera = {
             **v1_camera,
@@ -484,6 +553,7 @@ def _v2_clock_semantics(
         **v1_evidence,
         "orange_declaration": record,
         "palette_cross_check": cross_check,
+        "ptp_status_readback": readback_evidence,
     }
     return surfaces, evidence
 
@@ -607,20 +677,9 @@ def _clock_semantics(
             "inferred_from_recording_evidence_not_sdk_declared"
         )
     else:
-        camera_semantics = {
-            "source_field": "timestamp",
-            "source_api": "Emergent::CEmergentFrame.timestamp",
-            "producer": "camera_firmware_via_emergent_esdk",
-            "orange_transformation": "none",
-            "clock_role": "camera_embedded_frame_time",
-            "clock_domain": "camera_hardware_clock",
-            "unit": "nanosecond",
-            "time_reference_kind": "device_defined_unknown_epoch",
-            "origin": "unspecified",
-            "timescale": "unspecified",
-            "semantic_status": "producer_passthrough_epoch_not_established",
-            "validity_array": "camera_timestamp_valid",
-        }
+        camera_semantics = _device_defined_camera_semantics(
+            "producer_passthrough_epoch_not_established"
+        )
 
     system_semantics = {
         "source_field": "timestamp_sys",
@@ -1154,6 +1213,15 @@ def _validate_record(record: Mapping[str, Any], digest: str | None = None) -> di
         ):
             raise AcquisitionFrameClockError(
                 "A v2 frame clock's declaration evidence differs from its camera authority."
+            )
+        readback = evidence.get("ptp_status_readback") if isinstance(evidence, Mapping) else None
+        if not isinstance(readback, Mapping) or readback.get("stable_slave") not in (True, False, None):
+            raise AcquisitionFrameClockError(
+                "A v2 frame clock must record the camera's PTP status readback."
+            )
+        if camera.get("timescale") == "IEEE-1588_PTP_TAI" and readback.get("stable_slave") is False:
+            raise AcquisitionFrameClockError(
+                "A v2 frame clock labels TAI against an unstable PTP status readback."
             )
         if authority == "orange_declared" and (
             camera.get("timescale") != "IEEE-1588_PTP_TAI"
