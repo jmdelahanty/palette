@@ -35,6 +35,7 @@ from fisheye.shared.selector_activation import (
     rollback_deferred_selector_activation,
 )
 from fisheye.shared.zarr.columnar import store_array
+from fisheye.shared.zarr.whole_array_read import read_whole_array
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
     zarr_store_metadata_publication_lock,
@@ -933,7 +934,7 @@ def _validate_run_payload(run_name: str, run: Any) -> ResolvedAcquisitionFrameCl
             raise AcquisitionFrameClockError(
                 f"Acquisition frame-clock run {run_name!r} is missing {name}."
             )
-        values = np.asarray(run[name][:])
+        values = read_whole_array(run[name])
         if values.ndim != 1 or int(values.shape[0]) != row_count:
             raise AcquisitionFrameClockError(
                 f"Acquisition frame-clock array {name} has an invalid shape."
@@ -1014,7 +1015,7 @@ def load_published_acquisition_frame_clock(
     resolved = resolve_acquisition_frame_clock(root, required=True)
     assert resolved is not None
     run = root[resolved.group_path]
-    arrays = {name: np.asarray(run[name][:]) for name in _ARRAY_NAMES}
+    arrays = {name: read_whole_array(run[name]) for name in _ARRAY_NAMES}
     for name, values in arrays.items():
         if _array_values_sha256(values) != str(resolved.record["array_sha256"][name]):
             raise AcquisitionFrameClockError(
@@ -1078,9 +1079,9 @@ def require_nominal_frame_timing(
         return None
     run = root[resolved.group_path]
     deviation = nominal_frame_time_deviation_s(
-        np.asarray(run["camera_timestamp_ns"][:]),
-        np.asarray(run["camera_timestamp_valid"][:]),
-        np.asarray(run["parent_frame_index"][:]),
+        read_whole_array(run["camera_timestamp_ns"]),
+        read_whole_array(run["camera_timestamp_valid"]),
+        read_whole_array(run["parent_frame_index"]),
         nominal_fps=float(nominal_fps),
     )
     tolerance_s = float(tolerance_frames) / float(nominal_fps)
