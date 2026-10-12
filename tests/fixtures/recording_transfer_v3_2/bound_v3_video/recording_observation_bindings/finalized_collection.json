@@ -1,0 +1,81 @@
+{
+  "schema_id": "orange.recording.observation_binding_finalization",
+  "schema_version": 1,
+  "status": "finalized",
+  "binding_status": "bound",
+  "binding_mode": "required",
+  "recording_id": "fixture-session",
+  "citrus_experiment_id": "citexp_2222222222222222222222222222222222222222222222222222222222222222",
+  "finalized_at_utc": "2026-10-10T00:05:01Z",
+  "context_count": 2,
+  "observation_contexts": [
+    {
+      "observation_context_id": "obsctx_1111111111111111111111111111111111111111111111111111111111111111",
+      "observation_identity_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "observation_identity": {
+        "identity": {
+          "camera": {
+            "camera_id": "02010093",
+            "source_camera_stream_id": "02010093"
+          }
+        }
+      },
+      "status": "bound",
+      "request": {
+        "request_id": "obsbindreq_1111111111111111111111111111111111111111111111111111111111111111",
+        "contract_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "relative_path": "recording_observation_bindings/requests/obsctx_1111111111111111111111111111111111111111111111111111111111111111.json"
+      },
+      "acceptance": {
+        "acceptance_id": "obsbindacc_1111111111111111111111111111111111111111111111111111111111111111",
+        "contract_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "relative_path": "recording_observation_bindings/acceptances/obsctx_1111111111111111111111111111111111111111111111111111111111111111.json"
+      },
+      "finalized_receipt": {
+        "receipt_id": "obsbindfin_b8af54e2760e323f09a16ee839c9edc89b6deb907f6ef593aab34fa92de72af4",
+        "contract_sha256": "sha256:b8af54e2760e323f09a16ee839c9edc89b6deb907f6ef593aab34fa92de72af4",
+        "relative_path": "recording_observation_bindings/receipts/obsctx_1111111111111111111111111111111111111111111111111111111111111111.json",
+        "sha256": "sha256:cc08677860540ff975286656a8af8498a9b91b3d41f9670d496098c7d8e7185d"
+      },
+      "citrus_h5": {
+        "relative_path": "citrus/citsess_1111111111111111111111111111111111111111111111111111111111111111_snow_1h.h5",
+        "size_bytes": 78,
+        "sha256": "sha256:77168fd06beef8150dcecbcc399335babf10a0950f3af2f02f34831e8f35b835"
+      }
+    },
+    {
+      "observation_context_id": "obsctx_2222222222222222222222222222222222222222222222222222222222222222",
+      "observation_identity_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "observation_identity": {
+        "identity": {
+          "camera": {
+            "camera_id": "02010094",
+            "source_camera_stream_id": "02010094"
+          }
+        }
+      },
+      "status": "bound",
+      "request": {
+        "request_id": "obsbindreq_2222222222222222222222222222222222222222222222222222222222222222",
+        "contract_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "relative_path": "recording_observation_bindings/requests/obsctx_2222222222222222222222222222222222222222222222222222222222222222.json"
+      },
+      "acceptance": {
+        "acceptance_id": "obsbindacc_2222222222222222222222222222222222222222222222222222222222222222",
+        "contract_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "relative_path": "recording_observation_bindings/acceptances/obsctx_2222222222222222222222222222222222222222222222222222222222222222.json"
+      },
+      "finalized_receipt": {
+        "receipt_id": "obsbindfin_8d98b475d12af170d59d431f7772cff8f38736a830cd36f4244a49754007c8d0",
+        "contract_sha256": "sha256:8d98b475d12af170d59d431f7772cff8f38736a830cd36f4244a49754007c8d0",
+        "relative_path": "recording_observation_bindings/receipts/obsctx_2222222222222222222222222222222222222222222222222222222222222222.json",
+        "sha256": "sha256:8ea4659d8f03e03a92bc375ec75e472a6a9531d9077bdd91b4ebfe80574ef2c8"
+      },
+      "citrus_h5": {
+        "relative_path": "citrus/citsess_2222222222222222222222222222222222222222222222222222222222222222_snow_1h.h5",
+        "size_bytes": 78,
+        "sha256": "sha256:c6e3a029df51f8a04529632e8eaf4144251659b96d6d3f7991f60bd0d52dd9da"
+      }
+    }
+  ]
+}

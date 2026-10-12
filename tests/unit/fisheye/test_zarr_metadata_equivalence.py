@@ -163,3 +163,56 @@ def test_noncanonical_subtree_path_is_rejected(
             archive,
             subtree_path=subtree,
         )
+
+
+@pytest.mark.parametrize(
+    "make_link",
+    (
+        # A file symlink deep in the subtree.
+        lambda run, outside: (run / "nested/valid/c/stray").symlink_to(outside / "f"),
+        # A symlinked zarr.json, the file the comparison reads.
+        lambda run, outside: (
+            (run / "nested/zarr.json").rename(outside / "zarr.json"),
+            (run / "nested/zarr.json").symlink_to(outside / "zarr.json"),
+        ),
+        # A dangling symlink.
+        lambda run, outside: (run / "dangling").symlink_to(outside / "missing"),
+        # A symlink inside a hidden directory.
+        lambda run, outside: (
+            (run / ".hidden").mkdir(),
+            (run / ".hidden/link").symlink_to(outside, target_is_directory=True),
+        ),
+    ),
+    ids=("deep_file", "zarr_json", "dangling", "hidden_dir"),
+)
+def test_every_symlink_in_the_subtree_is_refused(tmp_path: Path, make_link) -> None:
+    archive = _archive(tmp_path / "analysis.zarr")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "f").write_text("x")
+    make_link(archive / "analysis/example_runs/run_1", outside)
+
+    with pytest.raises(ZarrMetadataEquivalenceError, match="contains a symlink"):
+        validate_direct_consolidated_subtree(archive, subtree_path="analysis/example_runs/run_1")
+
+
+def test_a_directory_named_zarr_json_is_not_a_declaration(tmp_path: Path) -> None:
+    archive = _archive(tmp_path / "analysis.zarr")
+    (archive / "analysis/example_runs/run_1/values/c/zarr.json").mkdir()
+
+    receipt = validate_direct_consolidated_subtree(
+        archive, subtree_path="analysis/example_runs/run_1"
+    )
+    assert receipt == validate_direct_consolidated_subtree(
+        _archive(tmp_path / "clean.zarr"), subtree_path="analysis/example_runs/run_1"
+    )
+
+
+def test_an_undeclared_hidden_node_is_refused(tmp_path: Path) -> None:
+    archive = _archive(tmp_path / "analysis.zarr")
+    hidden = archive / "analysis/example_runs/run_1/.hidden"
+    hidden.mkdir()
+    (hidden / "zarr.json").write_text(json.dumps({"zarr_format": 3, "node_type": "group", "attributes": {}}))
+
+    with pytest.raises(ZarrMetadataEquivalenceError, match="paths differ"):
+        validate_direct_consolidated_subtree(archive, subtree_path="analysis/example_runs/run_1")
