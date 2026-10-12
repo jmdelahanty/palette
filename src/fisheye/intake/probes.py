@@ -198,20 +198,34 @@ def probe_import(snapshot_sha: str, *, destination_root: Path) -> ProbeResult:
 
 
 def probe_register(
-    snapshot_sha: str, *, destination_root: Path, registry: Path
+    snapshot_sha: str,
+    *,
+    destination_root: Path,
+    registry: Path,
+    imported: ProbeResult | None = None,
 ) -> ProbeResult:
     """True when the import probe is true and the registry binds every receipt.
 
     Each zarr is read through the identity authority's read-only admission
     reader (``load_verified_registry_recording_import``, SQLite ``mode=ro``),
     which re-verifies the live identity, acquisition and receipt evidence.
+
+    ``imported`` is this delivery's import probe when the caller already ran
+    it under the same register claim (``register_delivery``); the probe is
+    then not repeated. Without it the import probe runs here, as before.
     """
 
     from fisheye.registry.recording_identity_authority import (
         load_verified_registry_recording_import,
     )
 
-    imported = probe_import(snapshot_sha, destination_root=destination_root)
+    if imported is None:
+        imported = probe_import(snapshot_sha, destination_root=destination_root)
+    elif (
+        imported.schema != PROBE_IMPORT_SCHEMA
+        or imported.snapshot_sha != validate_snapshot_sha(snapshot_sha)
+    ):
+        raise ValueError("imported is not this delivery's import probe")
     if not imported.verdict:
         return ProbeResult(
             schema=PROBE_REGISTER_SCHEMA,

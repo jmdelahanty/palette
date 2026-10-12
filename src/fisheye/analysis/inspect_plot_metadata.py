@@ -2,9 +2,12 @@
 """
 Inspect provenance metadata stored in Palette analysis plots.
 
-Phase-analysis PNGs saved by ``chaser_phase_analysis`` embed an XMP packet
-containing a JSON document under the ``palette:provenance`` tag. This utility
-extracts that payload and prints it in a readable form.
+Phase-analysis PNGs saved by the former ``chaser_phase_analysis`` (removed in
+#358) embed an XMP packet containing a JSON document under the
+``palette:provenance`` tag. This utility extracts that payload from existing
+PNGs and prints it in a readable form. Current plot writers use their own tags
+(``palette:swim_bout_provenance``, ``palette:eye_angle_provenance``), which
+this utility does not read.
 """
 
 from __future__ import annotations
@@ -71,7 +74,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "image",
         type=Path,
-        help="Path to a PNG saved by chaser_phase_analysis (contains embedded provenance).",
+        help=(
+            "Path to a phase-analysis PNG saved by the former chaser_phase_analysis "
+            "(contains an embedded palette:provenance packet)."
+        ),
     )
     parser.add_argument(
         "--pretty",
