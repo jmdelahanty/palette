@@ -49,7 +49,10 @@ from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.unified_h5 import PROFILE as UNIFIED_PROFILE
 from fisheye.shared.unified_h5.display_submissions import load_stimulus_display_submissions
 from fisheye.shared.unified_h5.reference import UnifiedSource, open_unified_source
-from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
+from fisheye.shared.zarr_helpers import (
+    archive_metadata_publication_lock,
+    consolidate_metadata_capture_expected_warnings,
+)
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_failed,
@@ -423,6 +426,11 @@ def publish_stimulus_display_candidate_run(
     """Write a selector-ineligible run; consumers bind to it by explicit path."""
 
     archive = Path(archive).resolve()
+    with archive_metadata_publication_lock(archive):
+        return _publish_locked(archive, result, run_name=run_name)
+
+
+def _publish_locked(archive: Path, result: StimulusDisplayCandidates, *, run_name: str) -> str:
     root = zarr.open_group(str(archive), mode="r+", use_consolidated=False)
     parent = require_runs_parent(root.require_group("analysis"), PARENT_NAME)
     if run_name in parent:
