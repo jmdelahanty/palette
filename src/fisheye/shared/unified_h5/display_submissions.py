@@ -48,6 +48,7 @@ class StimulusDisplaySubmissions:
     first_swap_end_ns_epoch: np.ndarray
     first_swap_end_ns_session: np.ndarray
     first_display_frame_index: np.ndarray
+    last_swap_end_ns_epoch: np.ndarray
     submission_count: np.ndarray
     invalid_prefix_rows: int
     display_rate_target_hz: float
@@ -131,12 +132,14 @@ def build_stimulus_display_submissions(
     first_epoch = np.full(n, NOT_SUBMITTED, dtype=np.int64)
     first_session = np.full(n, NOT_SUBMITTED, dtype=np.int64)
     first_display = np.full(n, -1, dtype=np.int64)
+    last_epoch = np.full(n, NOT_SUBMITTED, dtype=np.int64)
     submission_count = np.zeros(n, dtype=np.int32)
     submitted[position] = True
     first_epoch[position] = epoch[first_row]
     first_session[position] = session[first_row]
     first_display[position] = np.asarray(kept["display_frame_index"], dtype=np.int64)[first_row]
     submission_count[position] = counts
+    last_epoch[position] = epoch[first_row + counts - 1]
 
     return StimulusDisplaySubmissions(
         stimulus_frame_num=states,
@@ -144,6 +147,7 @@ def build_stimulus_display_submissions(
         first_swap_end_ns_epoch=first_epoch,
         first_swap_end_ns_session=first_session,
         first_display_frame_index=first_display,
+        last_swap_end_ns_epoch=last_epoch,
         submission_count=submission_count,
         invalid_prefix_rows=first_valid,
         display_rate_target_hz=float(parent_attrs["display_submission_rate_target_hz"]),
