@@ -51,9 +51,27 @@ would make every existing archive fail that comparison. So:
 | `evidence_snapshot.host_ptp_management_evidence.time_properties` | `currentUtcOffset`, `currentUtcOffsetValid`, `ptpTimescale` |
 | `evidence_snapshot.host_ptp_management_evidence.captured_at_utc`, `pmc_exit_status` | recorded |
 
-These field names come from the contract text and Orange's message. They are
-**not yet verified against a real recording**: none from after 2026-10-11
-21:50 EDT has reached Palette. The first one is the check.
+Orange checked these paths against a real recording made after the fix: the
+2026-10-11 gate recording
+`fourcam_fused_recorder_realfish_int8_192_native_ownerpush_ring_od8ff_s16_integration_20261011_215128`,
+cameras 2010093–2010096. Every path matches. Observed values:
+
+- `origin` is `"1970-01-01T00:00:00 TAI"`, with a space. Palette's v1
+  vocabulary spells it with an underscore, so the record keeps the declared
+  string verbatim in `orange_declaration` and the v1 spelling on the surface.
+- `inference.checks` has 12 keys, all booleans.
+- `currentUtcOffset` is an integer, 37. `currentUtcOffsetValid` and
+  `ptpTimescale` are booleans, not 0/1.
+- `pmc_exit_status` is 0.
+- The recording start comes from top-level `recording.started_at_utc`, not
+  `created_at_utc`. In that recording the evidence was captured 10 s before
+  the start, because the headless runner refreshes it per run.
+
+Also present but not read: `host_ptp_management_evidence.available`,
+`schema_id` `orange.host_ptp.management_evidence` v1, `source_path`,
+`capture_method`, `inference.thresholds_ns` and
+`semantic_authority_by_property`. Palette has not yet read this recording
+itself; the first such delivery to reach intake is Palette's own check.
 
 ## 4. Rule
 
@@ -62,7 +80,7 @@ These field names come from the contract text and Orange's message. They are
 - `inference.result == "direct_ptp_time_properties_pass"`;
 - every `inference.checks` value is `true`;
 - `time_properties.currentUtcOffsetValid` is `true`;
-- `time_properties.ptpTimescale` is true / `"PTP"`;
+- `time_properties.ptpTimescale` is `true` (boolean);
 - `time_properties.currentUtcOffset == inference.expected_tai_minus_utc_seconds`.
 
 **Inferred** (today's v1 rule, unchanged) when the declaration is absent,
@@ -110,7 +128,7 @@ v1 inferred TAI, null otherwise.
   "reason": null,
   "classification": "ieee1588_tai",
   "timescale": "TAI",
-  "origin": "1970-01-01T00:00:00 TAI",
+  "origin": "1970-01-01T00:00:00 TAI",  // verbatim, with a space
   "semantic_authority": "host_ptp_management_dataset_plus_camera_lock_evidence",
   "rule_id": "orange_camera_clock_classification_v3",
   "result": "direct_ptp_time_properties_pass",
@@ -119,7 +137,7 @@ v1 inferred TAI, null otherwise.
   "time_properties": {"currentUtcOffset": 37, "currentUtcOffsetValid": true, "ptpTimescale": true},
   "host_evidence_captured_at_utc": "...",
   "pmc_exit_status": 0,
-  "recording_started_at_utc": "...",
+  "recording_started_at_utc": "... (recording.started_at_utc)",
   "manifest_sha256": "sha256 of recording_session.json"
 },
 "palette_cross_check": {"measured_median_delta_ns": 0, "agrees": true}
