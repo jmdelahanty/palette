@@ -31,10 +31,15 @@ STIMULUS_FRAMES_PATH = "/frames/stimulus"
 
 TABLE_SCHEMA = {
     "schema_id": "citrus.experimental_h5.display_submission",
-    "schema_version": 1,
     "source_schema_id": "citrus.display_frame_submission",
     "source_schema_version": 1,
 }
+# The table's own schema_version: v1 (revisions 2-3) or v2 (frame identity v1,
+# admission revision 4: ``source_camera_frame_id`` removed). This reader uses
+# only ``display_frame_index``, ``source_stimulus_frame_num``,
+# ``source_state_valid`` and the swap times, which both versions carry
+# unchanged; any other version is refused.
+TABLE_VERSIONS = frozenset({1, 2})
 PARENT_SCHEMA = {"schema_id": "citrus.display_timing", "schema_version": 1}
 NOT_SUBMITTED = np.iinfo(np.int64).min
 
@@ -99,6 +104,11 @@ def build_stimulus_display_submissions(
 
     for name, expected in TABLE_SCHEMA.items():
         require(table_attrs.get(name) == expected, f"display_submission_schema:{name}")
+    version = table_attrs.get("schema_version")
+    require(
+        isinstance(version, int) and not isinstance(version, bool) and version in TABLE_VERSIONS,
+        "display_submission_schema:schema_version",
+    )
     for name, expected in PARENT_SCHEMA.items():
         require(parent_attrs.get(name) == expected, f"display_timing_schema:{name}")
 

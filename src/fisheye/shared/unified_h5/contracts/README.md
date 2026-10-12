@@ -22,6 +22,11 @@ They are not Palette scientific-acceptance or activation schemas.
 | `unified_h5_producer_policy_b2af7764.json` (frozen producer policy bound to `bounding_boxes_v2`) | agent-contracts `1a9d8469` `citrus-palette/producer_policies/unified_h5_admission_b2af7764.json` | `b2af7764c7f27f6295007ba3049dcf8a35d0f84c5801f8a1ff56150c7f9e7fc1` |
 | `experimental_h5_core_bounding_boxes_v2.json` (core with bounding_boxes v2, one row per frame per object) | Citrus `4d9d04d0d001cee9d46b2610a87089b4dd46a8ca` (PR 8) | `55f94f83e6f43824488161b7238846b2233933be871ac8044bef04d3fa6df4f8` |
 | `experimental_h5_capacity_preflight_v1_ba8333a3.schema.json` (Citrus `docs/schemas/experimental_h5_capacity_preflight_v1.schema.json`, renamed; bound to `bounding_boxes_v2`) | Citrus `4d9d04d0d001cee9d46b2610a87089b4dd46a8ca` | `ba8333a35526dc1fc655734d938b14a816fd143d2c5eb395ad17065f79718a54` |
+| `unified_h5_admission_v4.json` (admission revision 4: frame identity v1, table-version-map selection, `catalog_id`) | agent-contracts PR 88 `ccbefa9f426b769232e8f3656488ea8cab299644` (unchanged at head `32a3a709`), merged `9e373166a4d4bb11bf530911297d1aabfa93cb63` | `e702df25e5164548c72fa94a683922836567245ed7b7880316ea8ead2d33a0a4` |
+| `unified_h5_producer_policy_3c9866ed.json` (agent-contracts `citrus-palette/producer_policies/unified_h5_admission_3c9866ed.json`, renamed; bound to `frame_identity_v1`) | agent-contracts PR 88 `ccbefa9f`, merged `9e373166` | `3c9866eda2f78c4aa37d1b68a9f4b6245aab8415b3ce8e3412cb3cbf5ab7eb78` |
+| `experimental_h5_core_frame_identity_v1.json` (core catalog `frame_identity_v1`: nine tables re-versioned, no bare `*_frame_id`) | Citrus PR 24 `526c218a26ea711f8dbad4110401f5b8fbd81b86` (same bytes at `43f57c18`), merged `53b68a7` | `4365821df9cdde35d0417fec5b656de12607c211e24232b408e87344883a8264` |
+| `experimental_h5_capacity_preflight_v2.schema.json` (adds `catalog_id`; bound to `frame_identity_v1`) | Citrus PR 24 `43f57c18097896fd1aef449f475982bead4be681` (the policy-pinning commit; the file differs at `526c218`), merged `53b68a7` | `3f78bff9fd51207d035ed9a2feb32660f5232b91d3674389882a4914fbf6bbc3` |
+| `experimental_h5_correspondence_receipt_v3.schema.json` (embedded core table versions no longer enumerated) | Citrus PR 24 `526c218a` (same bytes at `43f57c18`), merged `53b68a7` | `7143f9cff038b4dda1c184e5f0ca7b1b924b541074d24b25b9b0d67dab9d34b4` |
 
 The geometry and presentation adapters follow that producer's
 `src/logging/experimental_h5_geometry.cpp`, `stimulus_geometry_contract.cpp`, and
@@ -50,3 +55,18 @@ per-component source tables), and whole-recording capacity-preflight evidence
 naming the frozen producer policy. `experimental_h5_core_v1.json` stays pinned
 byte-for-byte for provenance only; chaser v1 / correspondence v1 files are
 refused. Optional pose v1 is not yet admitted.
+
+Admission revision 4 (agent-contracts PR 88) sits next to revision 3. The
+capacity preflight's `schema_version` chooses the revision: preflight v1 files
+keep revision 3 and its `(chaser_state, bounding_boxes)` pair key; preflight v2
+files are selected by the full `{core table path -> schema_version}` map over
+their declared, present tables, the declared `catalog_id` must name the same
+catalog (otherwise `catalog_id_mismatch`), and the declared policy must be the
+one bound to it. A `(table, schema_version)` pair names one definition across
+every pinned catalog (`schema.table_schema`), and every present core table must
+carry the selected catalog's version. Correspondence receipts are validated by
+their own `schema_version` (v2 or v3), which must be the one the file's
+admission revision pins. The frame identity v1 witness H5s are under
+`tests/fixtures/citrus_unified_h5_frame_identity_v1` (agent-contracts
+`citrus-palette/fixtures/frame_identity_v1/`: complete and partial-adoption
+from PR 88 `32a3a709`, pose-on and its README row from PR 89 `60856f3f`).
