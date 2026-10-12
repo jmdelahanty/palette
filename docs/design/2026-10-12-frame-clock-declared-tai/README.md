@@ -91,7 +91,7 @@ when `inference.result` is anything else (`fallback_inference_pass`,
 **Cross-check, declared case:** Palette still measures the median
 camera−system delta. It must lie within tolerance (1 s, as v1) of the
 declared offset; the ~9 ms receive delay is well inside that. A contradiction **refuses**
-publication (open question Q1).
+publication (Q1, decided).
 
 **Freshness (Orange's correction):** `captured_at_utc` can be hours or days
 older than the recording. A ptp4l restart in between is not visible. Palette
