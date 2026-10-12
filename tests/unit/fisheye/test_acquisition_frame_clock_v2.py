@@ -231,3 +231,99 @@ def test_a_v2_record_must_agree_with_its_declaration_evidence(tmp_path):
     mismatched["schema_id"] = "palette.acquisition_frame_clock.v1"  # v1 id with version 2
     with pytest.raises(AcquisitionFrameClockError, match="schema_version"):
         clock._validate_record(mismatched)
+
+
+# --- PTP status readback (data-export finding, Jeremy 2026-10-12) -----------
+# v1 read ptp_status/ptp_state/gev_ieee1588_status, which Orange never wrote, so
+# its status check always passed. v2 reads cameras.<serial>.ptp_status_readback.
+
+STABLE = {"first": "Slave", "last": "Slave", "changes": 0, "samples": 60}
+
+
+def _with_readback(recording: Path, readback: dict | None) -> None:
+    path = recording / "raw" / "ptp_sync_summary.json"
+    summary = json.loads(path.read_text())
+    if readback is None:
+        summary["cameras"][CAMERA].pop("ptp_status_readback", None)
+    else:
+        summary["cameras"][CAMERA]["ptp_status_readback"] = readback
+    path.write_text(json.dumps(summary))
+
+
+def test_a_stable_slave_readback_is_recorded_with_a_declaration(tmp_path):
+    recording, video = _recording(tmp_path, block=_declaration())
+    _with_readback(recording, STABLE)
+    _root, resolved = _publish(recording, video)
+    evidence = resolved.record["clock_semantic_evidence"]["ptp_status_readback"]
+    assert evidence == {"present": True, "value": STABLE, "stable_slave": True,
+                        "rule": "first == last == 'Slave' and changes == 0"}
+    assert resolved.record["clock_surfaces"]["camera_timestamp_ns"]["semantic_authority"] == "orange_declared"
+
+
+@pytest.mark.parametrize(
+    "readback",
+    [
+        {**STABLE, "changes": 1},
+        {**STABLE, "first": "Listening"},
+        {**STABLE, "last": "Uncalibrated"},
+        {**STABLE, "changes": "0"},
+    ],
+)
+def test_an_unstable_readback_refuses_a_declaration(tmp_path, readback):
+    recording, video = _recording(tmp_path, block=_declaration())
+    _with_readback(recording, readback)
+    with pytest.raises(AcquisitionFrameClockError, match="not a stable Slave"):
+        _publish(recording, video)
+
+
+def test_an_unstable_readback_withdraws_palettes_inferred_tai(tmp_path):
+    recording, video = _recording(tmp_path, block=None)  # no declaration: v1 inference says TAI
+    _with_readback(recording, {**STABLE, "first": "Listening", "changes": 2})
+    _root, resolved = _publish(recording, video)
+    camera = resolved.record["clock_surfaces"]["camera_timestamp_ns"]
+    assert camera["semantic_authority"] == "palette_inferred"
+    assert camera["time_reference_kind"] == "device_defined_unknown_epoch"
+    assert camera["tai_minus_utc_seconds"] is None
+    assert camera["semantic_status"] == "ptp_inference_contradicted_by_status_readback"
+    assert resolved.record["clock_semantic_evidence"]["ptp_status_readback"]["stable_slave"] is False
+
+
+def test_no_readback_keeps_the_inference(tmp_path):
+    recording, video = _recording(tmp_path, block=None)
+    _root, resolved = _publish(recording, video)
+    assert resolved.record["clock_semantic_evidence"]["ptp_status_readback"]["present"] is False
+    assert resolved.record["clock_surfaces"]["camera_timestamp_ns"]["tai_minus_utc_seconds"] == 37
+
+
+def test_a_v2_record_may_not_label_tai_against_an_unstable_readback(tmp_path):
+    recording, video = _recording(tmp_path, block=_declaration())
+    _with_readback(recording, STABLE)
+    _root, resolved = _publish(recording, video)
+    tampered = copy.deepcopy(dict(resolved.record))
+    tampered["clock_semantic_evidence"]["ptp_status_readback"]["stable_slave"] = False
+    with pytest.raises(AcquisitionFrameClockError, match="unstable PTP status readback"):
+        clock._validate_record(tampered)
+    missing = copy.deepcopy(dict(resolved.record))
+    missing["clock_semantic_evidence"].pop("ptp_status_readback")
+    with pytest.raises(AcquisitionFrameClockError, match="PTP status readback"):
+        clock._validate_record(missing)
+
+
+def test_v1_rules_still_ignore_the_readback(tmp_path):
+    # v1 stays byte-for-byte: its surfaces and evidence do not depend on the
+    # readback. (v1 evidence also binds the summary file's size/mtime, which
+    # any rewrite changes, so that stat field is set aside here.)
+    recording, video = _recording(tmp_path, block=None)
+
+    def v1_semantics():
+        source = load_acquisition_frame_clock_source(
+            recording, camera_id=CAMERA, video_path=video, expected_frame_count=4
+        )
+        record = clock._build_record(source, 1)
+        evidence = dict(record["clock_semantic_evidence"])
+        evidence.pop("ptp_sync_summary")
+        return record["clock_surfaces"], evidence
+
+    before = v1_semantics()
+    _with_readback(recording, {**STABLE, "first": "Listening", "changes": 2})
+    assert v1_semantics() == before
