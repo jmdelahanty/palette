@@ -942,7 +942,20 @@ def _verify_current_import_surfaces(
     if clipped and inventory is not None:
         streams = inventory["streams"]
     if "crop" in streams or root.attrs.get("acquisition_crop_ledger_available") is True:
-        validate_current_acquisition_crop_stream_ledger(root)
+        # Validate the ledger through the consolidated view (one root metadata
+        # read instead of one zarr.json open per ledger array: about 2 s per
+        # camera on NFS, 0.04 s consolidated), then prove the subtree's direct
+        # declarations and group attributes equal that view. Together these
+        # are the same claim as validating the direct view. Without a
+        # consolidated view the equivalence check owns the refusal.
+        try:
+            ledger_view = zarr.open_group(str(resolved), mode="r", use_consolidated=True)
+        except ValueError:
+            validate_direct_consolidated_subtree(
+                resolved, subtree_path="analysis/acquisition_video_streams"
+            )
+            ledger_view = root
+        validate_current_acquisition_crop_stream_ledger(ledger_view)
         validate_direct_consolidated_subtree(
             resolved, subtree_path="analysis/acquisition_video_streams"
         )

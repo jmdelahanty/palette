@@ -484,3 +484,52 @@ def test_declared_crop_ledger_is_required_after_real_current_import(
         RecordingIdentityAuthorityError, match="no acquisition crop stream"
     ):
         load_verified_recording_import_receipt(plan.zarr_path)
+
+
+def _imported_crop_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    recording = _write_current_clipped_recording(tmp_path, crop=True)
+    _stub_only_checkout_identity(monkeypatch)
+    plan = importer.resolve_single_recording_plan(recording_dir=recording, require_h5=False)
+    result = importer.process_recording_import(plan, _options())
+    assert result.ok, result
+    load_verified_recording_import_receipt(plan.zarr_path)  # the clean import verifies
+    return plan
+
+
+def _ledger_run(plan) -> zarr.Group:
+    root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    crop = root["analysis/acquisition_video_streams/streams/crop"]
+    return crop["ledger_runs"][crop.attrs["canonical_ledger_run"]]
+
+
+def test_a_ledger_changed_only_in_its_direct_metadata_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The ledger is validated through the consolidated view; the direct
+    # declarations must still be proven equal to it.
+    plan = _imported_crop_recording(tmp_path, monkeypatch)
+    _ledger_run(plan).attrs["publication_status"] = "draft"  # not re-consolidated
+    with pytest.raises(RecordingIdentityAuthorityError, match="not complete|Direct/consolidated|differ"):
+        load_verified_recording_import_receipt(plan.zarr_path)
+
+
+def test_a_consistently_changed_ledger_is_refused_by_the_ledger_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _imported_crop_recording(tmp_path, monkeypatch)
+    _ledger_run(plan).attrs["publication_status"] = "draft"
+    consolidate_metadata_capture_expected_warnings(str(plan.zarr_path))
+    with pytest.raises(RecordingIdentityAuthorityError, match="crop ledger run is not complete"):
+        load_verified_recording_import_receipt(plan.zarr_path)
+
+
+def test_a_crop_recording_without_consolidated_metadata_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _imported_crop_recording(tmp_path, monkeypatch)
+    root_metadata = plan.zarr_path / "zarr.json"
+    document = json.loads(root_metadata.read_text())
+    document.pop("consolidated_metadata", None)
+    root_metadata.write_text(json.dumps(document))
+    with pytest.raises(RecordingIdentityAuthorityError):
+        load_verified_recording_import_receipt(plan.zarr_path)
