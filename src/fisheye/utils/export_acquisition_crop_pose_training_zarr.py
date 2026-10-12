@@ -47,6 +47,7 @@ from fisheye.shared.zarr_run_completion import (
     resolve_authoritative_run_name,
 )
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
+from fisheye.shared.orange_frame_identity import crop_meta_stream_frame_field
 
 
 SCHEMA_ID = "palette.acquisition_crop_pose_training_export.v1"
@@ -268,10 +269,12 @@ def load_crop_meta_table(crop_meta_path: Path) -> _CropMetaTable:
         missing = sorted(required - set(reader.fieldnames or ()))
         if missing:
             raise ValueError(f"Crop metadata missing required columns: {missing}")
+        # frame_identity_v1: stream_frame_id (adopted) or local_frame_id (before).
+        stream_field = crop_meta_stream_frame_field(reader.fieldnames or (), label=str(crop_meta_path))
         for row_index, row in enumerate(reader):
             frame = _safe_int(row.get("recording_frame_id"), default=0) - 1
             video_frame = _safe_int(row.get("crop_video_frame_index"), default=row_index)
-            local_frame = _safe_int(row.get("local_frame_id"), default=row_index)
+            local_frame = _safe_int((row.get(stream_field) if stream_field else None), default=row_index)
             frame_indices.append(frame)
             video_frame_indices.append(video_frame)
             local_frame_ids.append(local_frame)

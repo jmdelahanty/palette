@@ -45,10 +45,11 @@ def _rim_entry(
     source_sha: str = "sha256:" + "a" * 64,
     source_path: str = "/orange/immutable/observation.json",
     gate_radius: float = 205.0,
+    rim_version: int = 2,
 ) -> dict[str, object]:
     return {
         "artifact_schema_id": "orange.calibration.dish_top_rim_observation",
-        "artifact_schema_version": 2,
+        "artifact_schema_version": rim_version,
         "artifact_id": f"dishrim-{camera}",
         "camera_serial": camera,
         "arena_id": arena,
@@ -104,7 +105,13 @@ def _write_folder_bundle(
     *,
     include_pointer: bool = True,
     gate_radius: float = 205.0,
+    contract_version: int = 1,
+    assets_version: int | None = None,
+    rim_version: int | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
+    # Contract v2 (Orange bb6c4f5) binds assets v2 and rim observation v3.
+    assets_version = contract_version if assets_version is None else assets_version
+    rim_version = contract_version + 1 if rim_version is None else rim_version
     root.mkdir(parents=True, exist_ok=True)
     assets = root / "recording_geometry_assets"
     observation_rel = (
@@ -116,10 +123,10 @@ def _write_folder_bundle(
     observation_path.write_bytes(observation_bytes)
     observation_sha = _sha(observation_bytes)
 
-    entry = _rim_entry(source_sha=observation_sha, gate_radius=gate_radius)
+    entry = _rim_entry(source_sha=observation_sha, gate_radius=gate_radius, rim_version=rim_version)
     manifest = {
         "schema_id": "orange.recording.geometry_assets",
-        "schema_version": 1,
+        "schema_version": assets_version,
         "status": "complete",
         "materialized_file_count": 1,
         "files": [
@@ -138,7 +145,7 @@ def _write_folder_bundle(
     registration_id = "dailyreg-1"
     contract = {
         "schema_id": "orange.recording.geometry_contract",
-        "schema_version": 1,
+        "schema_version": contract_version,
         "status": "resolved",
         "selection": {
             "rig_id": "omnifin0",
@@ -158,7 +165,7 @@ def _write_folder_bundle(
         },
         "materialized_assets": {
             "schema_id": "orange.recording.geometry_assets",
-            "schema_version": 1,
+            "schema_version": assets_version,
             "status": "complete",
             "relative_path": "recording_geometry_assets/manifest.json",
             "sha256": _sha(manifest_bytes),
@@ -653,3 +660,36 @@ def test_h5_loader_classifies_unreferenced_geometry_as_legacy(tmp_path: Path) ->
 
     assert result.mask_geometry_status is MaskGeometryStatus.LEGACY_MISSING
     assert result.issues[0].code == "legacy_missing_recording_bound_mask"
+
+
+def test_folder_loader_reads_a_v2_geometry_contract_like_v1(tmp_path: Path) -> None:
+    # frame_identity_v1 (agent-contracts #87): contract v2 / assets v2 / rim v3
+    # change only versions and frame-reference names Palette does not read.
+    _write_folder_bundle(tmp_path / "v1")
+    _write_folder_bundle(tmp_path / "v2", contract_version=2)
+    old = load_registered_dish_masks_from_recording_folder(tmp_path / "v1")
+    new = load_registered_dish_masks_from_recording_folder(tmp_path / "v2")
+    assert new.mask_geometry_status is MaskGeometryStatus.VALID
+    (a,), (b,) = old.masks.values(), new.masks.values()
+    assert (a.physical_inner_rim, a.valid_detection_gate) == (b.physical_inner_rim, b.valid_detection_gate)
+
+
+@pytest.mark.parametrize(
+    ("contract_version", "assets_version", "rim_version", "message"),
+    [
+        (2, 2, 2, "must embed dish rim observation version 3"),
+        (1, 1, 3, "must embed dish rim observation version 2"),
+        (2, 1, 3, "asset manifest must be"),
+        (3, 3, 4, "version 1 or 2"),
+    ],
+)
+def test_folder_loader_refuses_mismatched_geometry_versions(
+    tmp_path: Path, contract_version: int, assets_version: int, rim_version: int, message: str
+) -> None:
+    _write_folder_bundle(
+        tmp_path, contract_version=contract_version, assets_version=assets_version, rim_version=rim_version
+    )
+    result = load_registered_dish_masks_from_recording_folder(tmp_path)
+    assert result.mask_geometry_status is MaskGeometryStatus.INVALID
+    assert result.masks == {}
+    assert message in result.issues[0].message

@@ -46,7 +46,12 @@ def test_an_unbuildable_validator_fails_the_check(monkeypatch) -> None:
 
 def test_every_pinned_intake_schema_is_checked() -> None:
     labels = {label for label, _ in runtime._validators()}
-    assert {"transfer envelope", "frame identity proof", "citrus subject snapshot"} <= labels
+    assert {
+        "transfer envelope",
+        "frame identity proof v2",
+        "frame identity proof v3",
+        "citrus subject snapshot",
+    } <= labels
     assert any(label.startswith("orange recording_output") for label in labels)
     assert any(label.startswith("orange subject reference") for label in labels)
 
