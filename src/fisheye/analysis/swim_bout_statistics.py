@@ -40,6 +40,9 @@ from chaser_analysis.swimming_bout_analysis import (
     EnhancedBoutAnalyzer,
     CalibrationData,
 )
+from fisheye.shared.citrus_camera_frame_id import (
+    parent_frame_index_from_citrus_camera_frame_id,
+)
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.shared.system_metadata import get_git_info
@@ -517,14 +520,17 @@ def _build_stimulus_lookup(stimulus_group: zarr.Group) -> Tuple[pd.DataFrame, Di
 
 
 def _resolve_event_camera_frame(event: pd.Series, stim_to_cam: Dict[int, int]) -> Optional[int]:
-    """Determine camera frame for an event record."""
+    """Determine the 0-based camera frame index for an event record."""
     for col in ("camera_frame_id", "camera_frame_num"):
         if col in event and not pd.isna(event[col]):
-            return int(event[col])
+            return parent_frame_index_from_citrus_camera_frame_id(event[col])
     stim_frame = event.get("stimulus_frame_num")
     if pd.isna(stim_frame):
         return None
-    return stim_to_cam.get(int(stim_frame))
+    camera_frame_id = stim_to_cam.get(int(stim_frame))
+    if camera_frame_id is None:
+        return None
+    return parent_frame_index_from_citrus_camera_frame_id(camera_frame_id)
 
 
 def _generate_trial_segments(
