@@ -36,6 +36,10 @@ import h5py
 import numpy as np
 
 from fisheye.shared.citrus_enums import STIMULUS_MODE
+from fisheye.shared.heading_convention import (
+    LEGACY_CANVAS_ANGLE,
+    STIMULUS_ANGLE_CONVENTION,
+)
 
 
 PROTOCOL_SEMANTIC_HASH_H5_PATH = "/protocol_snapshot/protocol_semantic_hash"
@@ -58,6 +62,15 @@ PROTOCOL_TRIAL_INDEX_NORMALIZATION_POLICIES = MappingProxyType(
         2: "citrus.protocol.trial_index.v2",
     }
 )
+
+# Stimulus angle convention v1 (agent-contracts citrus-palette/angles, unified
+# H5 admission revision 5 / catalog angle_v1): the protocol carries a top-level
+# ``stimulus_angle_convention`` under semantic policy v2 and trial index v3.
+# Accepted only when the caller passes the convention its admitted binding
+# fixed; the default (legacy) keeps the historical v1/v2 contract unchanged.
+PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY = "citrus.protocol.semantic.v2"
+PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION = 3
+PROTOCOL_TRIAL_INDEX_ANGLE_V1_NORMALIZATION_POLICY = "citrus.protocol.trial_index.v3"
 
 PROTOCOL_SNAPSHOT_SCHEMA_ID = "citrus.protocol.snapshot"
 PROTOCOL_SNAPSHOT_SCHEMA_VERSION = 2
@@ -332,8 +345,26 @@ def validate_protocol_semantic_snapshot(
     trial_index_hash: str | None = None,
     snapshot_schema_version: int = 1,
     snapshot_policy_id: str = "citrus.protocol.snapshot.legacy_v1",
+    stimulus_angle_convention: str = LEGACY_CANVAS_ANGLE,
 ) -> ProtocolSemanticSnapshot:
-    """Validate exact producer bytes and return a typed immutable snapshot."""
+    """Validate exact producer bytes and return a typed immutable snapshot.
+
+    ``stimulus_angle_convention`` is the convention the recording's admitted
+    binding fixed (never read from the payloads). Under
+    ``STIMULUS_ANGLE_CONVENTION`` the snapshot must be v2 with semantic policy
+    v2 and trial index v3, each declaring that id; under the legacy default
+    the historical contract applies unchanged.
+    """
+
+    angle_v1 = stimulus_angle_convention == STIMULUS_ANGLE_CONVENTION
+    if not angle_v1 and stimulus_angle_convention != LEGACY_CANVAS_ANGLE:
+        raise ProtocolSemanticContractError(
+            "stimulus_angle_convention must be a registered convention id."
+        )
+    if angle_v1 and snapshot_schema_version != PROTOCOL_SNAPSHOT_SCHEMA_VERSION:
+        raise ProtocolSemanticContractError(
+            "stimulus angle convention v1 requires Citrus snapshot v2."
+        )
 
     if type(snapshot_schema_version) is not int or snapshot_schema_version not in (1, 2):
         raise ProtocolSemanticContractError(
@@ -370,7 +401,9 @@ def validate_protocol_semantic_snapshot(
     )
     _require_exact(
         semantic.get("normalization_policy"),
-        PROTOCOL_SEMANTIC_NORMALIZATION_POLICY,
+        PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY
+        if angle_v1
+        else PROTOCOL_SEMANTIC_NORMALIZATION_POLICY,
         name="protocol_semantic_json.normalization_policy",
     )
 
@@ -385,21 +418,42 @@ def validate_protocol_semantic_snapshot(
         name="protocol_trial_index_json.schema_version",
         minimum=1,
     )
-    if trial_schema_version not in PROTOCOL_TRIAL_INDEX_SCHEMA_VERSIONS:
-        raise ProtocolSemanticContractError(
-            "protocol_trial_index_json.schema_version is unsupported."
+    if angle_v1:
+        _require_exact(
+            trial_schema_version,
+            PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION,
+            name="protocol_trial_index_json.schema_version",
         )
-    expected_trial_schema_version = 2 if snapshot_schema_version == 2 else 1
-    _require_exact(
-        trial_schema_version,
-        expected_trial_schema_version,
-        name="protocol_trial_index_json.schema_version",
-    )
-    _require_exact(
-        trial.get("normalization_policy"),
-        PROTOCOL_TRIAL_INDEX_NORMALIZATION_POLICIES[trial_schema_version],
-        name="protocol_trial_index_json.normalization_policy",
-    )
+        _require_exact(
+            trial.get("normalization_policy"),
+            PROTOCOL_TRIAL_INDEX_ANGLE_V1_NORMALIZATION_POLICY,
+            name="protocol_trial_index_json.normalization_policy",
+        )
+        for name, payload in (
+            ("protocol_semantic_json", semantic),
+            ("protocol_trial_index_json", trial),
+        ):
+            _require_exact(
+                payload.get("stimulus_angle_convention"),
+                STIMULUS_ANGLE_CONVENTION,
+                name=f"{name}.stimulus_angle_convention",
+            )
+    else:
+        if trial_schema_version not in PROTOCOL_TRIAL_INDEX_SCHEMA_VERSIONS:
+            raise ProtocolSemanticContractError(
+                "protocol_trial_index_json.schema_version is unsupported."
+            )
+        expected_trial_schema_version = 2 if snapshot_schema_version == 2 else 1
+        _require_exact(
+            trial_schema_version,
+            expected_trial_schema_version,
+            name="protocol_trial_index_json.schema_version",
+        )
+        _require_exact(
+            trial.get("normalization_policy"),
+            PROTOCOL_TRIAL_INDEX_NORMALIZATION_POLICIES[trial_schema_version],
+            name="protocol_trial_index_json.normalization_policy",
+        )
     _require_exact(
         trial.get("protocol_semantic_hash"),
         semantic_hash,

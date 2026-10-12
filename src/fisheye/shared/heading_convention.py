@@ -53,6 +53,27 @@ definitions, so that no module re-derives them privately:
     radians (Palette's angle convention, but of a motion vector, not a fish
     body axis).
 
+Stimulus angles (agent-contracts ``citrus-palette/angles/
+stimulus_angle_convention_v1.json``, PR 91, vendored as
+``fisheye/shared/contracts/citrus_palette_stimulus_angle_convention_v1.json``):
+
+``STIMULUS_ANGLE_CONVENTION`` (= ``ANGLE_CONVENTION``)
+    The same id names the same rule on any y-down raster (stimulus canvas,
+    camera view): 0 = raster right, +90 = raster up, counter-clockwise on the
+    image, angle = ``degrees(atan2(-y, x))``. Recorded values are finite and
+    not normalised (270, -90 and 630 name one direction); compare them only
+    through ``wrap_delta_degrees``. A stimulus angle never crosses rasters by
+    number: map its vector through the homography Jacobian instead.
+
+``LEGACY_CANVAS_ANGLE`` (Citrus, before unified-H5 catalog ``angle_v1``)
+    ``canvas_y_down_clockwise_legacy``: 0 = +x (right), +90 = down on the
+    raster, positive clockwise on the image; vector ``(cos t, sin t)``, angle
+    ``degrees(atan2(y, x))``. ``theta_v1 = -theta_legacy`` on the same raster
+    (``legacy_canvas_angle_to_degrees``). Which convention a unified H5's
+    stimulus angles follow is fixed by its admitted catalog binding
+    (``fisheye.shared.unified_h5.schema.admitted_binding``), never by its date
+    or by the session attribute alone.
+
 Known non-conforming site, deliberately not migrated:
 ``fisheye.visualization.chaser_ring_traversal._chase_frame_heading`` draws the
 fish heading in the chaser-centred frame and, where no body heading exists,
@@ -66,6 +87,10 @@ import numpy as np
 
 ANGLE_CONVENTION = "atan2_negative_y_x_degrees"
 HANDEDNESS = "forward_cross_left_negative_source_camera_xy"
+
+# Stimulus direction angles share the heading's id (one rule for any y-down raster).
+STIMULUS_ANGLE_CONVENTION = ANGLE_CONVENTION
+LEGACY_CANVAS_ANGLE = "canvas_y_down_clockwise_legacy"
 
 MEGABOUTS_HEAD_YAW = "megabouts_head_yaw_atan2_tail_base_to_head_no_y_flip_radians"
 CHASER_CENTRED_BEARING = "chaser_centred_clockwise_from_chaser_heading_y_up_mm_degrees"
@@ -100,6 +125,38 @@ def wrap_delta_radians(delta, *, dtype=np.float64) -> np.ndarray:
     return (np.asarray(delta, dtype=dtype) + np.pi) % (2.0 * np.pi) - np.pi
 
 
+def legacy_canvas_angle_to_degrees(legacy_deg, *, dtype=np.float64) -> np.ndarray:
+    """A ``LEGACY_CANVAS_ANGLE`` value in ``STIMULUS_ANGLE_CONVENTION`` degrees.
+
+    Same raster, same vector, opposite sign: legacy 90 (down) is -90, legacy
+    270 (up) is -270, i.e. 90. The result is not normalised (the current
+    convention keeps finite values as recorded, and -180 stays -180); compare
+    it only through ``wrap_delta_degrees``.
+    """
+
+    return -np.asarray(legacy_deg, dtype=dtype)
+
+
+def stimulus_angle_vector(
+    angle_deg, convention: str = STIMULUS_ANGLE_CONVENTION, *, dtype=np.float64
+) -> tuple[np.ndarray, np.ndarray]:
+    """Unit vector ``(x, y)`` on a y-down raster named by a stimulus angle.
+
+    ``convention`` is the one the recording's admitted binding fixed:
+    ``STIMULUS_ANGLE_CONVENTION`` gives ``(cos t, -sin t)`` (+90 = up),
+    ``LEGACY_CANVAS_ANGLE`` gives ``(cos t, sin t)`` (+90 = down).
+    """
+
+    if convention == STIMULUS_ANGLE_CONVENTION:
+        sign = -1.0
+    elif convention == LEGACY_CANVAS_ANGLE:
+        sign = 1.0
+    else:
+        raise ValueError(f"unknown stimulus angle convention: {convention!r}")
+    theta = np.radians(np.asarray(angle_deg, dtype=dtype))
+    return np.cos(theta), sign * np.sin(theta)
+
+
 def megabouts_head_yaw_radians(head_to_tail_base_x, head_to_tail_base_y) -> np.ndarray:
     """``MEGABOUTS_HEAD_YAW`` of ``v = tail_base - head`` (float64 radians)."""
 
@@ -118,12 +175,16 @@ __all__ = [
     "ANGLE_CONVENTION",
     "CHASER_CENTRED_BEARING",
     "HANDEDNESS",
+    "LEGACY_CANVAS_ANGLE",
     "MEGABOUTS_HEAD_YAW",
+    "STIMULUS_ANGLE_CONVENTION",
     "chaser_centred_bearing_degrees",
     "heading_degrees",
     "image_angle_degrees",
     "left_axis",
+    "legacy_canvas_angle_to_degrees",
     "megabouts_head_yaw_radians",
+    "stimulus_angle_vector",
     "wrap_delta_degrees",
     "wrap_delta_radians",
 ]
