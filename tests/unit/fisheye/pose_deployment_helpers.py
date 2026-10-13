@@ -12,7 +12,7 @@ from fisheye.registry.db import Registry
 from fisheye.shared import pose_model_input_contract as input_contract
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
-from fisheye.utils.promote_registered_pose_model import _canonical_onnx_manifest
+from fisheye.utils.promote_registered_model import _canonical_onnx_manifest
 from tests.unit.fisheye.test_promote_registered_pose_model import (
     RUN_ID,
     SET_ID,
@@ -21,7 +21,9 @@ from tests.unit.fisheye.test_promote_registered_pose_model import (
 )
 
 
-def source_bundle(tmp_path: Path, *, count: int = 3) -> tuple[Path, dict]:
+def source_bundle(
+    tmp_path: Path, *, count: int = 3, canonical_version: int = 2
+) -> tuple[Path, dict]:
     package = _source_package(tmp_path)
     root = package["root"]
     manifest = root / "inputs" / f"{SET_ID}.manifest.json"
@@ -101,6 +103,7 @@ def source_bundle(tmp_path: Path, *, count: int = 3) -> tuple[Path, dict]:
         )
     write_json_atomic(contract_path, contract)
     plan = {
+        "task": "pose",
         "run_id": RUN_ID,
         "set_id": SET_ID,
         "relative": {
@@ -114,12 +117,23 @@ def source_bundle(tmp_path: Path, *, count: int = 3) -> tuple[Path, dict]:
     plan["relative"]["model"] = plan["relative"].pop("weights")
     plan["digests"]["model"] = plan["digests"].pop("weights")
     canonical = root / "exports/onnx" / f"{RUN_ID}.canonical.manifest.json"
-    write_json_atomic(
-        canonical,
-        _canonical_onnx_manifest(
-            plan=plan, package_root=root, contract_path=contract_path
-        ),
+    source_canonical = _canonical_onnx_manifest(
+        plan=plan, package_root=root, contract_path=contract_path
     )
+    if canonical_version == 1:
+        # The shape promotion wrote before 2026-10-12 (bare hex, payload_digest).
+        payload = json.loads(json.dumps(source_canonical["payload"]))
+        for key in ("weights", "onnx", "source_export_manifest", "pose_model_input_contract"):
+            payload[key]["sha256"] = payload[key]["sha256"].removeprefix("sha256:")
+        contract_ref = payload["pose_model_input_contract"]
+        contract_ref["payload_digest"] = contract_ref.pop("payload_sha256").removeprefix("sha256:")
+        source_canonical = {
+            "schema_id": "palette.canonical_onnx_model_manifest",
+            "schema_version": 1,
+            "payload_digest": canonical_json_sha256(payload),
+            "payload": payload,
+        }
+    write_json_atomic(canonical, source_canonical)
     registry_path = tmp_path / "registry.sqlite"
     with closing(Registry(registry_path)) as registry:
         skeleton_id = registry.upsert_pose_skeleton_spec(

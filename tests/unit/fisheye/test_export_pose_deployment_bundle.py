@@ -34,8 +34,11 @@ def test_real_producer_bundle_reader_roundtrip_is_relocatable_and_preserves_sour
     assert _sha(registry) == registry_before
     assert _inventory(source["root"]) == source_before
     assert _sha(destination / source["onnx"].name) == _sha(source["onnx"])
-    assert json.loads(source["canonical"].read_text())["schema_version"] == 1
-    assert json.loads(manifest.read_text())["schema_version"] == 2
+    assert json.loads(source["canonical"].read_text())["schema_version"] == 2
+    bundle = json.loads(manifest.read_text())
+    assert (bundle["schema_id"], bundle["schema_version"]) == (
+        "palette.pose_deployment_bundle_manifest", 1,
+    )
     assert not (destination / "weights").exists()
 
     relocated = tmp_path / "remote" / "model_bundle"
@@ -253,3 +256,27 @@ def test_registry_conflicts_fail_before_creating_output(tmp_path, problem):
             registry=registry, run_id=RUN_ID, destination=destination, apply=True
         )
     assert not destination.exists()
+
+
+def test_a_v1_source_canonical_manifest_still_exports(tmp_path):
+    # Packages promoted before 2026-10-12 carry a v1 canonical manifest.
+    registry, source = source_bundle(tmp_path, canonical_version=1)
+    assert json.loads(source["canonical"].read_text())["schema_version"] == 1
+    destination = tmp_path / "deployment_from_v1"
+    export_bundle(registry=registry, run_id=RUN_ID, destination=destination, apply=True)
+    manifest = destination / f"{RUN_ID}.canonical.manifest.json"
+    load_pose_deployment_bundle(manifest, expected_manifest_sha256=_sha(manifest))
+
+
+def test_a_bundle_stamped_with_the_canonical_manifest_id_is_refused(tmp_path):
+    # The 2026-09-23 bundle stamped palette.canonical_onnx_model_manifest v2,
+    # which is now the model-package manifest's v2. Such a file is not a bundle.
+    registry, _ = source_bundle(tmp_path)
+    destination = tmp_path / "deployment"
+    export_bundle(registry=registry, run_id=RUN_ID, destination=destination, apply=True)
+    manifest = destination / f"{RUN_ID}.canonical.manifest.json"
+    document = json.loads(manifest.read_text())
+    document.update(schema_id="palette.canonical_onnx_model_manifest", schema_version=2)
+    manifest.write_text(json.dumps(document))
+    with pytest.raises(ValueError, match="Unsupported pose deployment bundle manifest"):
+        load_pose_deployment_bundle(manifest, expected_manifest_sha256=_sha(manifest))

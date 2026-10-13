@@ -53,15 +53,22 @@ The standalone directory contains these seven files:
 | --- | --- |
 | `<run>.onnx` | Exact registered ONNX bytes |
 | `<run>.onnx.manifest.json` | Unchanged source export evidence |
-| `source.canonical.manifest.json` | Unchanged promoted v1 canonical evidence |
+| `source.canonical.manifest.json` | Unchanged promoted canonical evidence (`palette.canonical_onnx_model_manifest` v1 or v2) |
 | `training.manifest.json` | Exact training manifest, not the training dataset |
 | `pose_model_input_contract.json` | Unchanged v3 preprocessing/runtime contract |
 | `pose_model_skeleton.json` | New v1 projection of the existing schema binding |
-| `<run>.canonical.manifest.json` | New v2 portable bundle/completion manifest |
+| `<run>.canonical.manifest.json` | The bundle's completion manifest, `palette.pose_deployment_bundle_manifest` v1 |
 
-The existing `palette.canonical_onnx_model_manifest` v1 uses model-package-root
-paths. It remains immutable and its producer remains compatible. New v2 uses
-`payload.path_base="manifest_directory"`; every deployable artifact reference
+Two manifests, two schema ids (renamed 2026-10-13; the bundle first shipped
+stamped as `palette.canonical_onnx_model_manifest` v2, which collided with that
+schema's published v2, and that stamp is refused):
+
+- `palette.canonical_onnx_model_manifest` (v1 or v2, pose and detect) lives in a
+  promoted model package and uses model-package-root paths. It stays immutable;
+  the bundle carries it unchanged as `source.canonical.manifest.json` and accepts
+  either version.
+- `palette.pose_deployment_bundle_manifest` v1 (pose only) is this bundle's own
+  manifest. It uses `payload.path_base="manifest_directory"`; every deployable artifact reference
 is `{relative_path, sha256}` relative to that directory. The input-contract
 reference additionally retains `payload_digest`. Paths must be unambiguous
 relative POSIX paths without traversal or symlink components.
@@ -74,8 +81,8 @@ cross-checked against the model binding. Weights remain a digest-only reference.
 
 Consumers must dispatch on both `schema_id` and integer `schema_version` and
 reject unsupported versions, absent required files, contradictions, and digest
-failures. They must not reinterpret v1 as v2 or silently fall back to a config
-skeleton. The Python reader is the executable v2 conformance reference; this
+failures. They must not read one schema id as the other or silently fall back to
+a config skeleton. The Python reader is the executable bundle conformance reference; this
 document does not define a second schema resolver.
 
 ## Skeleton sidecar v1
@@ -112,7 +119,7 @@ bytes unchanged. Receive the canonical manifest file SHA-256 through the trusted
 handoff, then verify it before following artifact references. Hash consistency
 alone is not authentication of an arbitrary sender.
 
-The v2 envelope is exactly `{schema_id, schema_version, payload_digest, payload}`.
+The bundle manifest envelope is exactly `{schema_id, schema_version, payload_digest, payload}`.
 Its closed payload comprises `status`, `task`, `run_id`, `set_id`, `path_base`,
 `selector_activation`, `weights`, `onnx_interface`, `producer`, and the six
 artifact roles shown above (excluding the completion manifest itself).

@@ -22,15 +22,20 @@ from typing import Any, Sequence
 
 from fisheye.shared.artifact_fingerprint import require_artifact_content_identity
 from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.canonical_onnx_model_manifest import (
+    CanonicalOnnxManifestError,
+    validate_canonical_onnx_manifest,
+)
 from fisheye.shared.pose_deployment_manifest import (
     ARTIFACT_ROLES,
-    CANONICAL_ONNX_MANIFEST_SCHEMA_ID,
     artifact_reference,
+    bare_sha256,
     canonical_manifest,
     load_pose_deployment_bundle,
     read_json_document,
     require_sha256,
     resolve_artifact,
+    source_contract_payload_digest,
     validate_pose_deployment_document,
 )
 from fisheye.shared.pose_model_input_contract import load_pose_model_input_contract
@@ -114,25 +119,27 @@ def _prepare(registry_path: Path, run_id: str) -> dict[str, Any]:
     )
     original = read_json_document(source_canonical)
     payload = original.get("payload", {})
+    try:
+        validate_canonical_onnx_manifest(original)
+    except CanonicalOnnxManifestError as exc:
+        raise ValueError(
+            f"Source requires a valid promoted canonical pose manifest (v1 or v2): {exc}"
+        ) from exc
     if (
-        original.get("schema_id") != CANONICAL_ONNX_MANIFEST_SCHEMA_ID
-        or type(original.get("schema_version")) is not int
-        or original["schema_version"] != 1
-        or type(payload) is not dict
-        or original.get("payload_digest") != canonical_json_sha256(payload)
+        type(payload) is not dict
         or payload.get("status") != "complete"
         or payload.get("task") != "pose"
         or payload.get("run_id") != run_id
         or payload.get("set_id") != row["set_id"]
     ):
-        raise ValueError("Source requires a valid promoted v1 canonical pose manifest")
+        raise ValueError("Source canonical manifest is not this registered pose run")
     onnx_path = resolve_artifact(package_root, payload.get("onnx"), role="source ONNX")
     if (
         onnx_path.resolve() != Path(row["onnx_path"]).resolve()
-        or payload["onnx"]["sha256"] != row["onnx_sha256"]
+        or bare_sha256(payload["onnx"]["sha256"]) != row["onnx_sha256"]
     ):
         raise ValueError("Registered ONNX and canonical manifest disagree")
-    if payload.get("weights", {}).get("sha256") != row["model_sha256"]:
+    if bare_sha256(payload.get("weights", {}).get("sha256")) != row["model_sha256"]:
         raise ValueError("Canonical manifest and registered weights disagree")
     contract_path = resolve_artifact(
         package_root,
@@ -152,9 +159,9 @@ def _prepare(registry_path: Path, run_id: str) -> dict[str, Any]:
         expected_model_sha256=row["model_sha256"],
     )
     contract = read_json_document(contract_path)
-    if contract["schema_version"] != 3 or contract["payload_digest"] != payload[
-        "pose_model_input_contract"
-    ].get("payload_digest"):
+    if contract["schema_version"] != 3 or contract["payload_digest"] != source_contract_payload_digest(
+        payload["pose_model_input_contract"]
+    ):
         raise ValueError(
             "Deployment packaging requires the bound runtime-receipt input contract v3"
         )
@@ -197,9 +204,9 @@ def _prepare(registry_path: Path, run_id: str) -> dict[str, Any]:
     expected = {
         "onnx": row["onnx_sha256"],
         "source_canonical_manifest": row["manifest_sha256"],
-        "source_export_manifest": payload["source_export_manifest"]["sha256"],
+        "source_export_manifest": bare_sha256(payload["source_export_manifest"]["sha256"]),
         "training_manifest": binding["authority"]["training_manifest_sha256"],
-        "pose_model_input_contract": payload["pose_model_input_contract"]["sha256"],
+        "pose_model_input_contract": bare_sha256(payload["pose_model_input_contract"]["sha256"]),
     }
     if any(references[role]["sha256"] != digest for role, digest in expected.items()):
         raise ValueError("Source artifacts changed during deployment inspection")

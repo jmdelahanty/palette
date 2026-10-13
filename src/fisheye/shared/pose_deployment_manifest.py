@@ -1,8 +1,11 @@
-"""Versioned, relocatable pose deployment manifests and an unpatched reader.
+"""Versioned, relocatable pose deployment bundle manifests and an unpatched reader.
 
-v1 remains the historical model-package manifest emitted by promotion. v2 is
-a standalone transfer bundle: all artifact paths are relative to its manifest
-directory; weights are sealed lineage, not a runtime file requirement.
+A pose deployment bundle is a standalone transfer folder: all artifact paths
+are relative to its manifest directory; weights are sealed lineage, not a
+runtime file requirement. Its manifest is ``palette.pose_deployment_bundle_manifest``
+v1 (pose only). It is distinct from ``palette.canonical_onnx_model_manifest``
+(pose and detect, inside a promoted model package), which the bundle carries
+as ``source_canonical_manifest`` in version 1 or 2.
 """
 
 from __future__ import annotations
@@ -13,6 +16,10 @@ import re
 from typing import Any
 
 from fisheye.shared.artifact_fingerprint import require_artifact_content_identity
+from fisheye.shared.canonical_onnx_model_manifest import (
+    CanonicalOnnxManifestError,
+    validate_canonical_onnx_manifest,
+)
 from fisheye.shared.pose_model_input_contract import POSE_MODEL_INPUT_CONTRACT_SCHEMA_ID
 from fisheye.shared.pose_model_skeleton import validate_pose_model_skeleton
 from fisheye.shared.pose_onnx_interface import inspect_pose_onnx_interface
@@ -23,7 +30,8 @@ from fisheye.shared.zarr.manifest_digest import (
 )
 
 CANONICAL_ONNX_MANIFEST_SCHEMA_ID = "palette.canonical_onnx_model_manifest"
-POSE_DEPLOYMENT_MANIFEST_SCHEMA_VERSION = 2
+POSE_DEPLOYMENT_BUNDLE_MANIFEST_SCHEMA_ID = "palette.pose_deployment_bundle_manifest"
+POSE_DEPLOYMENT_BUNDLE_MANIFEST_SCHEMA_VERSION = 1
 MAX_JSON_BYTES = 8 * 1024 * 1024
 ARTIFACT_ROLES = (
     "onnx",
@@ -108,15 +116,31 @@ def resolve_artifact(root: Path, reference: Any, *, role: str) -> Path:
     require_artifact_content_identity(
         path,
         role=role,
-        expected_sha256=require_sha256(reference["sha256"], field=f"{role}.sha256"),
+        expected_sha256=require_sha256(bare_sha256(reference["sha256"]), field=f"{role}.sha256"),
     )
     return path
 
 
+def bare_sha256(value: Any) -> str:
+    """A digest as bare hex, whether written bare (v1) or as a sha256: token (v2)."""
+
+    return str(value).removeprefix("sha256:")
+
+
+def source_contract_payload_digest(reference: Any) -> Any:
+    """The pose input contract's payload digest named by a canonical manifest:
+    ``payload_digest`` (v1) or ``payload_sha256`` token (v2), as bare hex."""
+
+    if not isinstance(reference, dict):
+        return None
+    value = reference.get("payload_digest", reference.get("payload_sha256"))
+    return bare_sha256(value) if value is not None else None
+
+
 def canonical_manifest(payload: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema_id": CANONICAL_ONNX_MANIFEST_SCHEMA_ID,
-        "schema_version": POSE_DEPLOYMENT_MANIFEST_SCHEMA_VERSION,
+        "schema_id": POSE_DEPLOYMENT_BUNDLE_MANIFEST_SCHEMA_ID,
+        "schema_version": POSE_DEPLOYMENT_BUNDLE_MANIFEST_SCHEMA_VERSION,
         "payload_digest": canonical_json_sha256(payload),
         "payload": payload,
     }
@@ -131,12 +155,12 @@ def validate_pose_deployment_document(document: Any, *, root: Path) -> dict[str,
     if (
         type(document) is not dict
         or set(document) != {"schema_id", "schema_version", "payload_digest", "payload"}
-        or document.get("schema_id") != CANONICAL_ONNX_MANIFEST_SCHEMA_ID
+        or document.get("schema_id") != POSE_DEPLOYMENT_BUNDLE_MANIFEST_SCHEMA_ID
         or type(document.get("schema_version")) is not int
-        or document["schema_version"] != POSE_DEPLOYMENT_MANIFEST_SCHEMA_VERSION
+        or document["schema_version"] != POSE_DEPLOYMENT_BUNDLE_MANIFEST_SCHEMA_VERSION
     ):
         raise ValueError(
-            "Unsupported canonical pose deployment manifest schema/version"
+            "Unsupported pose deployment bundle manifest schema/version"
         )
     payload = document["payload"]
     fields = {
@@ -278,22 +302,22 @@ def validate_pose_deployment_document(document: Any, *, root: Path) -> dict[str,
         _object(original_payload.get(role), field=f"source canonical {role}")
     for role in ("onnx", "weights"):
         _object(export.get(role), field=f"source export {role}")
+    try:
+        validate_canonical_onnx_manifest(original)
+    except CanonicalOnnxManifestError as exc:
+        raise ValueError(f"Source canonical manifest is invalid: {exc}") from exc
     if (
-        original.get("schema_id") != CANONICAL_ONNX_MANIFEST_SCHEMA_ID
-        or type(original.get("schema_version")) is not int
-        or original["schema_version"] != 1
-        or original.get("payload_digest") != canonical_json_sha256(original_payload)
-        or original_payload.get("status") != "complete"
+        original_payload.get("status") != "complete"
         or original_payload.get("task") != "pose"
         or original_payload.get("run_id") != payload["run_id"]
         or original_payload.get("set_id") != payload["set_id"]
-        or original_payload.get("onnx", {}).get("sha256") != payload["onnx"]["sha256"]
-        or original_payload.get("weights", {}).get("sha256") != weights_sha
-        or original_payload.get("pose_model_input_contract", {}).get("sha256")
+        or bare_sha256(original_payload.get("onnx", {}).get("sha256")) != payload["onnx"]["sha256"]
+        or bare_sha256(original_payload.get("weights", {}).get("sha256")) != weights_sha
+        or bare_sha256(original_payload.get("pose_model_input_contract", {}).get("sha256"))
         != payload["pose_model_input_contract"]["sha256"]
-        or original_payload["pose_model_input_contract"].get("payload_digest")
+        or source_contract_payload_digest(original_payload["pose_model_input_contract"])
         != contract["payload_digest"]
-        or original_payload.get("source_export_manifest", {}).get("sha256")
+        or bare_sha256(original_payload.get("source_export_manifest", {}).get("sha256"))
         != payload["source_export_manifest"]["sha256"]
         or export.get("run_id") != payload["run_id"]
         or export.get("onnx", {}).get("sha256") != payload["onnx"]["sha256"]

@@ -25,7 +25,7 @@ def bundle(tmp_path):
     return root, manifest, json.loads(manifest.read_text()), result
 
 
-@pytest.mark.parametrize("version", [1, 3, True, "2"])
+@pytest.mark.parametrize("version", [0, 2, True, "1"])
 def test_unsupported_manifest_versions_fail_closed(bundle, version):
     root, _, document, _ = bundle
     document["schema_version"] = version
