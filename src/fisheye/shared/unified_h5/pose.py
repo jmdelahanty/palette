@@ -5,7 +5,10 @@ The component is optional per recording and required once declared
 ``citrus-pose-observation-v2``, merged 6b63aa2). The file's own
 ``contract_json.schema_version`` selects the pinned contract; any other version
 is refused. v2 changes only the derived heading: Palette's shared convention
-(agent-contracts ``citrus-palette/heading``), NaN when not valid. Declared
+(agent-contracts ``citrus-palette/heading``), NaN when not valid. On a bound v2
+session every update carries the bound recording's token (amendment
+2026-10-13); v1 is not checked (the amendment has its readers filter rows by
+token instead). Declared
 means one ``required`` outcome row, the ``/observations/pose`` group and its
 manifest receipt; absent means none of the three. The schemas and table
 descriptors are pinned by digest in ``fisheye/shared/contracts``.
@@ -34,6 +37,9 @@ GROUP = "/observations/pose"
 RECEIPT = GROUP + "/receipt_json"
 CONTRACT = GROUP + "/contract_json"
 TABLES = ("updates", "objects", "keypoints")
+BINDING = "/correspondence/acquisition/binding_json"
+RECORDING = "/metadata/recording"
+BOUND_SOURCE = "accepted_recording_observation_request"
 _PINNED = {
     1: {
         "contract": (
@@ -135,6 +141,34 @@ def _check_v2_heading(objects) -> None:
     )
 
 
+def _check_v2_bound_token(h5, contract: dict, updates) -> None:
+    """A bound session's pose rows all carry the bound recording's token.
+
+    agent-contracts ``citrus-pose-observation-v2`` amendment 2026-10-13
+    (PR #99, merged 08689f0d): bound means ``association_status`` "bound" and
+    ``/metadata/recording`` ``association_source`` the accepted request, and
+    the two must agree; effective from Citrus 22be7f4, so a foreign token is a
+    Citrus bug. Advisory sessions carry no constraint. An empty table is left
+    to the receipt checks. The token's derivation from ``recording_id`` is
+    checked at correspondence admission.
+    """
+
+    recording = h5.get(RECORDING)
+    source = _text(recording.attrs.get("association_source")) if recording is not None else None
+    bound = contract["association_status"] == "bound"
+    require(bound == (source == BOUND_SOURCE), "pose_association_declaration_inconsistent")
+    if not bound or updates.shape[0] == 0:
+        return
+    token = _json(h5, BINDING).get("recording_identity_token") if BINDING in h5 else None
+    require(isinstance(token, str) and token != "", "pose_bound_recording_token_missing")
+    foreign = np.flatnonzero(updates.fields("recording_identity_token")[:] != token.encode("utf-8"))
+    first = int(foreign[0]) if foreign.size else None
+    require(
+        foreign.size == 0,
+        f"pose_update_foreign_recording_token:foreign_rows={foreign.size}:first_row={first}",
+    )
+
+
 def _text(value):
     """String attributes as text; any other type stays distinct (never "1" == 1)."""
     if isinstance(value, bytes):
@@ -206,7 +240,7 @@ def validate_pose_observations(h5, outcomes: dict, receipt_components: set) -> i
     outcome = outcomes[COMPONENT]
     require(outcome["requirement"] == "required", "pose_outcome_not_required")
     version = _contract_version(h5)
-    _document(h5, CONTRACT, "contract", version)
+    contract = _document(h5, CONTRACT, "contract", version)
     receipt = _document(h5, RECEIPT, "receipt", version)
     require(receipt["status"] == "complete", "pose_receipt_not_complete")
     descriptors = _pinned("tables", version)["tables"]
@@ -226,6 +260,7 @@ def validate_pose_observations(h5, outcomes: dict, receipt_components: set) -> i
     _check_row_references(tables["updates"], tables["objects"], tables["keypoints"])
     if version == 2:
         _check_v2_heading(tables["objects"])
+        _check_v2_bound_token(h5, contract, tables["updates"])
     return total
 
 
