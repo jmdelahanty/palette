@@ -2,7 +2,7 @@
 
 agent-contracts PR 92 (head aa337ec; admission, policy 9af921ca, witnesses) and
 PR 91 (head 4d0fa15; the angle convention), Citrus PR 27 at c9d52be (catalog
-and capacity preflight v3). All three were unmerged at pin time. A capacity
+and capacity preflight v3). Merged unchanged: agent-contracts 7a2e5d2 and f3d97d4, Citrus 576481f. A capacity
 preflight v3 file is selected by revision 5's table-version map plus
 catalog_id; the selected binding fixes the stimulus angle convention, and the
 file's /metadata/session and protocol declarations must agree with it.

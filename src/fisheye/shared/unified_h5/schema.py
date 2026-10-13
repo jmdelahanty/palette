@@ -54,7 +54,7 @@ CONTRACT_HASHES = {
     "experimental_h5_capacity_preflight_v2.schema.json": "3f78bff9fd51207d035ed9a2feb32660f5232b91d3674389882a4914fbf6bbc3",
     "experimental_h5_correspondence_receipt_v3.schema.json": "7143f9cff038b4dda1c184e5f0ca7b1b924b541074d24b25b9b0d67dab9d34b4",
     # Admission revision 5 (angle_v1: stimulus angle convention v1; agent-contracts
-    # PRs 91/92, Citrus PR 27 at c9d52be). Unmerged at pin time.
+    # PRs 91/92, Citrus PR 27 at c9d52be). Merged unchanged: 7a2e5d2, f3d97d4, 576481f.
     "unified_h5_admission_v5.json": "7b1448f83b68df898e1022388581ae833151c8a83d375bb51abb82c13c99ce71",
     "unified_h5_producer_policy_9af921ca.json": "9af921cab2aedae8af66a00600f5eee6b076c5d8218b6f0e928f93b4df3fbedd",
     "experimental_h5_core_angle_v1.json": "0c054c7d5d3c1a4f7b39f800b63e272bb43bac30b5b640993a94974e2be24f07",

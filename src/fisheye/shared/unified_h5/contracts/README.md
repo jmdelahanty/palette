@@ -27,10 +27,10 @@ They are not Palette scientific-acceptance or activation schemas.
 | `experimental_h5_core_frame_identity_v1.json` (core catalog `frame_identity_v1`: nine tables re-versioned, no bare `*_frame_id`) | Citrus PR 24 `526c218a26ea711f8dbad4110401f5b8fbd81b86` (same bytes at `43f57c18`), merged `53b68a7` | `4365821df9cdde35d0417fec5b656de12607c211e24232b408e87344883a8264` |
 | `experimental_h5_capacity_preflight_v2.schema.json` (adds `catalog_id`; bound to `frame_identity_v1`) | Citrus PR 24 `43f57c18097896fd1aef449f475982bead4be681` (the policy-pinning commit; the file differs at `526c218`), merged `53b68a7` | `3f78bff9fd51207d035ed9a2feb32660f5232b91d3674389882a4914fbf6bbc3` |
 | `experimental_h5_correspondence_receipt_v3.schema.json` (embedded core table versions no longer enumerated) | Citrus PR 24 `526c218a` (same bytes at `43f57c18`), merged `53b68a7` | `7143f9cff038b4dda1c184e5f0ca7b1b924b541074d24b25b9b0d67dab9d34b4` |
-| `unified_h5_admission_v5.json` (admission revision 5: catalog `angle_v1`, stimulus angle convention per binding) | agent-contracts PR 92 head `aa337ec66a2bfae05e2635567da8528351bdbbb4` (unmerged at pin time) | `7b1448f83b68df898e1022388581ae833151c8a83d375bb51abb82c13c99ce71` |
-| `unified_h5_producer_policy_9af921ca.json` (agent-contracts `citrus-palette/producer_policies/unified_h5_admission_9af921ca.json`, renamed; bound to `angle_v1`) | agent-contracts PR 92 head `aa337ec6` (unmerged) | `9af921cab2aedae8af66a00600f5eee6b076c5d8218b6f0e928f93b4df3fbedd` |
-| `experimental_h5_core_angle_v1.json` (core catalog `angle_v1`: moving_grating 2 -> 3, independent_motion_grid 1 -> 2, angles counter-clockwise) | Citrus PR 27 `c9d52be6dddf07da8f13607f31ae3bcf2aca9d93` `docs/schemas/` (unmerged) | `0c054c7d5d3c1a4f7b39f800b63e272bb43bac30b5b640993a94974e2be24f07` |
-| `experimental_h5_capacity_preflight_v3.schema.json` (`catalog_id` const `angle_v1`, policy const `9af921ca…`) | Citrus PR 27 `c9d52be6` `docs/schemas/` (unmerged) | `00b201da455c8f1fc021506ceaf291092f0d61b1d2d5a2689f3ba386be5c60ea` |
+| `unified_h5_admission_v5.json` (admission revision 5: catalog `angle_v1`, stimulus angle convention per binding) | agent-contracts PR 92 head `aa337ec66a2bfae05e2635567da8528351bdbbb4` (unchanged), merged `7a2e5d2517f690190fc3ae172bb7e36a4c9a4228` | `7b1448f83b68df898e1022388581ae833151c8a83d375bb51abb82c13c99ce71` |
+| `unified_h5_producer_policy_9af921ca.json` (agent-contracts `citrus-palette/producer_policies/unified_h5_admission_9af921ca.json`, renamed; bound to `angle_v1`) | agent-contracts PR 92 head `aa337ec6`, merged `7a2e5d25` | `9af921cab2aedae8af66a00600f5eee6b076c5d8218b6f0e928f93b4df3fbedd` |
+| `experimental_h5_core_angle_v1.json` (core catalog `angle_v1`: moving_grating 2 -> 3, independent_motion_grid 1 -> 2, angles counter-clockwise) | Citrus PR 27 `c9d52be6dddf07da8f13607f31ae3bcf2aca9d93` `docs/schemas/` (unchanged), merged `576481f3c58140dcc0fc6bc6fadbf1456341db48` | `0c054c7d5d3c1a4f7b39f800b63e272bb43bac30b5b640993a94974e2be24f07` |
+| `experimental_h5_capacity_preflight_v3.schema.json` (`catalog_id` const `angle_v1`, policy const `9af921ca…`) | Citrus PR 27 `c9d52be6` `docs/schemas/`, merged `576481f3` | `00b201da455c8f1fc021506ceaf291092f0d61b1d2d5a2689f3ba386be5c60ea` |
 
 The geometry and presentation adapters follow that producer's
 `src/logging/experimental_h5_geometry.cpp`, `stimulus_geometry_contract.cpp`, and
@@ -75,8 +75,8 @@ admission revision pins. The frame identity v1 witness H5s are under
 `citrus-palette/fixtures/frame_identity_v1/`: complete and partial-adoption
 from PR 88 `32a3a709`, pose-on and its README row from PR 89 `60856f3f`).
 
-Admission revision 5 (agent-contracts PR 92, Citrus PR 27; both unmerged at
-pin time, so re-check every digest against the merge commits) sits next to
+Admission revision 5 (agent-contracts PR 92, Citrus PR 27; merged `7a2e5d25`
+and `576481f3`; every digest re-checked byte-for-byte against the merges) sits next to
 revisions 3 and 4: preflight v3 files (`catalog_id angle_v1`) are selected by
 its table-version map plus `catalog_id`, as revision 4. The selected binding
 fixes the stimulus angle convention (agent-contracts PR 91

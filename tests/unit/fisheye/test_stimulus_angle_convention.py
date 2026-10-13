@@ -20,7 +20,7 @@ from fisheye.shared.heading_convention import (
 
 CONTRACTS = resource_files("fisheye.shared").joinpath("contracts")
 PINNED = {
-    # agent-contracts PR 91 head 4d0fa15, citrus-palette/angles/ (unmerged at pin time)
+    # agent-contracts PR 91 head 4d0fa15 (merged f3d97d4), citrus-palette/angles/
     "citrus_palette_stimulus_angle_convention_v1.json": "a99d82e708445db38f48919ba7ed76933b89cdb1f501d1d42b58394327e1b23c",
     "citrus_palette_stimulus_angle_cases_v1.json": "b05f4b19739c1d6ce64e1a47d30b7f0ab53910a10900418fea8b7514a10452a8",
 }
