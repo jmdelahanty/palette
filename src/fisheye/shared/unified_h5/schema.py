@@ -10,6 +10,11 @@ from importlib.resources import files
 import h5py
 import numpy as np
 
+from fisheye.shared.heading_convention import (
+    LEGACY_CANVAS_ANGLE,
+    STIMULUS_ANGLE_CONVENTION,
+)
+
 from .common import (
     canonical_json,
     current_admission_scan,
@@ -48,15 +53,23 @@ CONTRACT_HASHES = {
     "experimental_h5_core_frame_identity_v1.json": "4365821df9cdde35d0417fec5b656de12607c211e24232b408e87344883a8264",
     "experimental_h5_capacity_preflight_v2.schema.json": "3f78bff9fd51207d035ed9a2feb32660f5232b91d3674389882a4914fbf6bbc3",
     "experimental_h5_correspondence_receipt_v3.schema.json": "7143f9cff038b4dda1c184e5f0ca7b1b924b541074d24b25b9b0d67dab9d34b4",
+    # Admission revision 5 (angle_v1: stimulus angle convention v1; agent-contracts
+    # PRs 91/92, Citrus PR 27 at c9d52be). Merged unchanged: 7a2e5d2, f3d97d4, 576481f.
+    "unified_h5_admission_v5.json": "7b1448f83b68df898e1022388581ae833151c8a83d375bb51abb82c13c99ce71",
+    "unified_h5_producer_policy_9af921ca.json": "9af921cab2aedae8af66a00600f5eee6b076c5d8218b6f0e928f93b4df3fbedd",
+    "experimental_h5_core_angle_v1.json": "0c054c7d5d3c1a4f7b39f800b63e272bb43bac30b5b640993a94974e2be24f07",
+    "experimental_h5_capacity_preflight_v3.schema.json": "00b201da455c8f1fc021506ceaf291092f0d61b1d2d5a2689f3ba386be5c60ea",
 }
 # The admission revision a file is judged under is chosen by its capacity
 # preflight's schema_version: preflight v1 files (no catalog_id) keep revision
 # 3 and its (chaser_state, bounding_boxes) pair key; preflight v2 files carry
-# catalog_id and are selected by revision 4's full table-version map. Any other
-# preflight version is refused. A later catalog needs only its pins here.
+# catalog_id and are selected by revision 4's full table-version map; preflight
+# v3 files (catalog_id angle_v1) are selected the same way by revision 5. Any
+# other preflight version is refused. A later catalog needs only its pins here.
 ADMISSIONS_BY_PREFLIGHT_VERSION = {
     1: "unified_h5_admission_v3.json",
     2: "unified_h5_admission_v4.json",
+    3: "unified_h5_admission_v5.json",
 }
 ADMISSION = ADMISSIONS_BY_PREFLIGHT_VERSION[1]
 # Every pinned core catalog. The original v1 catalog stays pinned byte-for-byte
@@ -66,6 +79,7 @@ CORE_CATALOG_FILES = (
     "experimental_h5_core_chaser_v2.json",
     "experimental_h5_core_bounding_boxes_v2.json",
     "experimental_h5_core_frame_identity_v1.json",
+    "experimental_h5_core_angle_v1.json",
 )
 CORE_CATALOGS = {
     1: "experimental_h5_core_v1.json",
@@ -79,6 +93,17 @@ CHASER_STATES = "/components/chaser/states"
 BOUNDING_BOXES = "/observations/bounding_boxes"
 # Admission revision 3 names each admitted catalog's pair of table versions.
 _PIN_TABLES = {"chaser_state": CHASER_STATES, "bounding_boxes": BOUNDING_BOXES}
+# Stimulus angle convention (agent-contracts citrus-palette/angles v1): fixed by
+# the admitted catalog binding, never by the file's date or by the session
+# attribute alone. Catalog pins of revisions 3 and 4 carry no
+# ``stimulus_angle_convention`` field; every catalog they admit is legacy.
+SESSION = "/metadata/session"
+SESSION_ANGLE_ATTRIBUTE = "stimulus_angle_convention"
+PROTOCOL_ANGLE_DECLARATIONS = (
+    "/protocol/authored/protocol_definition_json",
+    "/protocol/authored/protocol_trial_index_json",
+    "/protocol/authored/protocol_semantic_json",
+)
 CORRESPONDENCE_RECEIPT_SCHEMAS = {
     2: "experimental_h5_correspondence_receipt_v2.schema.json",
     3: "experimental_h5_correspondence_receipt_v3.schema.json",
@@ -182,6 +207,10 @@ def admitted_binding(h5, declared_policy_sha256: str, preflight: dict | None = N
     """The one admitted catalog binding for this file.
 
     The capacity preflight's schema_version selects the admission revision.
+    Revisions 4 and 5 (preflight v2, v3) select the same way. The result's
+    ``stimulus_angle_convention`` is the selected catalog pin's convention
+    (``canvas_y_down_clockwise_legacy`` for every catalog of revisions 3-4
+    and for the legacy pins of revision 5); readers of stimulus angles use it.
     Revision 3 (preflight v1): present (chaser_state, bounding_boxes) versions
     and the declared producer policy select one pair-keyed catalog. Revision 4
     (preflight v2): the declared, present core tables' {path -> schema_version}
@@ -232,14 +261,53 @@ def admitted_binding(h5, declared_policy_sha256: str, preflight: dict | None = N
     schema_sha = binding["capacity_preflight_schema"]["file_sha256"].removeprefix("sha256:")
     (schema_name,) = [name for name, digest in CONTRACT_HASHES.items() if digest == schema_sha]
     receipt_pin = admission["correspondence_definition_pins"]["receipt_schema"]
+    angle = catalogs[matches[0]].get("stimulus_angle_convention", LEGACY_CANVAS_ANGLE)
+    require(angle in (LEGACY_CANVAS_ANGLE, STIMULUS_ANGLE_CONVENTION), "stimulus_angle_convention_unknown")
     return {
         "catalog": matches[0],
+        "stimulus_angle_convention": angle,
         "catalog_file": _catalog_file(catalogs[matches[0]]),
         "preflight_schema": schema_name,
         "admission": admission_name,
         "correspondence_receipt_version": receipt_pin["schema_version"],
         **binding,
     }
+
+
+def require_stimulus_angle_convention(h5, binding: dict) -> str:
+    """The file's stimulus angle declarations agree with its binding's convention.
+
+    A legacy binding (``canvas_y_down_clockwise_legacy``) never carries the
+    ``/metadata/session`` attribute or a protocol declaration: either is
+    refused as ``stimulus_angle_convention_unexpected``, and the sign is never
+    taken from it. An ``angle_v1`` binding requires the session attribute and
+    the authored protocol definition, trial index and semantic identity to
+    declare exactly ``atan2_negative_y_x_degrees``; anything else is
+    ``stimulus_angle_convention_mismatch``. Returns the binding's convention.
+    """
+    convention = binding["stimulus_angle_convention"]
+    attrs = h5[SESSION].attrs if SESSION in h5 else {}
+    session = attrs.get(SESSION_ANGLE_ATTRIBUTE) if SESSION_ANGLE_ATTRIBUTE in attrs else None
+    if isinstance(session, bytes):
+        session = session.decode("utf-8", errors="replace")
+    protocol = []
+    for path in PROTOCOL_ANGLE_DECLARATIONS:
+        document = read_json(h5, path) if path in h5 else {}
+        protocol.append(
+            document.get(SESSION_ANGLE_ATTRIBUTE) if isinstance(document, dict) else None
+        )
+    if convention == LEGACY_CANVAS_ANGLE:
+        require(
+            SESSION_ANGLE_ATTRIBUTE not in attrs
+            and all(value is None for value in protocol),
+            "stimulus_angle_convention_unexpected",
+        )
+        return convention
+    require(
+        session == convention and all(value == convention for value in protocol),
+        "stimulus_angle_convention_mismatch",
+    )
+    return convention
 
 
 def require_selected_catalog_versions(h5, catalog_file: str) -> None:

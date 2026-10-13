@@ -12,7 +12,18 @@ from .hdf5_types import dataset_bytes
 from .schema import read_json
 
 
-def validate_protocol(h5):
+def validate_protocol(h5, stimulus_angle_convention: str | None = None):
+    """Validate the native protocol snapshot and execution index.
+
+    ``stimulus_angle_convention`` is the admitted binding's
+    (``validate_capacity_preflight(h5)["stimulus_angle_convention"]``); it
+    selects the protocol contract (semantic v2 / trial index v3 for
+    ``atan2_negative_y_x_degrees``). When omitted it is resolved from the
+    file's capacity preflight binding, and a file without one is legacy
+    (its admission revision predates capacity preflights).
+    """
+    if stimulus_angle_convention is None:
+        stimulus_angle_convention = _binding_convention(h5)
     authored, executed = h5["/protocol/authored"], h5["/protocol/executed"]
     for group in (authored, executed):
         version = group.attrs.get_id("schema_version")
@@ -44,6 +55,7 @@ def validate_protocol(h5):
         trial_index_hash=value(authored, "protocol_trial_index_hash"),
         snapshot_schema_version=int(authored.attrs["schema_version"]),
         snapshot_policy_id=text(authored.attrs["policy_id"], "protocol_policy_id"),
+        stimulus_angle_convention=stimulus_angle_convention,
     )
     execution = validate_protocol_execution_index(
         execution_json=value(executed, "execution_index_json"),
@@ -59,3 +71,14 @@ def validate_protocol(h5):
         "native_execution_attributes_mismatch",
     )
     return snapshot, execution
+
+
+def _binding_convention(h5) -> str:
+    # Imported here: correspondence imports this package's schema helpers.
+    from fisheye.shared.heading_convention import LEGACY_CANVAS_ANGLE
+
+    from .correspondence import PREFLIGHT, validate_capacity_preflight
+
+    if PREFLIGHT not in h5:
+        return LEGACY_CANVAS_ANGLE
+    return validate_capacity_preflight(h5)["stimulus_angle_convention"]
