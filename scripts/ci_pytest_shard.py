@@ -85,6 +85,14 @@ HISTORICAL_TEST_FILE_COST_OVERRIDES = {
     "tests/unit/fisheye/test_refine_online_coordinate_lifecycle_rollback.py": 200_118,
     "tests/unit/fisheye/test_refine_online_coordinate_loading.py": 29_187,
     "tests/unit/fisheye/test_refine_online_coordinate_publication.py": 160_000,
+    # Runs 37577349897 and 37578274756 measured the former single
+    # mask-tail Apply refresh suite at 1313s and 1291s, the longest shard in
+    # both. Its unchanged cases are split the same way; costs are the measured
+    # per-test totals of each group.
+    "tests/unit/fisheye/test_mask_tail_apply_refresh.py": 365_000,
+    "tests/unit/fisheye/test_mask_tail_apply_refresh_acceptance.py": 348_000,
+    "tests/unit/fisheye/test_mask_tail_apply_refresh_browser_tasks.py": 340_000,
+    "tests/unit/fisheye/test_mask_tail_apply_refresh_keypoint_batch.py": 262_000,
 }
 
 

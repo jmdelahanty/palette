@@ -1,100 +1,85 @@
-# Native unified experimental H5 candidates
+# Unified experimental H5 import
 
-The public stimulus importer supports the explicit
-`unified_experimental_h5_v1` input profile. This is a native, immutable,
-selector-ineligible candidate import, **not** v5/v6 coordinate normalization,
-production analysis adoption, physical registration, or scientific acceptance.
-The ordinary v5/v6 importer remains unchanged.
+The stimulus importer admits a Citrus `unified_experimental_h5_v1` file and
+records a **sealed reference** to it. The H5 is not copied: the raw file in the
+recording's `raw/` tree is the single primary source, and its external
+finalization receipt binds its exact bytes. Design and decisions:
+[reference storage plan](design/2026-09-24-unified-h5-reference-storage/README.md)
+(D13, D14 in the [adapter design](design/2026-09-23-unified-h5-legacy-adapter/README.md)).
 
 ```bash
 scripts/py -m fisheye.analysis.import_stimulus_to_zarr \
-  /path/to/finalized-synthetic-recording.h5 /path/to/candidate.zarr \
+  /path/to/recording/raw/acquisition/arena.h5 /path/to/recording/zarr/rec_analysis.zarr \
   --source-profile unified_experimental_h5_v1 \
-  --finalization-receipt /path/to/finalized-receipt.json \
+  --finalization-receipt /path/to/finalization-receipt.json \
   --run-name unified_native_candidate
 ```
 
-Both the explicit H5 and its external receipt are required. A recognized native
-H5 without explicit profile selection is rejected before destination mutation;
-there is no metadata-only fallback, inferred companion, or gap repair. Existing
-run names, including failed tombstones, cannot be overwritten. A retry uses a
-fresh name. The importer does not change `latest`, `latest_complete`,
-`authoritative_run`, registry status, or any production authority.
+The session importer (`fisheye.utils.import_recording_analysis`) routes a
+unified H5 here automatically when its plan carries the receipt
+(`--finalization-receipt`). A unified H5 without explicit profile selection, an
+unknown profile, a missing receipt, `--overwrite` or metadata-only mode are
+refused before anything is written. Runs are immutable: a retry needs a new run
+name. The run is never selector-eligible and never changes `latest`,
+`latest_complete` or `authoritative_run`.
 
-## What is validated
+## What admission checks
 
-Admission checks both independent integrity domains: the exact open H5's
-post-close file bytes against its external receipt, and its closed internal
-dependency manifest against native logical types, shapes, references and payload
-digests. It also verifies component accounting, exact uint64 row/frame identities,
-recording/camera correspondence, authored and executed protocol identity, static
-geometry/presentation consistency, source namespace and submitted identity
-agreement, and optional appearance applicability/replay.
+- Both integrity domains: the file's exact bytes against the external receipt,
+  and the internal dependency manifest against logical types, shapes,
+  references and payload digests.
+- Component accounting, exact uint64 identities, recording/camera
+  correspondence, authored and executed protocol, geometry and presentation,
+  and optional appearance replay.
 
-Renderer-only frames may remain unmapped. Selected correspondence components
-must cover all of their canonical rows exactly once. A Chaser table is not
-invented for a frame-only, grid, or grating component. Current acquisition and
-held-target acquisition identities remain distinct. Appearance ownership is
-step-local and uses half-open stimulus-frame intervals; a profile may be reused
-in a later step by a different Chaser. Nominal renderer code luminance is not
-measured projector luminance.
+Recorded source claims (geometry readiness, acceptance) stay source claims;
+admission is not scientific acceptance.
 
-Source evidence is preserved, not upgraded: for example, recorded geometry
-readiness and acceptance claims remain source claims, not independent Palette
-approval. There is no new manual-review requirement or scientific acceptance
-receipt. Technical completion, contract validity, use-scoped acceptance, and
-activation remain separate, consistent with the
-[acceptance checklist](diagnostics/authority_acceptance_implementation_checklist_2026-08-27.md).
+## What the run stores
 
-## Native storage and reading
+Under `analysis/stimulus_runs/<run>/`:
 
-`analysis/stimulus_runs/<run>/native_h5` preserves the original H5 paths. Each
-source dataset is represented by a group containing a one-dimensional `uint8`
-`payload`. Fixed-size values use exact packed little-endian bytes; variable
-strings use unsigned-64-bit little-endian lengths followed by their exact bytes.
-The versioned `palette.unified_h5_native_storage` manifest binds every path,
-type, shape, payload hash, typed attribute value, original finalization receipt,
-admission summary, run identity, owner, and Palette producing-code provenance.
-This storage digest is **not** the H5 container-byte digest or an old Palette
-coordinate-product digest. Writer input provenance uses the normalized source
-path already verified against the exact open H5 handle.
+- `source_reference_json_utf8`: the H5 path relative to the Zarr store
+  (confined to the recording directory), its size and mtime, the admission
+  claims, a snapshot of every attribute, and per-dataset layout.
+- `block_digests`: SHA-256 of each block of every fixed-width dataset, on
+  Palette's own grid (about 1 MiB of whole rows, at most 4,096 rows). The grid
+  does not depend on Citrus's HDF5 chunking.
+- Attributes `source_profile`, `unified_reference_schema`/`_version` and
+  `source_reference_sha256`, plus normal run completion and provenance.
 
-The existing Palette physical planner and array factory choose regular local
-chunks (`scratch_compute_v1`, 1 MiB target). One importer owns all physical
-writes; no Dask workers share chunks. Source admission retains the producer's
-64 MiB dataset, 2,000,000-element and 8 MiB text budgets. Native inventory is
-additionally limited to 4 MiB and its final manifest to 8 MiB; variable-attribute
-conversion buffers and per-node attribute values are bounded to 8 MiB.
+The block digests come from admission's own streaming pass, so sealing adds no
+extra read. Admission hashes each table once per import.
+
+## Reading
+
+`open_unified_source` is the only reader. Analyses never open the H5 path
+themselves.
 
 ```python
 import zarr
-from fisheye.shared.unified_h5.storage import load_unified_stimulus_candidate
+from fisheye.shared.unified_h5.reference import open_unified_source
 
-root = zarr.open_group("/path/to/candidate.zarr", mode="r", use_consolidated=True)
-candidate = load_unified_stimulus_candidate(root, run_name="unified_native_candidate")
-frames = candidate.read_table("/frames/stimulus", start=0, stop=4)
-execution = candidate.read_json("/protocol/executed/execution_index_json")
-attributes = candidate.typed_attributes("/metadata/session")
+root = zarr.open_group("/path/to/rec_analysis.zarr", mode="r", use_consolidated=True)
+source = open_unified_source(root, run_name="unified_native_candidate")
+frames = source.read_table("/frames/stimulus", start=0, stop=1000)
+execution = source.read_json("/protocol/executed/execution_index_json")
+subject = source.typed_attributes("/metadata/subject")
 ```
 
-The unpatched reader verifies the copied payloads, manifest, producing-code
-provenance, completion/ineligibility, and direct-versus-consolidated metadata
-before returning the candidate. Table reads retain the original structured
-dtype, including wide strings, nested fields, signed timestamps and full-width
-uint64 keys. Other native arrays use `read_dataset`; `typed_attributes` exposes
-exact attribute type/shape/value bytes without coercing floats or integer IDs.
-Payload reads recheck their hash and candidate generation. Validation is bounded
-but deliberately rehashes the complete requested dataset; it is not a receipt
-cache or a production-read throughput claim.
+- **Open** checks the reference digest, that the direct and consolidated
+  metadata agree, and that the H5 exists with the recorded size and mtime. A
+  moved or replaced file fails loudly (`unified_source_changed`,
+  `unified_source_missing`). Moving the whole recording directory is fine,
+  because the path is relative.
+- **Reads** verify only the blocks a row range touches, so memory is bounded by
+  the range plus one block. JSON and variable-length strings (at most 8 MiB)
+  are checked whole.
+- **`source.verify()`** streams every block. It is for integrity sweeps and is
+  not run on every open. A changed byte in a block nobody reads is caught by a
+  sweep or by the first read that touches it.
 
-Candidates must remain immutable. The native manifest attests to the validated
-source-to-copy operation; reading a copy does not reconstruct the original H5
-container or independently authenticate an external issuer. A reader rejects
-missing/stale consolidation, changed copied payloads or metadata, changed owner,
-incomplete runs, and conflicting provenance. Failures during import retain only
-an owned ineligible tombstone; loss of ownership stops writes and cleanup.
+## Not yet
 
-Physical-coordinate normalization, downstream analysis consumers, parent-transfer
-dispatch, real-data canaries, activation, and old-companion retirement are later,
-separately scoped work. See the [implementation handoff](diagnostics/unified_h5_import_handoff_2026-09-12.md)
-for exact commits, tests, CI, and integration status.
+Contract v2 capacity limits (after agent-contracts PR 52), the legacy-layout
+adapter, and a unified end-to-end canary are separate work.

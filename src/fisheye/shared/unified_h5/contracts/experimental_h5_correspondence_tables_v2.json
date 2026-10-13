@@ -1,0 +1,193 @@
+{
+  "schema_id": "citrus.experimental_h5.correspondence_tables",
+  "schema_version": 2,
+  "status": "development_not_production_admitted",
+  "tables": [
+    {
+      "id": "citrus.experimental_h5.live_frame_identity.v2",
+      "schema_version": 2,
+      "path": "/correspondence/acquisition/live_frame_identities",
+      "component": "correspondence_input",
+      "rank": 1,
+      "row_order": "append_order_v2",
+      "key_fields": "stimulus_frame_num",
+      "itemsize": 16,
+      "fields": [
+        {
+          "name": "stimulus_frame_num",
+          "dtype": "<u8",
+          "offset": 0,
+          "count": 1,
+          "units": "1",
+          "meaning": "Citrus session stimulus frame key; zero valid; exactly matches /frames/stimulus by row ordinal.",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "recording_frame_id",
+          "dtype": "<u8",
+          "offset": 8,
+          "count": 1,
+          "units": "1",
+          "meaning": "Orange one-based recording-wide frame ID; zero is missing current identity and prevents complete correspondence. Not the stream-local SHAMAN state frame ID or a clip-local index.",
+          "validity_field": "",
+          "boolean": false
+        }
+      ],
+      "required_reference_attributes": [],
+      "required_attributes": {
+        "schema_id": {
+          "dtype": "utf8",
+          "value": "citrus.experimental_h5.live_frame_identity.v2"
+        },
+        "schema_version": {
+          "dtype": "<u8",
+          "value": 2
+        },
+        "ordering": {
+          "dtype": "utf8",
+          "value": "append_order_v2"
+        }
+      },
+      "digest_encoding": "hdf5_closed_logical_values_v1",
+      "validation": {
+        "order": "strictly_increasing_stimulus_frame_num_v2",
+        "unique_key_fields": [
+          "stimulus_frame_num"
+        ],
+        "canonical_table_ref": "/frames/stimulus",
+        "canonical_row_ordinal_match": true,
+        "recording_frame_id_minimum": 1,
+        "recording_frame_id_maximum_ref": "/correspondence/receipt_json#/mapping_validation/total_acquisitions",
+        "recording_frame_id_monotonicity_required": false
+      }
+    },
+    {
+      "id": "citrus.experimental_h5.live_chaser_identity.v2",
+      "schema_version": 2,
+      "path": "/correspondence/acquisition/live_chaser_identities",
+      "component": "correspondence_input",
+      "rank": 1,
+      "row_order": "append_order_v2",
+      "key_fields": "stimulus_frame_num,chaser_index",
+      "itemsize": 33,
+      "fields": [
+        {
+          "name": "chaser_index",
+          "dtype": "<i8",
+          "offset": 0,
+          "count": 1,
+          "units": "1",
+          "meaning": "Citrus chaser instance index; zero valid. Signed raw capture preserves negative malformed evidence; complete correspondence requires nonnegative values and equality to the canonical chaser row.",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "stimulus_frame_num",
+          "dtype": "<u8",
+          "offset": 8,
+          "count": 1,
+          "units": "1",
+          "meaning": "Citrus session stimulus frame key; zero valid; exactly matches the canonical chaser row's frame key.",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "source_recording_frame_id",
+          "dtype": "<u8",
+          "offset": 16,
+          "count": 1,
+          "units": "1",
+          "meaning": "Orange one-based recording-wide current-source frame ID; must equal the live frame identity for this stimulus frame. Zero is invalid for complete correspondence.",
+          "validity_field": "",
+          "boolean": false
+        },
+        {
+          "name": "target_recording_frame_valid",
+          "dtype": "|u1",
+          "offset": 24,
+          "count": 1,
+          "units": "1",
+          "meaning": "Explicit held-target recording identity validity: 0 absent, 1 present. Invalid payload must be zero.",
+          "validity_field": "",
+          "boolean": true
+        },
+        {
+          "name": "target_recording_frame_id",
+          "dtype": "<u8",
+          "offset": 25,
+          "count": 1,
+          "units": "1",
+          "meaning": "Orange one-based recording-wide held-target frame ID, distinct from the current source; may be older. When valid=0 the payload must be zero; when valid=1 it must be in [1, total_acquisitions].",
+          "validity_field": "target_recording_frame_valid",
+          "boolean": false
+        }
+      ],
+      "required_reference_attributes": [],
+      "required_attributes": {
+        "schema_id": {
+          "dtype": "utf8",
+          "value": "citrus.experimental_h5.live_chaser_identity.v2"
+        },
+        "schema_version": {
+          "dtype": "<u8",
+          "value": 2
+        },
+        "ordering": {
+          "dtype": "utf8",
+          "value": "append_order_v2"
+        }
+      },
+      "digest_encoding": "hdf5_closed_logical_values_v1",
+      "validation": {
+        "order": "nondecreasing_frame_unique_chaser_per_frame_canonical_row_ordinal_v2",
+        "unique_key_fields": [
+          "stimulus_frame_num",
+          "chaser_index"
+        ],
+        "canonical_table_ref": "/components/chaser/states",
+        "canonical_row_ordinal_match": true,
+        "within_frame_chaser_index_sort_required": false,
+        "maximum_chasers_per_frame": 4096,
+        "chaser_index_minimum": 0,
+        "current_source_frame_table_ref": "/correspondence/acquisition/live_frame_identities",
+        "invalid_payload_values": {
+          "target_recording_frame_id": 0
+        },
+        "boolean_values": [
+          0,
+          1
+        ],
+        "target_recording_frame_id_valid_minimum": 1,
+        "target_recording_frame_id_valid_maximum_ref": "/correspondence/receipt_json#/mapping_validation/total_acquisitions",
+        "held_target_before_current_required": false
+      }
+    }
+  ],
+  "storage": {
+    "layout": "rank1_chunked_internal",
+    "chunk_shape_authority": "per_file_hdf5_dataset_creation_properties",
+    "writer_chunk_rows": 256,
+    "allowed_filter_ids": []
+  },
+  "validity": {
+    "false": 0,
+    "true": 1,
+    "invalid_payload": 0,
+    "boolean_dtype": "|u1",
+    "semantic_rules_required_for": "complete_correspondence_receipt",
+    "failed_input_rows": "preserved_without_repair_or_filtering; may violate semantic validity/order and must not be admitted as complete"
+  },
+  "frame_only": {
+    "live_chaser_table": "present_empty",
+    "canonical_chaser_table": "not_required_when_chaser_rows_zero",
+    "derived_chaser_sources": "absent_when_chaser_rows_zero"
+  },
+  "digest_semantics": {
+    "encoding": "hdf5_closed_logical_values_v1",
+    "catalog_not_embedded_in_dataset_digest": true,
+    "require_separate_catalog_dtype_and_attribute_validation": true,
+    "not_core_schema_json_and_packed_le": true
+  },
+  "schema_change_policy": "This catalog documents existing v2 bytes and semantics; unknown layout/meaning versions require explicit admission. No existing H5 is relabeled."
+}

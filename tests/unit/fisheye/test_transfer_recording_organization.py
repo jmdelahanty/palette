@@ -13,11 +13,34 @@ import pytest
 from fisheye.shared import recording_transfer_snapshot as transfer
 from fisheye.utils import organize_transfer_recordings as organizer
 
+
+@pytest.fixture(autouse=True)
+def _placeholder_media_sync_assessment(monkeypatch):
+    """Fixture videos are text placeholders; the real check runs in the canary."""
+    from fisheye.diagnostics.video import container
+
+    monkeypatch.setattr(
+        container,
+        "check_hevc_keyframe_flags",
+        lambda path, **_: {
+            "schema_id": "palette.video.sync_sample_assessment.v1",
+            "codec": "h264",
+            "container_inspection_status": "ok",
+            "sync_sample_proof": "container_declared",
+            "message": "placeholder media",
+        },
+    )
+
+
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures/recording_transfer_v2"
-CONTEXT = {
+CONTEXT_FIXTURE = {
+    "schema_id": "citrus.parent_recording_context",
+    "schema_version": 1,
     "recording_type": "behavior",
-    "recording_subtype": "free",
+    "recording_subtype": "synthetic_transfer_test",
     "behavior_mode": "free",
+    "recording_intent": "recording_only",
+    "data_origin": "synthetic",
 }
 
 
@@ -46,10 +69,21 @@ def _resign(root: Path) -> None:
     path.write_bytes(transfer.canonical_bytes(marker))
 
 
-def _plan(source: Path, destination: Path, **context):
+def _plan(source: Path, destination: Path):
     return organizer.build_transfer_organization_plan(
-        source, destination_root=destination, **{**CONTEXT, **context}
+        source, destination_root=destination
     )
+
+
+def _set_contexts(root: Path, *, drop=(), **changes) -> None:
+    """Rewrite every camera's producer context in the source manifest."""
+    path = root / "recording_session.json"
+    manifest = json.loads(path.read_bytes())
+    for context in manifest["recording_contexts"].values():
+        context.update(changes)
+        for key in drop:
+            context.pop(key, None)
+    path.write_bytes(transfer.canonical_bytes(manifest))
 
 
 def test_plan_covers_every_file_and_does_not_write(tmp_path):
@@ -124,14 +158,74 @@ def test_transfer_namespace_control_files_are_preserved_and_retired(
             ]
 
 
-@pytest.mark.parametrize("field", list(CONTEXT))
-@pytest.mark.parametrize("value", [None, "", "invented", 17])
-def test_context_is_explicit_and_validated(tmp_path, field, value):
+def test_fixture_context_is_the_producer_declaration(tmp_path):
+    plan = _plan(_source(tmp_path), tmp_path / "recordings")
+    for parent in plan["parents"]:
+        assert parent["context_source"] == "citrus.parent_recording_context"
+        assert parent["context"] == {
+            "context_source": "citrus.parent_recording_context",
+            "recording_context_schema_version": 1,
+            "artifact_schema_id": organizer.ARTIFACT_SCHEMA_ID,
+            **{k: v for k, v in CONTEXT_FIXTURE.items() if k not in ("schema_id", "schema_version")},
+        }
+
+
+def test_subtype_free_context_v2_stays_absent(tmp_path):
     source = _source(tmp_path)
+    _set_contexts(source, drop=("recording_subtype",), schema_version=2)
+    _resign(source)
+    plan = _plan(source, tmp_path / "recordings")
+    for parent in plan["parents"]:
+        assert "recording_subtype" not in parent["context"]
+        assert parent["context"]["recording_context_schema_version"] == 2
+        manifest = organizer._parent_manifest(plan, parent)
+        assert "recording_subtype" not in manifest
+        assert manifest["recording_context_schema_version"] == 2
+
+
+def test_subtype_is_a_free_label_independent_of_behavior_mode(tmp_path):
+    source = _source(tmp_path)
+    _set_contexts(source, recording_subtype="dish_stimulus", behavior_mode="embedded")
+    _resign(source)
+    plan = _plan(source, tmp_path / "recordings")
+    for parent in plan["parents"]:
+        assert parent["context"]["recording_subtype"] == "dish_stimulus"
+        assert parent["context"]["behavior_mode"] == "embedded"
+
+
+@pytest.mark.parametrize(
+    "changes, drop",
+    [
+        ({}, ("recording_subtype",)),  # v1 requires the subtype
+        ({"schema_version": 2, "recording_subtype": None}, ()),
+        ({"schema_version": 2, "recording_subtype": ""}, ()),
+        ({"schema_version": 2, "recording_subtype": " padded"}, ()),
+        ({"schema_version": 3}, ()),
+        ({"behavior_mode": "invented"}, ()),
+        ({"recording_intent": "unknown"}, ()),
+        ({"data_origin": "guessed"}, ()),
+        ({"unexpected": "field"}, ()),
+        ({}, ("behavior_mode",)),
+    ],
+)
+def test_invalid_producer_context_is_refused(tmp_path, changes, drop):
+    source = _source(tmp_path)
+    _set_contexts(source, drop=drop, **changes)
     destination = tmp_path / "recordings"
-    with pytest.raises(ValueError, match="manifest context"):
-        _plan(source, destination, **{field: value})
+    with pytest.raises(ValueError):
+        _resign(source)
+        _plan(source, destination)
     assert not destination.exists()
+
+
+def test_manifest_without_producer_contexts_is_refused(tmp_path):
+    source = _source(tmp_path)
+    path = source / "recording_session.json"
+    manifest = json.loads(path.read_bytes())
+    del manifest["recording_contexts"]
+    path.write_bytes(transfer.canonical_bytes(manifest))
+    with pytest.raises(ValueError, match="recording_contexts"):
+        _resign(source)
 
 
 @pytest.mark.parametrize("target", ["source", "child", "ancestor", "symlink"])
@@ -160,6 +254,31 @@ def test_failed_optional_proof_is_refused_not_discarded(tmp_path):
         _plan(source, tmp_path / "recordings")
 
 
+def _unified_declaring_h5(path: Path) -> None:
+    """An H5 that declares the unified profile; admission is stubbed by callers.
+
+    New transfer-v2 deliveries refuse legacy H5s (test_transfer_v2_legacy_h5_refusal),
+    so the plan's camera/session mapping guards are exercised through the
+    unified route. Real unified admission is covered in test_unified_transfer_receipts.
+    """
+    from fisheye.shared.unified_h5 import PROFILE
+
+    with h5py.File(path, "w") as h5:
+        h5.create_group("metadata/session").attrs["recording_artifact_profile"] = PROFILE
+
+
+def _stub_unified_context(monkeypatch, camera, session, **extra) -> None:
+    monkeypatch.setattr(
+        organizer,
+        "_unified_h5_context",
+        lambda _source, relative, _inventory, _contexts: (
+            camera,
+            {"session_uuid": session, **extra},
+            f"receipts/{Path(relative).stem}.json",
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     "camera,session",
     [
@@ -169,14 +288,13 @@ def test_failed_optional_proof_is_refused_not_discarded(tmp_path):
         (None, "fixture-session"),
     ],
 )
-def test_h5_mapping_uses_exact_context_not_filename(tmp_path, camera, session):
+def test_h5_mapping_uses_exact_context_not_filename(
+    tmp_path, monkeypatch, camera, session
+):
     source = _source(tmp_path)
     h5_path = source / "unhelpful_filename.h5"
-    with h5py.File(h5_path, "w") as h5:
-        h5.attrs["session_uuid"] = session
-        if camera is not None:
-            h5.attrs["camera_id"] = camera
-        h5.attrs["rig_id"] = "synthetic-rig"
+    _unified_declaring_h5(h5_path)
+    _stub_unified_context(monkeypatch, camera, session, rig_id="synthetic-rig")
     _resign(source)
     if camera != "02010093" or session != "fixture-session":
         with pytest.raises(ValueError, match="H5"):
@@ -195,12 +313,11 @@ def test_h5_mapping_uses_exact_context_not_filename(tmp_path, camera, session):
         assert parent["producer_context"]["rig_id"] == "synthetic-rig"
 
 
-def test_duplicate_h5_for_one_parent_refuses_ambiguity(tmp_path):
+def test_duplicate_h5_for_one_parent_refuses_ambiguity(tmp_path, monkeypatch):
     source = _source(tmp_path)
     for name in ("one.h5", "two.hdf5"):
-        with h5py.File(source / name, "w") as h5:
-            h5.attrs["camera_id"] = "02010093"
-            h5.attrs["session_uuid"] = "fixture-session"
+        _unified_declaring_h5(source / name)
+    _stub_unified_context(monkeypatch, "02010093", "fixture-session")
     _resign(source)
     with pytest.raises(ValueError, match="multiple H5"):
         _plan(source, tmp_path / "recordings")
@@ -211,13 +328,11 @@ def test_plan_digest_binds_every_destination_and_context(tmp_path):
     first = _plan(source, tmp_path / "recordings")
     assert first == _plan(source, tmp_path / "recordings")
     assert first["plan_sha256"] != _plan(source, tmp_path / "elsewhere")["plan_sha256"]
-    changed = _plan(
-        source,
-        tmp_path / "recordings",
-        recording_subtype="embedded",
-        behavior_mode="embedded",
-    )
-    assert changed["snapshot_id"] == first["snapshot_id"]
+    _set_contexts(source, recording_subtype="embedded", behavior_mode="embedded")
+    _resign(source)
+    changed = _plan(source, tmp_path / "recordings")
+    # Context is bound through the producer manifest bytes the snapshot hashes.
+    assert changed["snapshot_id"] != first["snapshot_id"]
     assert changed["plan_sha256"] != first["plan_sha256"]
 
 
@@ -263,8 +378,7 @@ def test_materialize_preserves_all_bytes_and_replays_owned_destinations(tmp_path
     for item in plan["files"]:
         for target in item["destinations"]:
             path = (
-                Path(plan["destination_root"])
-                / target["recording_id"]
+                organizer._parent_directory(plan, target["recording_id"])
                 / target["relative_path"]
             )
             assert path.read_bytes() == before[item["source"]["path"]]
@@ -288,8 +402,7 @@ def test_materialization_refuses_conflicting_evidence_and_never_retires_source(
         else:
             target = next(item["destinations"][0] for item in plan["files"])
             path = (
-                Path(plan["destination_root"])
-                / target["recording_id"]
+                organizer._parent_directory(plan, target["recording_id"])
                 / target["relative_path"]
             )
             path.unlink()
@@ -379,6 +492,50 @@ def test_prepare_parent_manifests_are_exact_and_retry_is_byte_stable(tmp_path):
     ] == manifests
 
 
+def _single_video_source(tmp_path: Path) -> Path:
+    source = Path(shutil.copytree(FIXTURES / "whole", tmp_path / "staging"))
+    (source / "fixture.h5").unlink()  # placeholder bytes, not an H5 container
+    _resign(source)
+    return source
+
+
+def test_single_video_parent_is_a_one_clip_collection_with_original_paths(tmp_path):
+    source = _single_video_source(tmp_path)
+    before = _bytes(source)
+    plan = _plan(source, tmp_path / "recordings")
+    assert plan["recording_layout"] == "single_video"
+    (parent,) = plan["parents"]
+    assert parent["acquisition_recording_layout"] == "single_video"
+    assert parent["clip_count"] == 1
+    organizer.prepare_transfer_parent_recordings(plan, batch_rows=1)
+    directory = Path(parent["destination_dir"])
+    manifest = json.loads((directory / "recording_manifest.json").read_bytes())
+    # Stored as a clip collection; the producer label is kept, not relabelled.
+    assert manifest["source_layout"] == "rolling_clips"
+    assert manifest["acquisition_recording_layout"] == "single_video"
+    for name in ("Cam02010093_full.mp4", "Cam02010093_full.csv"):
+        assert (directory / "cams/acquisition" / name).read_bytes() == before[name]
+    index = json.loads(
+        (
+            directory / organizer.INDEX_DIRECTORY / "recording_clip_index.json"
+        ).read_bytes()
+    )
+    assert index["recording_backend_mode"] == "single_video"
+    assert [(row["clip_index"], row["clip_directory"]) for row in index["clips"]] == [
+        (0, ".")
+    ]
+    assert _bytes(source) == before
+
+
+def test_prepare_refuses_an_unknown_producer_layout_before_any_write(tmp_path):
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    plan["recording_layout"] = "tiled_video"
+    with pytest.raises(ValueError, match="rolling_clips or single_video"):
+        organizer.prepare_transfer_parent_recordings(plan)
+    assert not (tmp_path / "recordings").exists()
+
+
 def test_original_ptp_summary_uses_existing_clock_locator_without_rewriting(tmp_path):
     source = _source(tmp_path)
     summary = (
@@ -419,7 +576,8 @@ def test_prepare_manifest_failure_is_recoverable_without_source_retirement(
     assert _bytes(source) == before
 
 
-def test_prepare_refuses_an_incomplete_index_and_preserves_recovery_evidence(tmp_path):
+def test_prepare_sets_aside_an_incomplete_index_and_rebuilds_it(tmp_path):
+    # An attempt that died while building left an index without its manifest.
     source = _source(tmp_path)
     plan = _plan(source, tmp_path / "recordings")
     organizer.materialize_transfer_organization(plan)
@@ -427,12 +585,61 @@ def test_prepare_refuses_an_incomplete_index_and_preserves_recovery_evidence(tmp
     index.mkdir(parents=True)
     (index / "recording_frame_index.parquet").write_bytes(b"interrupted index")
     before = _bytes(source)
-    with pytest.raises((ValueError, FileNotFoundError), match="index"):
-        organizer.prepare_transfer_parent_recordings(plan)
+
+    state = organizer.prepare_transfer_parent_recordings(plan)
+
     assert _bytes(source) == before
-    assert (
-        index / "recording_frame_index.parquet"
-    ).read_bytes() == b"interrupted index"
+    assert (index / organizer.INDEX_MANIFEST_NAME).is_file()
+    [record] = state["incomplete_indexes_set_aside"]
+    assert record["from"] == str(index) and record["files"] == ["recording_frame_index.parquet"]
+    kept = Path(record["to"])
+    assert kept.parent == organizer._state_directory(plan) / "incomplete_indexes"
+    assert (kept / "recording_frame_index.parquet").read_bytes() == b"interrupted index"
+
+
+def test_prepare_resumes_after_a_kill_during_the_index_build(tmp_path, monkeypatch):
+    from fisheye.utils import build_transfer_parent_frame_index as builder
+
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    real = builder.build_transfer_parent_frame_index
+    calls = {"n": 0}
+
+    def killed_once(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            out = Path(kwargs["output_dir"])
+            out.mkdir(parents=True)
+            (out / "clip_000000_projection.json").write_text("{}")
+            raise KeyboardInterrupt("bkill during the index build")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(builder, "build_transfer_parent_frame_index", killed_once)
+    with pytest.raises(KeyboardInterrupt):
+        organizer.prepare_transfer_parent_recordings(plan)
+    state = organizer.prepare_transfer_parent_recordings(plan)
+    assert state["parent_manifests_prepared"] is True
+    assert len(state["incomplete_indexes_set_aside"]) == 1
+    for parent in plan["parents"]:
+        assert (Path(parent["destination_dir"]) / "recording_manifest.json").is_file()
+
+
+def test_prepare_refuses_a_complete_index_that_does_not_verify(tmp_path):
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    organizer.prepare_transfer_parent_recordings(plan)
+    index = Path(plan["parents"][0]["destination_dir"]) / organizer.INDEX_DIRECTORY
+    parquet = index / "recording_frame_index.parquet"
+    parquet.chmod(0o644)
+    parquet.write_bytes(parquet.read_bytes() + b"tampered")
+    state_file = organizer._state_directory(plan) / "organization_state.json"
+    state = json.loads(state_file.read_text())
+    state.pop("parent_manifests_prepared", None)
+    state_file.chmod(0o644)
+    state_file.write_text(json.dumps(state))
+    with pytest.raises(ValueError, match="digest differs"):
+        organizer.prepare_transfer_parent_recordings(plan)
+    assert not (organizer._state_directory(plan) / "incomplete_indexes").exists()
 
 
 def _prepared_with_admission_stub(tmp_path, monkeypatch):
@@ -470,12 +677,42 @@ def test_verified_retirement_empties_only_source_and_preserves_every_destination
     for item in plan["files"]:
         for target in item["destinations"]:
             path = (
-                Path(plan["destination_root"])
-                / target["recording_id"]
+                organizer._parent_directory(plan, target["recording_id"])
                 / target["relative_path"]
             )
             assert path.read_bytes() == before[item["source"]["path"]]
     assert organizer.finalize_transfer_staging(plan) == result
+
+
+def test_completed_replay_accepts_a_removed_empty_staging_folder(tmp_path, monkeypatch):
+    # The registrar removes the empty folder after registration; replaying
+    # the completed delivery must still verify every copy and receipt.
+    source, plan = _prepared_with_admission_stub(tmp_path, monkeypatch)
+    result = organizer.finalize_transfer_staging(plan)
+    source.rmdir()
+    with organizer.transfer_parent_workflow_lock(plan):
+        assert organizer.finalize_transfer_staging(plan) == result
+
+
+def test_completed_replay_refuses_a_replaced_staging_folder(tmp_path, monkeypatch):
+    source, plan = _prepared_with_admission_stub(tmp_path, monkeypatch)
+    organizer.finalize_transfer_staging(plan)
+    # Create the replacement while the original still exists, so it cannot
+    # reuse the original's inode (rmdir then mkdir can, depending on the
+    # filesystem).
+    retired = source.with_name(source.name + ".retired")
+    source.rename(retired)
+    source.mkdir()
+    retired.rmdir()
+    with pytest.raises(ValueError, match="directory ownership lost"):
+        organizer.finalize_transfer_staging(plan)
+
+
+def test_missing_staging_folder_is_refused_before_completion(tmp_path, monkeypatch):
+    source, plan = _prepared_with_admission_stub(tmp_path, monkeypatch)
+    shutil.rmtree(source)
+    with pytest.raises((ValueError, OSError)):
+        organizer.finalize_transfer_staging(plan)
 
 
 @pytest.mark.parametrize(
@@ -501,8 +738,7 @@ def test_failed_retirement_gate_keeps_all_remaining_staging_bytes(
     elif failure == "changed_destination":
         target = plan["files"][0]["destinations"][0]
         path = (
-            Path(plan["destination_root"])
-            / target["recording_id"]
+            organizer._parent_directory(plan, target["recording_id"])
             / target["relative_path"]
         )
         path.unlink()
@@ -611,7 +847,7 @@ def test_all_durable_copies_and_initial_journal_precede_first_unlink(
         nonlocal retired
         if retired == 0:
             expected = {
-                Path(plan["destination_root"]) / t["recording_id"] / t["relative_path"]
+                organizer._parent_directory(plan, t["recording_id"]) / t["relative_path"]
                 for item in plan["files"]
                 for t in item["destinations"]
             }
@@ -635,3 +871,233 @@ def test_all_durable_copies_and_initial_journal_precede_first_unlink(
     organizer.finalize_transfer_staging(plan)
     assert retired == len(plan["files"])
     assert not list(source.iterdir())
+
+
+def test_recording_folders_are_readable_and_ids_stay_hashed(tmp_path):
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    for parent in plan["parents"]:
+        directory = Path(parent["destination_dir"])
+        assert directory.name == parent["recording_name"]
+        assert directory.name.endswith("_Cam" + parent["identity"]["camera_id"])
+        assert parent["identity"]["recording_id"].startswith("source_recording_")
+        assert organizer._parent_directory(plan, parent["identity"]["recording_id"]) == directory
+
+
+def test_sync_assessment_is_recorded_and_replayed(tmp_path):
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    organizer.prepare_transfer_parent_recordings(plan, batch_rows=1)
+    for parent in plan["parents"]:
+        directory = Path(parent["destination_dir"])
+        assessment = json.loads((directory / organizer.VIDEO_SYNC_ASSESSMENT).read_bytes())
+        assert assessment["videos"] and all(
+            relative.startswith("cams/acquisition/") for relative in assessment["videos"]
+        )
+        manifest = json.loads((directory / "recording_manifest.json").read_bytes())
+        assert organizer.VIDEO_SYNC_ASSESSMENT in manifest["files"]["derived"]
+    organizer.prepare_transfer_parent_recordings(plan, batch_rows=1)  # replay verifies
+
+
+@pytest.mark.parametrize(
+    ("result", "reason"),
+    [
+        ({"container_inspection_status": "unreadable", "message": "bad"}, "cannot be verified"),
+        (
+            {
+                "container_inspection_status": "ok",
+                "sync_sample_proof": "orange_idr_sidecar_contradiction",
+                "message": "contradiction",
+            },
+            "contradicts",
+        ),
+    ],
+)
+def test_unverifiable_or_contradicted_keyframes_refuse_before_manifest(
+    tmp_path, monkeypatch, result, reason
+):
+    from fisheye.diagnostics.video import container
+
+    monkeypatch.setattr(container, "check_hevc_keyframe_flags", lambda path, **_: result)
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    with pytest.raises(transfer.TransferSnapshotError, match=reason):
+        organizer.prepare_transfer_parent_recordings(plan, batch_rows=1)
+    for parent in plan["parents"]:
+        assert not (Path(parent["destination_dir"]) / "recording_manifest.json").exists()
+
+
+def test_directory_sync_stops_at_the_filesystem_boundary(tmp_path: Path, monkeypatch) -> None:
+    # /groups is an automount root on its own device; fsync on it returns
+    # EINVAL, which failed every real intake into /groups (2026-10-07).
+    deep = tmp_path / "groups" / "lab" / "recordings" / ".transfer_intake"
+    deep.mkdir(parents=True)
+    mount = tmp_path / "groups"
+    synced = []
+
+    def fsync_directory(path: Path) -> None:
+        if path in (mount, *mount.parents):
+            raise OSError(22, "Invalid argument")
+        synced.append(path)
+
+    def device(path: Path) -> int:
+        return 2 if path in (mount, *mount.parents) else 1
+
+    monkeypatch.setattr(organizer, "_fsync_directory", fsync_directory)
+    monkeypatch.setattr(organizer, "_device", device)
+    organizer._sync_directory_chain(deep)
+    assert synced == [deep, deep.parent, deep.parent.parent]
+
+
+def test_publication_flush_stops_at_the_filesystem_boundary(tmp_path: Path, monkeypatch) -> None:
+    # The pre-retirement durability barrier also walked every parent to "/",
+    # and fsync of the /groups automount root returns EINVAL (2026-10-07).
+    mount = tmp_path / "groups"
+    root = mount / "lab" / "recording"
+    (root / "zarr").mkdir(parents=True)
+    (root / "zarr" / "payload.bin").write_bytes(b"x")
+    plan = {"parents": [{"destination_dir": str(root), "identity": {"recording_id": "r"}}]}
+    state = {"parent_directory_identities": {"r": organizer._directory_identity(root)}}
+    synced = []
+
+    def fsync_directory(path: Path) -> None:
+        if path in (mount, *mount.parents):
+            raise OSError(22, "Invalid argument")
+        synced.append(path)
+
+    monkeypatch.setattr(organizer, "_fsync_directory", fsync_directory)
+    monkeypatch.setattr(organizer, "_device", lambda path: 2 if path in (mount, *mount.parents) else 1)
+    organizer._flush_parent_publications(plan, state)
+    assert set(synced) == {root / "zarr", root, root.parent}
+
+
+def _declare_realtime_products(root: Path, *, drop_file: str | None = None) -> dict[str, list[str]]:
+    """Add per-camera realtime product files and their declaration, then reseal."""
+
+    template = json.loads(
+        (FIXTURES.parent / "orange_realtime_products_v2" / "realtime_products.json").read_text()
+    )["cameras"]["2010093"]
+    session_path = root / "recording_session.json"
+    session = json.loads(session_path.read_bytes())
+    cameras: dict[str, dict] = {}
+    owned: dict[str, list[str]] = {}
+    for camera in session["cameras"]:
+        products = json.loads(json.dumps(template))
+        names = []
+        for group in (
+            products["detections"]["files"], products["pose"]["files"],
+            products["crop_files"], products["acquisition_files"],
+        ):
+            for item in group:
+                name = item["path"].replace("Cam2010093", f"Cam{camera}")
+                data = f"{camera} {item['role']} {name}\n".encode()
+                (root / name).write_bytes(data)
+                item.update(path=name, size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+                names.append(name)
+        cameras[camera] = products
+        owned[camera] = names
+    block = json.loads(
+        (FIXTURES.parent / "orange_realtime_products_v2" / "realtime_products.json").read_text()
+    )
+    block["cameras"] = cameras
+    session["realtime_products"] = block
+    session_path.write_bytes(transfer.canonical_bytes(session))
+    if drop_file is not None:
+        (root / drop_file).unlink()
+    _resign(root)
+    return owned
+
+
+def test_declared_realtime_products_go_only_to_their_camera(tmp_path):
+    source = _source(tmp_path)
+    owned = _declare_realtime_products(source)
+    plan = _plan(source, tmp_path / "recordings")
+    by_path = {item["source"]["path"]: item for item in plan["files"]}
+    recording = {p["identity"]["camera_id"]: p["identity"]["recording_id"] for p in plan["parents"]}
+    for camera, names in owned.items():
+        for name in names:
+            item = by_path[name]
+            assert (item["role"], item["camera_id"]) == ("camera_realtime_product", camera)
+            assert [t["recording_id"] for t in item["destinations"]] == [recording[camera]]
+            assert item["destinations"][0]["relative_path"] == f"raw/acquisition/{name}"
+    # Undeclared session files still go to every camera.
+    assert len(by_path["recording_session.json"]["destinations"]) == len(owned)
+
+
+def test_a_declared_but_undelivered_file_is_refused(tmp_path):
+    source = _source(tmp_path)
+    owned = _declare_realtime_products(source, drop_file=None)
+    missing = owned["02010093"][0]
+    (source / missing).unlink()
+    _resign(source)
+    with pytest.raises(ValueError, match="declared realtime product is not delivered"):
+        _plan(source, tmp_path / "recordings")
+
+
+def test_a_declaration_for_other_cameras_is_refused(tmp_path):
+    source = _source(tmp_path)
+    _declare_realtime_products(source)
+    session_path = source / "recording_session.json"
+    session = json.loads(session_path.read_bytes())
+    cameras = session["realtime_products"]["cameras"]
+    cameras["2099999"] = cameras.pop("02010094")
+    session_path.write_bytes(transfer.canonical_bytes(session))
+    _resign(source)
+    with pytest.raises(ValueError, match="declares cameras"):
+        _plan(source, tmp_path / "recordings")
+
+
+def test_sessions_without_a_declaration_keep_session_context(tmp_path):
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    assert not any(item["role"] == "camera_realtime_product" for item in plan["files"])
+
+
+def test_realtime_products_materialize_and_retire_per_camera(tmp_path, monkeypatch):
+    source = _source(tmp_path)
+    owned = _declare_realtime_products(source)
+    plan = _plan(source, tmp_path / "recordings")
+    organizer.prepare_transfer_parent_recordings(plan)
+    monkeypatch.setattr(
+        organizer, "_verify_parent_imports",
+        lambda *args, **kwargs: {"fixture": "admission_stub_not_authority_evidence"},
+    )
+    assert organizer.finalize_transfer_staging(plan)["status"] == "complete"
+    folders = {p["identity"]["camera_id"]: Path(p["destination_dir"]) for p in plan["parents"]}
+    for camera, names in owned.items():
+        for name in names:
+            for other, folder in folders.items():
+                present = (folder / "raw/acquisition" / name).is_file()
+                assert present is (other == camera), (name, other)
+
+
+def _also_declare(root: Path, camera: str, path: str) -> None:
+    """Declare one delivered file under a camera's realtime crop_files, then reseal."""
+
+    session_path = root / "recording_session.json"
+    session = json.loads(session_path.read_bytes())
+    crop_files = session["realtime_products"]["cameras"][camera]["crop_files"]
+    data = (root / path).read_bytes()
+    crop_files.append(
+        {
+            **crop_files[0],
+            "path": path,
+            "size_bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    )
+    session_path.write_bytes(transfer.canonical_bytes(session))
+    _resign(root)
+
+
+def test_a_declared_file_that_is_its_cameras_own_output_keeps_its_placement(tmp_path):
+    # Orange declares each camera's crop metadata CSV under crop_files, and the
+    # same file is that camera's clip output (the 2026_10_09 snow sessions). It
+    # keeps its output placement; a different owner still refuses (above).
+    source = _single_video_source(tmp_path)
+    _declare_realtime_products(source)
+    _also_declare(source, "02010093", "Cam02010093_full.csv")
+    plan = _plan(source, tmp_path / "recordings")
+    item = next(i for i in plan["files"] if i["source"]["path"] == "Cam02010093_full.csv")
+    assert (item["role"], item["camera_id"]) == ("camera_output", "02010093")
+    assert [t["relative_path"] for t in item["destinations"]] == ["cams/acquisition/Cam02010093_full.csv"]

@@ -1,0 +1,1449 @@
+{
+  "components": {
+    "schemas": {
+      "AcquisitionCrossSummary": {
+        "properties": {
+          "background_strains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Background Strains",
+            "type": "array"
+          },
+          "background_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Background Summary"
+          },
+          "cache_updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Updated At"
+          },
+          "cross_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cross Id"
+          },
+          "has_mixed_background": {
+            "default": false,
+            "title": "Has Mixed Background",
+            "type": "boolean"
+          },
+          "line_labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Line Labels",
+            "type": "array"
+          },
+          "line_strain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Strain"
+          },
+          "mutant_backgrounds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Mutant Backgrounds",
+            "type": "array"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "title": "AcquisitionCrossSummary",
+        "type": "object"
+      },
+      "AcquisitionDishItem": {
+        "properties": {
+          "container_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Container Type"
+          },
+          "cross": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AcquisitionCrossSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cross_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cross Id"
+          },
+          "cross_setup_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cross Setup Date"
+          },
+          "current_fish_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Fish Count"
+          },
+          "date_created": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date Created"
+          },
+          "dish_id": {
+            "title": "Dish Id",
+            "type": "string"
+          },
+          "dish_population_type": {
+            "default": "primary",
+            "title": "Dish Population Type",
+            "type": "string"
+          },
+          "dish_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dish Uuid"
+          },
+          "dof": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dof"
+          },
+          "dof_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dof Source"
+          },
+          "dpf": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dpf"
+          },
+          "fish_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fish Count"
+          },
+          "genotype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Genotype"
+          },
+          "housing_unit_count": {
+            "default": 0,
+            "title": "Housing Unit Count",
+            "type": "integer"
+          },
+          "last_check": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Check"
+          },
+          "latest_screening_datetime": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Screening Datetime"
+          },
+          "links": {
+            "$ref": "#/components/schemas/AcquisitionLinks"
+          },
+          "parent_dish_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Dish Id"
+          },
+          "parents_display": {
+            "default": "",
+            "title": "Parents Display",
+            "type": "string"
+          },
+          "registered_fish_count": {
+            "default": 0,
+            "title": "Registered Fish Count",
+            "type": "integer"
+          },
+          "responsible": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Responsible"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "room": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Room"
+          },
+          "screening_date_finalized": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Screening Date Finalized"
+          },
+          "sex": {
+            "default": "unknown",
+            "title": "Sex",
+            "type": "string"
+          },
+          "source_screening_bucket": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Screening Bucket"
+          },
+          "source_screening_datetime": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Screening Datetime"
+          },
+          "species": {
+            "default": "Danio rerio",
+            "title": "Species",
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "termination_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Termination Date"
+          },
+          "termination_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Termination Reason"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "dish_id",
+          "links"
+        ],
+        "title": "AcquisitionDishItem",
+        "type": "object"
+      },
+      "AcquisitionDishesResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AcquisitionDishItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "purpose": {
+            "default": "citrus_acquisition_dish_picker",
+            "title": "Purpose",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 2,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status_filter": {
+            "title": "Status Filter",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status_filter",
+          "limit",
+          "offset",
+          "count"
+        ],
+        "title": "AcquisitionDishesResponse",
+        "type": "object"
+      },
+      "AcquisitionLinks": {
+        "properties": {
+          "cross_provenance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cross Provenance"
+          },
+          "dish": {
+            "title": "Dish",
+            "type": "string"
+          },
+          "fish": {
+            "title": "Fish",
+            "type": "string"
+          },
+          "units": {
+            "title": "Units",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dish",
+          "fish",
+          "units"
+        ],
+        "title": "AcquisitionLinks",
+        "type": "object"
+      },
+      "ApiErrorDetail": {
+        "additionalProperties": true,
+        "description": "Structured error: ``error`` code plus identifiers or ``message``.",
+        "properties": {
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ApiErrorDetail",
+        "type": "object"
+      },
+      "ApiErrorResponse": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ApiErrorDetail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "ApiErrorResponse",
+        "type": "object"
+      },
+      "CitrusSnapshotResponse": {
+        "properties": {
+          "cross_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cross Id"
+          },
+          "dish_id": {
+            "title": "Dish Id",
+            "type": "string"
+          },
+          "dish_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dish Uuid"
+          },
+          "dof": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dof"
+          },
+          "dpf": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dpf"
+          },
+          "fish_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fish Count"
+          },
+          "genotype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Genotype"
+          },
+          "line_strain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Strain"
+          },
+          "parents": {
+            "items": {
+              "$ref": "#/components/schemas/CrossParentSnapshot"
+            },
+            "title": "Parents",
+            "type": "array"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "schema_version": {
+            "default": 2,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "sex": {
+            "default": "unknown",
+            "title": "Sex",
+            "type": "string"
+          },
+          "species": {
+            "default": "Danio rerio",
+            "title": "Species",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "dish_id"
+        ],
+        "title": "CitrusSnapshotResponse",
+        "type": "object"
+      },
+      "CrossParentSnapshot": {
+        "properties": {
+          "identifier": {
+            "title": "Identifier",
+            "type": "string"
+          },
+          "sex": {
+            "default": "unknown",
+            "title": "Sex",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identifier"
+        ],
+        "title": "CrossParentSnapshot",
+        "type": "object"
+      },
+      "DishDetailResponse": {
+        "additionalProperties": true,
+        "description": "Full dish row. Declares the identity fields consumers pin; every\nother dishes column (and the parsed ``data`` JSON) passes through.",
+        "properties": {
+          "cross_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cross Id"
+          },
+          "dish_id": {
+            "title": "Dish Id",
+            "type": "string"
+          },
+          "dish_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dish Uuid"
+          },
+          "dpf": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dpf"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "dish_id"
+        ],
+        "title": "DishDetailResponse",
+        "type": "object"
+      },
+      "FishListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FishSubjectResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "title": "FishListResponse",
+        "type": "object"
+      },
+      "FishSubjectResponse": {
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "current_unit_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Unit Id"
+          },
+          "dish_id": {
+            "title": "Dish Id",
+            "type": "string"
+          },
+          "dish_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dish Uuid"
+          },
+          "fish_id": {
+            "title": "Fish Id",
+            "type": "string"
+          },
+          "genotype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Genotype"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "sex": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sex"
+          },
+          "species": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Species"
+          },
+          "subject_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Label"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "fish_id",
+          "dish_id"
+        ],
+        "title": "FishSubjectResponse",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "VersionResponse": {
+        "description": "Which MetaZebrobot a client is talking to, for provenance.",
+        "properties": {
+          "api_schema_version": {
+            "default": 2,
+            "title": "Api Schema Version",
+            "type": "integer"
+          },
+          "consumer_schema_sha256": {
+            "title": "Consumer Schema Sha256",
+            "type": "string"
+          },
+          "service_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Commit"
+          },
+          "service_commit_dirty": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Commit Dirty"
+          },
+          "started_at_utc": {
+            "title": "Started At Utc",
+            "type": "string"
+          }
+        },
+        "required": [
+          "consumer_schema_sha256",
+          "started_at_utc"
+        ],
+        "title": "VersionResponse",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Generated by scripts/export_consumer_openapi.py from the MetaZebrobot app; do not edit by hand. Semantics: docs/zebrobot_snapshot.md.",
+    "title": "MetaZebrobot consumer API (pinned slice)",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/acquisition/dishes": {
+      "get": {
+        "description": "Return a Citrus-focused dish list with acquisition context.",
+        "operationId": "list_acquisition_dishes_acquisition_dishes_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "default": "active",
+              "pattern": "^(active|inactive|all)$",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cross_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cross Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "responsible",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Responsible"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 300,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcquisitionDishesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "List Acquisition Dishes"
+      }
+    },
+    "/dishes/by-uuid/{dish_uuid}": {
+      "get": {
+        "operationId": "get_dish_by_uuid_api_dishes_by_uuid__dish_uuid__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dish_uuid",
+            "required": true,
+            "schema": {
+              "title": "Dish Uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_checks",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Checks",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DishDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found (dish_not_found / fish_not_found)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "Get Dish By Uuid Api"
+      }
+    },
+    "/dishes/{dish_id}": {
+      "get": {
+        "operationId": "get_dish_api_dishes__dish_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dish_id",
+            "required": true,
+            "schema": {
+              "title": "Dish Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_checks",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Checks",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DishDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found (dish_not_found / fish_not_found)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "Get Dish Api"
+      }
+    },
+    "/dishes/{dish_id}/citrus-snapshot": {
+      "get": {
+        "description": "Return a no-PII dish/cross snapshot for Citrus H5 metadata.",
+        "operationId": "get_dish_citrus_snapshot_dishes__dish_id__citrus_snapshot_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dish_id",
+            "required": true,
+            "schema": {
+              "title": "Dish Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CitrusSnapshotResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found (dish_not_found / fish_not_found)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "Get Dish Citrus Snapshot"
+      }
+    },
+    "/dishes/{dish_id}/fish": {
+      "get": {
+        "description": "List all fish subjects registered to a dish.",
+        "operationId": "list_fish_for_dish_dishes__dish_id__fish_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dish_id",
+            "required": true,
+            "schema": {
+              "title": "Dish Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FishListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found (dish_not_found / fish_not_found)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "List Fish For Dish"
+      }
+    },
+    "/fish/{fish_id}": {
+      "get": {
+        "description": "Fetch a single fish subject by UUID.",
+        "operationId": "get_fish_fish__fish_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "fish_id",
+            "required": true,
+            "schema": {
+              "title": "Fish Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FishSubjectResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found (dish_not_found / fish_not_found)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "Get Fish"
+      }
+    },
+    "/version": {
+      "get": {
+        "description": "Code and consumer-schema identity of this running process.\n\n``consumer_schema_sha256`` is computed from the running app's own\nOpenAPI, so it matches docs/api/consumer_openapi.json only when the\nprocess serves the pinned schema.",
+        "operationId": "version_version_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Version"
+      }
+    }
+  }
+}

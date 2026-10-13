@@ -23,6 +23,7 @@ def write_stimulus_h5(
     start_ns: int,
     frame_ns: int,
     missing_frames: bool = False,
+    camera_frame_count: int = 3,
 ) -> dict:
     from tests.unit.fisheye.test_import_stimulus_to_zarr_paths import (
         _write_stimulus_h5_with_protocol_steps,
@@ -35,6 +36,11 @@ def write_stimulus_h5(
     )
 
     validate_new_h5_path(path)
+    assert camera_frame_count >= 2
+    # One stimulus frame per camera frame. Step 0 spans [1, n-1] and step 1
+    # [n, n] (inclusive, disjoint); n=3 keeps the original [1, 2, 3, 3].
+    camera_frames = list(range(1, camera_frame_count + 1))
+    event_frames = [1, camera_frame_count - 1, camera_frame_count, camera_frame_count]
     semantic_hash = _write_stimulus_h5_with_protocol_steps(path, modern_semantic=True)
     # The source fixture is still private/unsealed; historical test outputs
     # and all transfer snapshots are left untouched.
@@ -49,7 +55,10 @@ def write_stimulus_h5(
     for value in yaml_bytes:
         fnv = ((fnv ^ value) * 0x100000001B3) & ((1 << 64) - 1)
     frames = np.asarray(
-        [(1000 + index, index + 1, start_ns + index * frame_ns) for index in range(3)],
+        [
+            (1000 + index, index + 1, start_ns + index * frame_ns)
+            for index in range(camera_frame_count)
+        ],
         dtype=[
             ("stimulus_frame_num", "<u8"),
             ("triggering_camera_frame_id", "<u8"),
@@ -67,7 +76,7 @@ def write_stimulus_h5(
         if not missing_frames:
             h5["video_metadata"].create_dataset("frame_metadata", data=frames)
         events = h5["events"][:]
-        events["camera_frame_id"] = [1, 2, 3, 3]
+        events["camera_frame_id"] = event_frames
         h5["events"][:] = events
         calib = h5["calibration_snapshot"]
         config = json.loads(calib["arena_config_json"][()])
@@ -156,9 +165,9 @@ def write_stimulus_h5(
         "fixture_variant": "missing_frame_metadata"
         if missing_frames
         else "valid_renderer_only",
-        "expected_stimulus_frames": [1000, 1001, 1002],
-        "expected_camera_frame_ids": [1, 2, 3],
-        "expected_event_camera_frame_ids": [1, 2, 3, 3],
+        "expected_stimulus_frames": [999 + frame for frame in camera_frames],
+        "expected_camera_frame_ids": camera_frames,
+        "expected_event_camera_frame_ids": event_frames,
         "expected_step_count": 2,
         "metadata_only_bypass_requested": False,
         "scientific_calibration": False,

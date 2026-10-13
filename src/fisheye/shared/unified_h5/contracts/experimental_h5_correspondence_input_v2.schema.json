@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:citrus:experimental_h5:correspondence_input:v2",
+  "title": "Citrus streamed correspondence input manifest v2",
+  "description": "Closed small manifest at /correspondence/acquisition/raw_live_identity_provenance_json, not the former per-row JSON arrays. May describe failed raw inputs. Semantic admission additionally compares actual table counts, expected counts, zero loss/errors, empty upstream reason, ordering, keys and exact canonical-row correspondence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "schema_version",
+    "frame_table_ref",
+    "chaser_table_ref",
+    "frame_rows",
+    "chaser_rows",
+    "expected_frame_rows",
+    "expected_chaser_rows",
+    "dropped_batches",
+    "write_errors",
+    "frame_order",
+    "chaser_order",
+    "maximum_chasers_per_frame",
+    "upstream_failure_reason"
+  ],
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "citrus.experimental_h5.correspondence_input"
+    },
+    "schema_version": {
+      "type": "integer",
+      "const": 2
+    },
+    "frame_table_ref": {
+      "type": "string",
+      "const": "/correspondence/acquisition/live_frame_identities"
+    },
+    "chaser_table_ref": {
+      "type": "string",
+      "const": "/correspondence/acquisition/live_chaser_identities"
+    },
+    "frame_rows": {
+      "$ref": "#/$defs/u64"
+    },
+    "chaser_rows": {
+      "$ref": "#/$defs/u64"
+    },
+    "expected_frame_rows": {
+      "$ref": "#/$defs/u64"
+    },
+    "expected_chaser_rows": {
+      "$ref": "#/$defs/u64"
+    },
+    "dropped_batches": {
+      "$ref": "#/$defs/u64"
+    },
+    "write_errors": {
+      "$ref": "#/$defs/u64"
+    },
+    "frame_order": {
+      "type": "string",
+      "const": "strictly_increasing_stimulus_frame_num_v2"
+    },
+    "chaser_order": {
+      "type": "string",
+      "const": "nondecreasing_frame_unique_chaser_per_frame_canonical_row_ordinal_v2"
+    },
+    "maximum_chasers_per_frame": {
+      "type": "integer",
+      "const": 4096
+    },
+    "upstream_failure_reason": {
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "u64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    }
+  }
+}

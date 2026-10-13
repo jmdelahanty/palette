@@ -7,6 +7,7 @@ import numpy as np
 import zarr
 
 import fisheye.utils.backfill_refined_subject_eye_geometry as mod
+from fisheye.shared import mask_store as mask_store_mod
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 
 
@@ -85,10 +86,10 @@ class _FakeGroup(dict):
             return False
 
 
-def _run_group(*, available: list[bool] | None = None, labels: list[str] | None = None) -> _FakeGroup:
+def _run_group(*, available: list[bool] | None = None, labels: list[str] | None = None, row_count: int = 3) -> _FakeGroup:
     labels = labels if labels is not None else ["subject_body", "eye_left", "eye_right", "swim_bladder"]
     group = _FakeGroup(attrs={"mask_labels": labels})
-    group.create_array("masks_roi", data=np.zeros((3, len(labels), 8, 8), dtype=np.uint8))
+    group.create_array("masks_roi", data=np.zeros((row_count, len(labels), 8, 8), dtype=np.uint8))
     if available is not None:
         group.create_array("available_channels", data=np.asarray(available, dtype=bool))
     return group
@@ -157,6 +158,23 @@ def test_writer_marks_eye_geometry_computed_and_clears_deferred_status() -> None
     assert group.attrs["eye_geometry_status"] == "computed"
     assert "eye_geometry_deferred_reason" not in group.attrs
     assert "relations/eye_pair/metrics/separation_valid" in group
+
+
+def test_eye_geometry_writer_reads_each_eye_once_per_bounded_row_batch(monkeypatch) -> None:
+    group = _run_group(available=[True, True, True, True], row_count=33)
+    reads: list[object] = []
+    original_read = mask_store_mod.MaskStore.read_dense
+
+    def counted_read(self, *, rows=None, channels=None):
+        reads.append((rows, channels))
+        return original_read(self, rows=rows, channels=channels)
+
+    monkeypatch.setattr(mask_store_mod.MaskStore, "read_dense", counted_read)
+    result = mod.write_refined_subject_eye_geometry(group, write_component_contours=False)
+    assert result["roi_count"] == 33
+    assert [(item[0].start, item[0].stop) for item in reads] == [
+        (0, 32), (0, 32), (32, 33), (32, 33),
+    ]
 
 
 def test_writer_and_backfill_read_compact_mask_store_without_dense_masks(tmp_path: Path) -> None:

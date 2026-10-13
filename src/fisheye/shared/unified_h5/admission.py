@@ -7,7 +7,11 @@ from pathlib import Path
 
 from .appearance import validate_appearance_witness
 from .common import PROFILE, canonical_json, digest, require
-from .correspondence import BINDING, validate_component_correspondence
+from .correspondence import (
+    BINDING,
+    validate_capacity_preflight,
+    validate_component_correspondence,
+)
 from .geometry import validate_geometry
 from .identity import validate_recording_identity
 from .integrity import (
@@ -15,6 +19,7 @@ from .integrity import (
     validate_external_receipt,
     validate_internal_integrity,
 )
+from .pose import COMPONENT as POSE_COMPONENT
 from .protocol import validate_protocol
 from .rows import validate_table_relations
 from .schema import APPEARANCE, read_json
@@ -50,6 +55,11 @@ class UnifiedH5Admission:
     protocol_semantic_sha256: str
     protocol_execution_sha256: str
     node_kinds: dict[str, str]
+    # The admitted catalog binding, and the stimulus angle convention it fixes
+    # (``canvas_y_down_clockwise_legacy`` or ``atan2_negative_y_x_degrees``).
+    # Readers of stimulus angles use this, never the file's date or attributes.
+    catalog: str
+    stimulus_angle_convention: str
     selector_eligible: bool = False
 
     def manifest_claims(self):
@@ -68,6 +78,8 @@ class UnifiedH5Admission:
             "camera_serial": self.camera_serial,
             "protocol_semantic_sha256": self.protocol_semantic_sha256,
             "protocol_execution_sha256": self.protocol_execution_sha256,
+            "catalog": self.catalog,
+            "stimulus_angle_convention": self.stimulus_angle_convention,
             "selector_eligible": False,
         }
 
@@ -78,11 +90,15 @@ def _accounting(h5, integrity, correspondence):
         name: h5[path].shape[0] for name, path in TABLE_COMPONENTS.items() if path in h5
     }
     counts.update(
+        # The correspondence receipt's scope is canonical frames and chaser;
+        # grid/grating rows are validated as frame-source joins, not counted here.
         correspondence=correspondence.mapped_frame_count
-        + sum(correspondence.component_rows.values()),
+        + correspondence.component_rows.get("chaser", 0),
         geometry=1,
         recording_association=1,
     )
+    if integrity.pose_rows is not None:
+        counts[POSE_COMPONENT] = integrity.pose_rows
     for name, count in counts.items():
         value = outcomes.get(name)
         require(
@@ -110,9 +126,10 @@ def validate_artifact(
         h5, source_h5=source_h5, receipt=finalization_receipt
     )
     integrity = validate_internal_integrity(h5)
+    binding = validate_capacity_preflight(h5)
     validate_table_relations(h5, integrity.table_descriptors)
     correspondence = validate_component_correspondence(h5)
-    snapshot, execution = validate_protocol(h5)
+    snapshot, execution = validate_protocol(h5, binding["stimulus_angle_convention"])
     geometry = validate_geometry(
         h5, read_json(h5, BINDING, canonical=True), integrity.table_descriptors
     )
@@ -145,4 +162,6 @@ def validate_artifact(
         protocol_semantic_sha256=snapshot.semantic_hash,
         protocol_execution_sha256=execution.execution_hash,
         node_kinds=dict(integrity.nodes),
+        catalog=binding["catalog"],
+        stimulus_angle_convention=binding["stimulus_angle_convention"],
     )

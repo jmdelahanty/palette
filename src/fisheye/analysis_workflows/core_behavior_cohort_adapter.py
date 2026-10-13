@@ -72,6 +72,16 @@ from fisheye.analytics_exports.validated_behavior_bout_kinematics_contracts impo
     BOUT_KINEMATICS_CAPABILITY_PROFILE_ID,
     BOUT_KINEMATICS_EXPORT_PROFILE_ID,
 )
+from fisheye.analytics_exports.validated_behavior_frame_clock import (
+    BoundValidatedBehaviorFrameClock,
+    bind_validated_behavior_frame_clock,
+)
+from fisheye.analytics_exports.validated_behavior_frame_clock_contracts import (
+    ACQUISITION_FRAME_CLOCK_CAPABILITY,
+    FRAME_CLOCK_CAPABILITY_KEYS,
+    FRAME_CLOCK_CAPABILITY_PROFILE_ID,
+    FRAME_CLOCK_EXPORT_PROFILE_ID,
+)
 from fisheye.shared.pixel_frame_authority import (
     BoundAcquisitionCameraFrame,
     load_persisted_acquisition_camera_authority,
@@ -118,6 +128,7 @@ SUPPORTED_CORE_BEHAVIOR_EXPORT_PROFILE_IDS = frozenset(
         CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1,
         CORE_BEHAVIOR_EXPORT_PROFILE_ID,
         BOUT_KINEMATICS_EXPORT_PROFILE_ID,
+        FRAME_CLOCK_EXPORT_PROFILE_ID,
     }
 )
 
@@ -157,11 +168,11 @@ def _require_export_profile_id(value: object) -> str:
 
 
 def _capability_keys(export_profile_id: str) -> tuple[str, ...]:
-    return (
-        BOUT_KINEMATICS_CAPABILITY_KEYS
-        if export_profile_id == BOUT_KINEMATICS_EXPORT_PROFILE_ID
-        else CORE_BEHAVIOR_CAPABILITY_KEYS
-    )
+    if export_profile_id == FRAME_CLOCK_EXPORT_PROFILE_ID:
+        return FRAME_CLOCK_CAPABILITY_KEYS
+    if export_profile_id == BOUT_KINEMATICS_EXPORT_PROFILE_ID:
+        return BOUT_KINEMATICS_CAPABILITY_KEYS
+    return CORE_BEHAVIOR_CAPABILITY_KEYS
 
 
 def core_behavior_capability_contract(
@@ -184,12 +195,16 @@ def core_behavior_capability_contract(
         _fail("Core-behavior capability-state vocabulary is incomplete.")
     profile_id = _require_export_profile_id(export_profile_id)
     capability_profile_id = (
-        BOUT_KINEMATICS_CAPABILITY_PROFILE_ID
-        if profile_id == BOUT_KINEMATICS_EXPORT_PROFILE_ID
+        FRAME_CLOCK_CAPABILITY_PROFILE_ID
+        if profile_id == FRAME_CLOCK_EXPORT_PROFILE_ID
         else (
-            CORE_BEHAVIOR_CAPABILITY_PROFILE_ID_V1
-            if profile_id == CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1
-            else CORE_BEHAVIOR_CAPABILITY_PROFILE_ID
+            BOUT_KINEMATICS_CAPABILITY_PROFILE_ID
+            if profile_id == BOUT_KINEMATICS_EXPORT_PROFILE_ID
+            else (
+                CORE_BEHAVIOR_CAPABILITY_PROFILE_ID_V1
+                if profile_id == CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1
+                else CORE_BEHAVIOR_CAPABILITY_PROFILE_ID
+            )
         )
     )
     return build_capability_contract(
@@ -378,6 +393,9 @@ class BoundCoreBehaviorCohortSources:
     bout_kinematics: BoundBoutKinematicsMetricsSource | None = field(
         default=None, repr=False, compare=False
     )
+    acquisition_frame_clock: BoundValidatedBehaviorFrameClock | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 def bind_core_behavior_cohort_sources(
@@ -397,7 +415,8 @@ def bind_core_behavior_cohort_sources(
         analysis_zarr=source_path,
         additional_stage_nodes=(
             ("bout_kinematics",)
-            if selected_export_profile_id == BOUT_KINEMATICS_EXPORT_PROFILE_ID
+            if selected_export_profile_id
+            in {BOUT_KINEMATICS_EXPORT_PROFILE_ID, FRAME_CLOCK_EXPORT_PROFILE_ID}
             else ()
         ),
     )
@@ -573,7 +592,10 @@ def bind_core_behavior_cohort_sources(
         track_binding=track.binding,
     )
     bout_kinematics: BoundBoutKinematicsMetricsSource | None = None
-    if selected_export_profile_id == BOUT_KINEMATICS_EXPORT_PROFILE_ID:
+    if selected_export_profile_id in {
+        BOUT_KINEMATICS_EXPORT_PROFILE_ID,
+        FRAME_CLOCK_EXPORT_PROFILE_ID,
+    }:
         bout_run = runs["bout_kinematics"]
         bout_kinematics = bind_bout_kinematics_metrics_source(
             root,
@@ -594,6 +616,20 @@ def bind_core_behavior_cohort_sources(
             projection_contract=bout_kinematics_projection_contract(),
             join_authority_sha256=join_sha,
         )
+    acquisition_frame_clock: BoundValidatedBehaviorFrameClock | None = None
+    if selected_export_profile_id == FRAME_CLOCK_EXPORT_PROFILE_ID:
+        acquisition_frame_clock = bind_validated_behavior_frame_clock(
+            root,
+            analysis_zarr=source_path,
+            expected_recording_id=expected_recording_id,
+            acquisition=acquisition,
+        )
+        capability_bindings[ACQUISITION_FRAME_CLOCK_CAPABILITY] = _capability_binding(
+            profile_id="acquisition_frame_clock_export_v1",
+            source_binding=acquisition_frame_clock.source_binding,
+            projection_contract=acquisition_frame_clock.projection_contract,
+            join_authority_sha256=join_sha,
+        )
     return BoundCoreBehaviorCohortSources(
         report_path=Path(report_path).expanduser().resolve(),
         report_binding=binding,
@@ -611,6 +647,7 @@ def bind_core_behavior_cohort_sources(
         core_authority_roster=authority_roster,
         bout_authority_identity=bout_identity,
         bout_kinematics=bout_kinematics,
+        acquisition_frame_clock=acquisition_frame_clock,
     )
 
 
@@ -898,6 +935,7 @@ __all__ = [
     "TAIL_TRACE_CAPABILITY",
     "BoundCoreBehaviorCohortSources",
     "BOUT_KINEMATICS_EXPORT_PROFILE_ID",
+    "FRAME_CLOCK_EXPORT_PROFILE_ID",
     "bind_core_behavior_cohort_sources",
     "build_bundle_set_from_core_behavior_execution_reports",
     "canonical_swim_bout_projection_contract",

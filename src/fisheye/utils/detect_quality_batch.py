@@ -17,6 +17,9 @@ import zarr
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.zarr.canonical_detection_activation import (
+    canonical_detection_lineage_equivalent_runs,
+)
 
 try:
     from rich.console import Console
@@ -147,8 +150,15 @@ def _build_plans(
             )
             continue
 
-        detect_group = root[f"detect_runs/{selected}"]
-        quality_present = _has_quality_report(detect_group, quality_run_name)
+        # Nested reports of the legacy source of an activated canonical
+        # successor (validated sealed manifest) cover the successor.
+        quality_present = any(
+            _has_quality_report(root[f"detect_runs/{name}"], quality_run_name)
+            for name in sorted(
+                canonical_detection_lineage_equivalent_runs(root, selected)
+                | {selected}
+            )
+        )
         if skip_existing and quality_present:
             plans.append(
                 DetectQualityPlan(

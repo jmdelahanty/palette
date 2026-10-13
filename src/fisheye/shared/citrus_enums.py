@@ -98,6 +98,11 @@ STIMULUS_MODE: Dict[int, str] = {
     14: "SCROLLING_GRID",
     15: "INDEPENDENT_MOTION_GRID",
     16: "MOVING_DOTS",
+    17: "STATIC_GRID",
+    18: "PHOTOTAXIS",
+    19: "DARK_FLASH",
+    20: "BRIGHT_FLASH",
+    21: "CONCENTRIC_DOTS",
     99: "NONE",
 }
 

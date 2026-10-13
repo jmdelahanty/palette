@@ -1,7 +1,7 @@
 # Structural transfer-v2 fixtures — fake media only
 
 These bundles reproduce the Citrus producer at commit
-`e881f5258be83231b62a00a6f9c4e5fcd69cd548`. Their MP4/H5 files are conspicuously
+`859a7972104a829e1cc603a614cd4cf79e5cda06`. Their MP4/H5 files are conspicuously
 labeled text placeholders and their finalization records are test stubs. **Never
 submit these to production staging or treat them as scientific/codec evidence.**
 
@@ -13,6 +13,15 @@ submit these to production staging or treat them as scientific/codec evidence.**
   `frame_identity_proof.status="failed"`. Transport verification **accepts** the
   limited metadata-order/packet-parity claim; Palette admission must **refuse**.
   Optional proof absence never licenses ignoring a present failed proof.
+- `encoded_rolling/`: the one bundle here with **real** media: two cameras,
+  two clips (2 + 1 frames), full + crop outputs, video-only, tiny libx264 H264
+  clips, synthetic Orange-shaped envelopes (`data_origin: synthetic`). It is
+  the `delivery/` of `tests.canaries.parent_intake.generate_fixture` (no
+  `--with-context`) run against a source snapshot of the same pinned Citrus
+  commit, copied verbatim. It is the sealed input of the `fisheye.intake`
+  end-to-end gate (`tests/unit/fisheye/test_fisheye_intake.py`), which needs a
+  delivery the real importer can admit; the placeholder bundles cannot be.
+  Regenerate it only with that generator and those pins, never by editing it.
 - [review_cases.json](review_cases.json): shared accepted/refused path examples,
   independent and combined clip/container contradictions, and consumer-refusal
   expectation. Byte-identical to the pinned Citrus test corpus.

@@ -164,6 +164,8 @@
     window.addEventListener("resize", syncCanvas);
     video.addEventListener("loadedmetadata", syncCanvas);
     window.addEventListener("keydown", (event) => {
+      // Browser shortcuts (Ctrl/Cmd/Alt + key) are never editor hotkeys.
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
       if (event.key === "n") nav(1);
       if (event.key === "p") nav(-1);
       if (event.key === "s") save(false);

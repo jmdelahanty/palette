@@ -8,6 +8,7 @@ from uuid import UUID
 
 import pytest
 
+from fisheye.registry.migrations import MIGRATION_METHODS
 from fisheye.registry.db import Registry
 from fisheye.registry import recording_identity_authority as authority_module
 from fisheye.registry.recording_identity_authority import (
@@ -33,6 +34,9 @@ from fisheye.shared.recording_import_receipt import (
 DECIDED_AT = "2026-08-25T12:00:00+00:00"
 _UNSET = object()
 
+
+
+LATEST_SCHEMA_VERSION = MIGRATION_METHODS[-1][0]
 
 def _write_artifact(
     tmp_path: Path,
@@ -501,7 +505,7 @@ def test_receipt_projection_inserts_exact_binding_and_returns_digest(
             result.identity_snapshot_id,
             "pytest",
             DECIDED_AT,
-            73,
+            LATEST_SCHEMA_VERSION,
         )
         assert _receipt_authority_counts(registry)[
             "recording_import_receipt_bindings"
@@ -1154,12 +1158,14 @@ def test_bound_rows_reject_legacy_identity_overwrite(tmp_path: Path) -> None:
     try:
         result = _project(registry, zarr_path)
 
-        with pytest.raises(sqlite3.IntegrityError):
+        # B7: the generic upserts refuse before writing, with a clear error.
+        refused = "bound to a verified source import"
+        with pytest.raises(RecordingIdentityAuthorityError, match=refused):
             registry.upsert_recording(
                 recording_id="recording-a", session_uuid="session-b"
             )
         registry.conn.rollback()
-        with pytest.raises(sqlite3.IntegrityError):
+        with pytest.raises(RecordingIdentityAuthorityError, match=refused):
             registry.upsert_dataset(
                 result.dataset_id,
                 session_uuid="session-b",
@@ -1168,21 +1174,36 @@ def test_bound_rows_reject_legacy_identity_overwrite(tmp_path: Path) -> None:
                 artifact_kind="source_recording",
             )
         registry.conn.rollback()
-        with pytest.raises(
-            sqlite3.IntegrityError,
-            match="authority-bound recording context is immutable",
-        ):
+        with pytest.raises(RecordingIdentityAuthorityError, match="camera_id"):
             registry.upsert_recording(
                 recording_id="recording-a", camera_id="2010094"
             )
         registry.conn.rollback()
+        with pytest.raises(RecordingIdentityAuthorityError, match="recording_path"):
+            registry.upsert_recording(
+                recording_id="recording-a",
+                recording_path=str(tmp_path / "recordings" / "other"),
+            )
+        registry.conn.rollback()
+
+        # The schema triggers remain the backstop for writes that bypass the
+        # Python boundary entirely.
         with pytest.raises(
             sqlite3.IntegrityError,
             match="authority-bound recording context is immutable",
         ):
-            registry.upsert_recording(
-                recording_id="recording-a",
-                recording_path=str(tmp_path / "recordings" / "other"),
+            registry.conn.execute(
+                "UPDATE recordings SET camera_id = '2010094' "
+                "WHERE recording_id = 'recording-a';"
+            )
+        registry.conn.rollback()
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="authority-bound dataset identity and locator are immutable",
+        ):
+            registry.conn.execute(
+                "UPDATE datasets SET session_uuid = 'session-b' WHERE dataset_id = ?;",
+                (result.dataset_id,),
             )
         registry.conn.rollback()
     finally:
@@ -1495,13 +1516,13 @@ def test_physical_v72_registry_upgrades_to_v73(tmp_path: Path) -> None:
             conn.execute(f"DROP TABLE {table};")
         conn.execute("DROP INDEX idx_recordings_exact_identity;")
         conn.execute("DROP INDEX idx_datasets_exact_identity;")
-        conn.execute("DELETE FROM schema_version WHERE version = 73;")
+        conn.execute("DELETE FROM schema_version WHERE version >= 73;")
         conn.execute("PRAGMA user_version = 72;")
         conn.commit()
 
     upgraded = Registry(registry_path)
     try:
-        assert upgraded._current_schema_version() == 73
+        assert upgraded._current_schema_version() == LATEST_SCHEMA_VERSION
         tables = {
             str(row[0])
             for row in upgraded.conn.execute(
@@ -1534,7 +1555,7 @@ def test_migration73_rejects_preexisting_authority_tables(tmp_path: Path) -> Non
             conn.execute(f"DROP TABLE {table};")
         conn.execute("DROP INDEX idx_recordings_exact_identity;")
         conn.execute("DROP INDEX idx_datasets_exact_identity;")
-        conn.execute("DELETE FROM schema_version WHERE version = 73;")
+        conn.execute("DELETE FROM schema_version WHERE version >= 73;")
         conn.execute("PRAGMA user_version = 72;")
         conn.execute(
             "CREATE TABLE recording_identity_evidence(evidence_digest TEXT);"

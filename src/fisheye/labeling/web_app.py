@@ -209,7 +209,15 @@ def install_security_hooks(app: Flask) -> Flask:
 
     @app.after_request
     def _palette_labeling_apply_security_headers(response: Any) -> Any:
-        return apply_browser_response_security_headers(response)
+        apply_browser_response_security_headers(response)
+        # Only a content-addressed static asset opts out of no-store; every
+        # other security header still applies to it.
+        cache_control = g.get("palette_labeling_cache_control")
+        if cache_control:
+            response.headers["Cache-Control"] = cache_control
+            response.headers.pop("Pragma", None)
+            response.headers.pop("Expires", None)
+        return response
 
     app.extensions[_SECURITY_HOOKS_EXTENSION] = True
     return app

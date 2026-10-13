@@ -46,6 +46,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
+from fisheye.analysis.chaser_behavior import first_chaser_step_parameters
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
 from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadSnapshot,
@@ -306,8 +307,7 @@ def _protocol_position_transition_s(
         return 0.0
     try:
         payload = json.loads(raw) if isinstance(raw, str) else raw
-        steps = payload["steps"]
-        params = steps[0]["parameters"]
+        params = first_chaser_step_parameters(payload)
     except (TypeError, ValueError, KeyError, IndexError):
         return 0.0
     return max(0.0, _safe_float(params.get("position_transition_duration_s"), 0.0))

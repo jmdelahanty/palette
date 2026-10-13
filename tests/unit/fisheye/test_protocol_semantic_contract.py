@@ -40,9 +40,25 @@ def _json(value: object) -> str:
 def _documents(
     modes: tuple[str, ...],
 ) -> tuple[str, str, str]:
-    mode_ids = {"SOLID_BLACK": 4, "CHASER": 12}
-    durations = {"SOLID_BLACK": 300.0, "CHASER": 1500.0}
-    families = {"SOLID_BLACK": "solid_color", "CHASER": "chaser"}
+    mode_ids = {
+        "SOLID_BLACK": 4,
+        "CHASER": 12,
+        "STATIC_GRID": 17,
+        "PHOTOTAXIS": 18,
+        "DARK_FLASH": 19,
+        "BRIGHT_FLASH": 20,
+        "CONCENTRIC_DOTS": 21,
+    }
+    families = {
+        "SOLID_BLACK": "solid_color",
+        "CHASER": "chaser",
+        "STATIC_GRID": "static_grid",
+        "PHOTOTAXIS": "phototaxis",
+        "DARK_FLASH": "flash",
+        "BRIGHT_FLASH": "flash",
+        "CONCENTRIC_DOTS": "concentric_dots",
+    }
+    durations = {mode: 1500.0 if mode == "CHASER" else 300.0 for mode in mode_ids}
     semantic_steps = []
     trial_steps = []
     for index, mode in enumerate(modes):
@@ -215,6 +231,36 @@ def test_valid_one_and_two_step_recipes_have_distinct_exact_identity() -> None:
     assert one.steps[0].display_context == "chaser"
     assert two.steps[0].display_context == "solid_black"
     assert two.mode_sequence == ("SOLID_BLACK", "CHASER")
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ("STATIC_GRID", "PHOTOTAXIS", "DARK_FLASH", "BRIGHT_FLASH", "CONCENTRIC_DOTS"),
+)
+def test_citrus_modes_17_through_21_validate_as_other_context(mode: str) -> None:
+    snapshot = _snapshot_v2((mode,))
+
+    assert snapshot.mode_sequence == (mode,)
+    assert snapshot.steps[0].display_context == "other"
+    assert snapshot.steps[0].resolved_color_rgba8 is None
+
+
+def test_unmirrored_citrus_mode_id_fails_closed() -> None:
+    semantic_hash, semantic_json, trial_json = _documents(("DARK_FLASH",))
+    semantic = json.loads(semantic_json)
+    semantic["identity"]["steps"][0]["stimulus_mode_id"] = 22
+    semantic_json = _json(semantic)
+    semantic_hash = "sha256:" + sha256(semantic_json.encode("utf-8")).hexdigest()
+    trial = json.loads(trial_json)
+    trial["protocol_semantic_hash"] = semantic_hash
+    trial["steps"][0].update(stimulus_mode="SOLID_COLOR", stimulus_mode_id=22)
+
+    with pytest.raises(ProtocolSemanticContractError, match="unknown stimulus_mode_id 22"):
+        validate_protocol_semantic_snapshot(
+            semantic_hash=semantic_hash,
+            semantic_json=semantic_json,
+            trial_index_json=_json(trial),
+        )
 
 
 def test_snapshot_v2_requires_and_preserves_producer_trial_index_hash() -> None:

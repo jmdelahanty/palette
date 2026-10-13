@@ -45,6 +45,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
+from fisheye.analysis.chaser_behavior import first_chaser_step_parameters
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
 from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadSnapshot,
@@ -197,7 +198,7 @@ def _protocol_chaser_radii_mm(
         return out
     try:
         payload = json.loads(raw) if isinstance(raw, str) else raw
-        chasers = payload["steps"][0]["parameters"]["chasers"]
+        chasers = first_chaser_step_parameters(payload)["chasers"]
     except (TypeError, ValueError, KeyError, IndexError):
         return out
     for idx in range(min(int(n_chasers), len(chasers))):

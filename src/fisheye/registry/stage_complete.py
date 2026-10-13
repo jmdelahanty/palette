@@ -429,17 +429,29 @@ def emit_stage_completion(
             transaction_factory() if callable(transaction_factory) else nullcontext()
         )
         with transaction:
+            # B7: stage status is separate from identity publication.  A
+            # dataset bound to a verified current-source import is owned by the
+            # recording identity authority, so stage completion records status
+            # against that bound row and never upserts its identity/context.
+            bound_lookup = getattr(registry_db, "verified_source_dataset_at_path", None)
+            bound_dataset = (
+                bound_lookup(resolved_path) if callable(bound_lookup) else None
+            )
             dataset_id = metadata.dataset_id
             resolve_effective_dataset_id = getattr(
                 registry_db, "resolve_effective_dataset_id", None
             )
-            if callable(resolve_effective_dataset_id):
+            if bound_dataset is not None:
+                dataset_id = str(bound_dataset["dataset_id"])
+                metadata_recording_id = bound_dataset["recording_id"]
+                registry_db.mark_dataset_seen(dataset_id)
+            elif callable(resolve_effective_dataset_id):
                 dataset_id = resolve_effective_dataset_id(
                     metadata.dataset_id,
                     session_uuid=metadata_session_uuid,
                     zarr_path=resolved_path,
                 )
-            if upsert_dataset_row:
+            if upsert_dataset_row and bound_dataset is None:
                 registry_db.upsert_dataset(
                     dataset_id,
                     session_uuid=metadata_session_uuid,

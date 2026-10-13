@@ -185,6 +185,29 @@ def test_stimulus_builder_preserves_supported_positive_and_negative_grammar(
     assert path.read_bytes() == original
 
 
+def test_stimulus_builder_scales_to_a_two_frame_single_video_parent(synthetic_root):
+    import h5py
+    from tests.canaries.parent_intake.stimulus_fixture import write_stimulus_h5
+
+    path = synthetic_root / "source/synthetic_context_02010093.h5"
+    evidence = write_stimulus_h5(
+        path,
+        camera="02010093",
+        session_id=safety.SESSION_ID,
+        start_ns=1700000000000000000,
+        frame_ns=500000000,
+        camera_frame_count=2,
+    )
+    assert evidence["expected_stimulus_frames"] == [1000, 1001]
+    assert evidence["expected_camera_frame_ids"] == [1, 2]
+    # Disjoint inclusive step bounds: step 0 [1, 1], step 1 [2, 2].
+    assert evidence["expected_event_camera_frame_ids"] == [1, 1, 2, 2]
+    with h5py.File(path, "r") as h5:
+        assert h5["events"]["camera_frame_id"].tolist() == [1, 1, 2, 2]
+        frames = h5["video_metadata/frame_metadata"][:]
+        assert frames["triggering_camera_frame_id"].tolist() == [1, 2]
+
+
 @pytest.mark.parametrize("module", ["generate_fixture", "run"])
 def test_optimized_cli_refuses_before_mutation(module):
     result = subprocess.run(

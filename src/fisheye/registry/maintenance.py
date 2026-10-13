@@ -32,12 +32,17 @@ from .recording_identity_authority import recording_directory_for_source_target
 from .registered_geometry_readiness import project_registered_geometry_stages
 from .zarr_open import import_zarr as _import_zarr
 from fisheye.shared.experiment_setup import subdish_required
+from fisheye.shared.recording_manifest_context import PRODUCER_CONTEXT_SOURCE
+from fisheye.registry.recording_context_audit import recording_context_row_issues
 from fisheye.shared.zarr.canonical_detection_manifest import (
     CANONICAL_DETECTION_AUTHORITY_CONTRACT_ATTR,
     CANONICAL_DETECTION_AUTHORITY_CONTRACT_V3,
     CANONICAL_DETECTION_AUTHORITY_DIGEST_ATTR,
     CANONICAL_DETECTION_COORDINATE_RUN_MANIFEST_SCHEMA_VERSION,
     validate_canonical_detection_run_manifest,
+)
+from fisheye.shared.zarr.canonical_detection_activation import (
+    canonical_detection_lineage_equivalent_runs,
 )
 from fisheye.shared.zarr.keypoint_bundle_activation import (
     resolve_active_keypoint_bundle_from_root as _resolve_active_keypoint_bundle,
@@ -60,7 +65,6 @@ DEFAULT_ALLOWED_RECORDING_SUBTYPES_BY_TYPE = {
     "microscopy": {"lightsheet", "confocal", "2p"},
     "histology": {"section", "wholemount"},
 }
-ALLOWED_BEHAVIOR_MODES = {"free", "embedded", "none"}
 RECORDING_TUNING_STEP_NAMES: tuple[str, ...] = recording_tuning_stage_ids()
 RECORDING_STEP_NAMES: tuple[str, ...] = recording_status_stage_ids()
 RECORDING_STEP_STATUS_VALUES: tuple[str, ...] = ("ok", "missing", "absent", "na", "error")
@@ -846,6 +850,15 @@ def _backfill_recording_entities(
                 recording_dir=recording_dir,
             )
         )
+        if verified_import is None:
+            # B7: a sibling artifact inside a recording directory whose
+            # recording is bound to a verified current-source import uses that
+            # bound identity, not the legacy session_uuid fallback.
+            bound_for_dir = registry.verified_source_recording_at_directory(
+                recording_dir
+            )
+            if bound_for_dir is not None:
+                recording_id = str(bound_for_dir["recording_id"])
         now = registry.conn.execute("SELECT datetime('now') AS now;").fetchone()["now"]
         recording_name = manifest.get("recording_name") or recording_dir.name
         started_utc = manifest.get("session_start_iso8601_utc")
@@ -871,7 +884,9 @@ def _backfill_recording_entities(
         )
         recording_type = manifest.get("recording_type") or "behavior"
         recording_subtype = manifest.get("recording_subtype")
-        if recording_subtype is None and recording_type == "behavior":
+        # A producer-declared context omits the subtype on purpose: never fill it.
+        producer_context = manifest.get("context_source") == PRODUCER_CONTEXT_SOURCE
+        if recording_subtype is None and recording_type == "behavior" and not producer_context:
             recording_subtype = "free"
         behavior_mode = manifest.get("behavior_mode")
         if behavior_mode is None:
@@ -906,7 +921,13 @@ def _backfill_recording_entities(
         if existing_recording is None:
             recordings_upserted += 1
 
-        if not dry_run and verified_import is None:
+        # B7: a recording bound to a verified current-source import (via this
+        # dataset or a sibling) is written only by the identity authority.
+        recording_owned_by_authority = (
+            verified_import is not None
+            or registry.verified_source_recording_binding(recording_id) is not None
+        )
+        if not dry_run and not recording_owned_by_authority:
             registry.conn.execute(
                 """
                 INSERT INTO recordings (
@@ -4516,12 +4537,14 @@ def _resolve_group_for_source_run(
     *,
     source_run: Optional[str],
     source_run_extractor: Callable[[object], Optional[str]],
+    equivalent_source_runs: Optional[frozenset[str]] = None,
 ) -> tuple[Optional[str], Optional[object], str, Optional[str], Optional[str]]:
     latest_run, latest_group, latest_selection = _resolve_latest_group(parent)
     latest_source_run = source_run_extractor(latest_group)
     if source_run is None:
         return latest_run, latest_group, latest_selection, None, None
-    if latest_group is not None and latest_source_run == source_run:
+    accepted_sources = {source_run} | set(equivalent_source_runs or ())
+    if latest_group is not None and latest_source_run in accepted_sources:
         return latest_run, latest_group, f"source_match_{latest_selection}", None, None
 
     matches: List[str] = []
@@ -4530,7 +4553,7 @@ def _resolve_group_for_source_run(
             group = parent[name]  # type: ignore[index]
         except Exception:
             continue
-        if source_run_extractor(group) == source_run:
+        if source_run_extractor(group) in accepted_sources:
             matches.append(name)
     if matches:
         matched_run = sorted(matches)[-1]
@@ -5043,8 +5066,10 @@ def _resolve_latest_clipped_detect_collection(
 def _resolve_detect_quality_group(
     root: object,
     detect_group: object,
+    *,
+    equivalent_detect_groups: Sequence[object] = (),
 ) -> tuple[Optional[str], Optional[object], str]:
-    """Prefer the modern root run family, then historical nested reports."""
+    """Prefer the root run family, then nested reports (selected, then equivalent)."""
 
     root_parent = None
     if root is not None and hasattr(root, "get"):
@@ -5055,16 +5080,16 @@ def _resolve_detect_quality_group(
     quality_run, quality_group, selection = _resolve_latest_group(root_parent)
     if quality_group is not None:
         return quality_run, quality_group, f"root_{selection}"
-    if detect_group is None or not hasattr(detect_group, "get"):
-        return None, None, "none"
-    try:
-        nested_parent = detect_group.get("quality_reports")  # type: ignore[attr-defined]
-    except Exception:
-        nested_parent = None
-    quality_run, quality_group, selection = _resolve_latest_group(nested_parent)
-    return quality_run, quality_group, (
-        f"nested_{selection}" if selection != "none" else "none"
-    )
+    for index, candidate in enumerate((detect_group, *equivalent_detect_groups)):
+        try:
+            nested_parent = candidate.get("quality_reports")  # type: ignore[union-attr]
+        except Exception:
+            nested_parent = None
+        quality_run, quality_group, selection = _resolve_latest_group(nested_parent)
+        if selection != "none":
+            prefix = "nested" if index == 0 else "nested_lineage_equivalent"
+            return quality_run, quality_group, f"{prefix}_{selection}"
+    return None, None, "none"
 
 
 def _extract_detect_quality_details(
@@ -5586,6 +5611,12 @@ def _build_recording_step_rows_from_root(
         else _extract_detect_method(detect_group)
     )
     detect_coverage = None if detect_uses_collection else _extract_coverage_pct(detect_group)
+    # Activated canonical successor <-> legacy source, via its validated manifest.
+    detect_equivalent_runs = (
+        canonical_detection_lineage_equivalent_runs(root, detect_run) - {detect_run}
+        if detect_group is not None and not detect_uses_collection and detect_run
+        else frozenset()
+    )
     detect_manifest_digest = None
     if detect_group is not None and not detect_uses_collection:
         detect_manifest = detect_group.attrs.get("run_manifest")
@@ -5628,7 +5659,9 @@ def _build_recording_step_rows_from_root(
             detect_quality_run,
             detect_quality_group,
             detect_quality_selection,
-        ) = _resolve_detect_quality_group(root, detect_group)
+        ) = _resolve_detect_quality_group(root, detect_group, equivalent_detect_groups=[
+            detect_parent[name] for name in sorted(detect_equivalent_runs)  # type: ignore[index]
+        ])
         detect_quality_details = _extract_detect_quality_details(
             detect_quality_run,
             detect_quality_group,
@@ -5662,6 +5695,7 @@ def _build_recording_step_rows_from_root(
         refined_detect_parent,
         source_run=refined_detect_expected_source,
         source_run_extractor=_extract_source_detect_run,
+        equivalent_source_runs=None if refined_detect_collection else detect_equivalent_runs,
     )
     refined_detect_uses_collection = bool(
         refined_detect_group is None
@@ -8405,97 +8439,25 @@ def _check_registry_integrity(registry: Registry) -> List[IntegrityIssue]:
     # Recordings should declare type/schema for downstream validation.
     recording_rows = registry.conn.execute(
         """
-        SELECT recording_id, recording_type, recording_subtype, behavior_mode, artifact_schema_id
+        SELECT recording_id, recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+               context_source, recording_context_schema_version, recording_intent, data_origin
         FROM recordings
         ORDER BY recording_id;
         """
     ).fetchall()
     for row in recording_rows:
         recording_id = str(row["recording_id"])
-        recording_type = (str(row["recording_type"]).strip() if row["recording_type"] is not None else "")
-        recording_subtype = (
-            str(row["recording_subtype"]).strip() if row["recording_subtype"] is not None else ""
-        )
-        behavior_mode = (str(row["behavior_mode"]).strip() if row["behavior_mode"] is not None else "")
         artifact_schema_id = (
             str(row["artifact_schema_id"]).strip() if row["artifact_schema_id"] is not None else ""
         )
-        if not recording_type:
-            issues.append(
-                IntegrityIssue(
-                    code="recording_missing_type",
-                    run_id=recording_id,
-                    detail=f"recording_id={recording_id} has NULL/empty recording_type",
-                )
+        issues.extend(
+            IntegrityIssue(code=code, run_id=recording_id, detail=detail)
+            for code, detail in recording_context_row_issues(
+                row,
+                allowed_recording_types=allowed_recording_types,
+                allowed_subtypes_by_type=allowed_subtypes_by_type,
             )
-        elif recording_type not in allowed_recording_types:
-            issues.append(
-                IntegrityIssue(
-                    code="recording_invalid_type",
-                    run_id=recording_id,
-                    detail=(
-                        f"recording_id={recording_id} recording_type={recording_type} "
-                        f"not in allowed={','.join(sorted(allowed_recording_types))}"
-                    ),
-                )
-            )
-        allowed_subtypes = allowed_subtypes_by_type.get(recording_type)
-        if allowed_subtypes is not None:
-            if not recording_subtype:
-                issues.append(
-                    IntegrityIssue(
-                        code="recording_missing_subtype",
-                        run_id=recording_id,
-                        detail=(
-                            f"recording_id={recording_id} recording_type={recording_type} "
-                            "has NULL/empty recording_subtype"
-                        ),
-                    )
-                )
-            elif recording_subtype not in allowed_subtypes:
-                issues.append(
-                    IntegrityIssue(
-                        code="recording_invalid_subtype",
-                        run_id=recording_id,
-                        detail=(
-                            f"recording_id={recording_id} recording_type={recording_type} "
-                            f"recording_subtype={recording_subtype} "
-                            f"not in allowed={','.join(sorted(allowed_subtypes))}"
-                        ),
-                    )
-                )
-        if not behavior_mode:
-            issues.append(
-                IntegrityIssue(
-                    code="recording_missing_behavior_mode",
-                    run_id=recording_id,
-                    detail=f"recording_id={recording_id} has NULL/empty behavior_mode",
-                )
-            )
-        elif behavior_mode not in ALLOWED_BEHAVIOR_MODES:
-            issues.append(
-                IntegrityIssue(
-                    code="recording_invalid_behavior_mode",
-                    run_id=recording_id,
-                    detail=(
-                        f"recording_id={recording_id} behavior_mode={behavior_mode} "
-                        f"not in allowed={','.join(sorted(ALLOWED_BEHAVIOR_MODES))}"
-                    ),
-                )
-            )
-        if recording_type == "behavior" and recording_subtype and behavior_mode:
-            if recording_subtype != behavior_mode:
-                issues.append(
-                    IntegrityIssue(
-                        code="recording_behavior_mode_mismatch",
-                        run_id=recording_id,
-                        detail=(
-                            f"recording_id={recording_id} recording_type=behavior "
-                            f"requires recording_subtype==behavior_mode, got "
-                            f"{recording_subtype}!={behavior_mode}"
-                        ),
-                    )
-                )
+        )
         if not artifact_schema_id:
             issues.append(
                 IntegrityIssue(

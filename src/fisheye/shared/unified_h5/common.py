@@ -5,7 +5,8 @@ These are profile-specific admission mechanics, not scientific acceptance.
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
+from contextvars import ContextVar
 from hashlib import sha256
 from functools import wraps
 import json
@@ -17,7 +18,14 @@ from tempfile import TemporaryDirectory
 from typing import Any, Mapping
 
 PROFILE = "unified_experimental_h5_v1"
-MAX_DATASET_BYTES = 64 * 1024 * 1024
+# Resource profile citrus_palette.unified_h5.long_session_resources v1, from the
+# pinned admission contract contracts/unified_h5_admission_v2.json (a test keeps
+# these equal). Limits are per dataset and inclusive.
+MAX_DATASET_LOGICAL_BYTES = 2**40
+MAX_DATASET_ROWS = 2**40
+MAX_ELEMENT_BYTES = 64 * 1024 * 1024
+# Palette's own bounds for small metadata: attribute element counts and the
+# correspondence v1 whole-session JSON input (v1 keeps its original limit).
 MAX_ROWS = 2_000_000
 MAX_JSON_BYTES = 8 * 1024 * 1024
 BLOCK_BYTES = 1024 * 1024
@@ -50,6 +58,41 @@ def contract_errors(function):
             raise UnifiedH5ContractError(f"unified_artifact_invalid:{exc}") from exc
 
     return wrapped
+
+
+class AdmissionScan:
+    """Per-admission memo of table digests plus per-block digests of fixed-width data.
+
+    Admission validators describe some tables more than once; the memo keeps
+    each table to one streaming pass. Block digests are a by-product of that
+    pass, so sealing a reference needs no extra read of the file.
+    """
+
+    def __init__(self):
+        self.tables: dict[str, dict] = {}
+        self.blocks: dict[str, dict[int, str]] = {}
+
+    def record_block(self, path: str, start: int, data: bytes) -> None:
+        self.blocks.setdefault(path, {})[start] = sha256(data).hexdigest()
+
+
+_ADMISSION_SCAN: ContextVar[AdmissionScan | None] = ContextVar(
+    "unified_h5_admission_scan", default=None
+)
+
+
+@contextmanager
+def admission_scan():
+    scan = AdmissionScan()
+    token = _ADMISSION_SCAN.set(scan)
+    try:
+        yield scan
+    finally:
+        _ADMISSION_SCAN.reset(token)
+
+
+def current_admission_scan() -> AdmissionScan | None:
+    return _ADMISSION_SCAN.get()
 
 
 def require(condition: Any, reason: str) -> None:

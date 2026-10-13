@@ -19,6 +19,7 @@ except Exception:  # pragma: no cover - optional
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.recording_manifest_context import (
     DEFAULT_ALLOWED_TYPES,
+    PRODUCER_CONTEXT_SOURCE,
     DEFAULT_ALLOWED_SUBTYPES,
     DEFAULT_ALLOWED_BEHAVIOR_MODES,
     REQUIRED_FIELDS,
@@ -35,6 +36,8 @@ class ManifestIssue:
 
 def _apply_default_fields(payload: Dict[str, object]) -> bool:
     """Apply missing manifest defaults in-place. Returns True if mutated."""
+    if payload.get("context_source") == PRODUCER_CONTEXT_SOURCE:
+        return False  # producer declarations are never filled or rewritten
     changed = False
     recording_type_raw = payload.get("recording_type")
     recording_type = str(recording_type_raw).strip() if recording_type_raw is not None else ""

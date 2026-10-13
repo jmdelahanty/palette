@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from fisheye.utils.plan_orange_style_clips import _json_safe
+from fisheye.shared.orange_frame_identity import keyframe_video_frame_indices
 
 
 MODULE_NAME = "fisheye.utils.verify_orange_style_clips"
@@ -217,7 +218,9 @@ def _verify_clip(
     if paths["keyframe"].exists():
         try:
             keyframe_payload = _load_json(paths["keyframe"])
-            keyframes = keyframe_payload.get("keyframe_frames")
+            keyframes = keyframe_video_frame_indices(
+                keyframe_payload, label=str(paths["keyframe"])
+            )
             total_frames = _coerce_int(keyframe_payload.get("total_frames"))
             keyframes_list = keyframes if isinstance(keyframes, list) else []
             _check(

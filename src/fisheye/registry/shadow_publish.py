@@ -10,7 +10,7 @@ candidate, then publish one fully formed database with an atomic rename.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import fcntl
 import hashlib
 import os
@@ -20,12 +20,58 @@ import socket
 import sqlite3
 import sys
 import tempfile
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, Sequence
 import uuid
 
 
 class RegistryShadowPublishError(RuntimeError):
     """Raised when a registry shadow mutation cannot be published safely."""
+
+
+class RegistryProducerCommitMismatch(RegistryShadowPublishError):
+    """A receipt was produced by another commit than this registering checkout.
+
+    The identity authority binds a receipt only from its producing checkout,
+    so this can never succeed from this deployment; it is detected before any
+    backup or candidate copy is made.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        zarr_path: str,
+        receipt_producer_git_sha: str,
+        registrar_git_sha: str | None,
+        registrar_git_dirty: bool | None,
+    ):
+        super().__init__(message)
+        self.zarr_path = zarr_path
+        self.receipt_producer_git_sha = receipt_producer_git_sha
+        self.registrar_git_sha = registrar_git_sha
+        self.registrar_git_dirty = registrar_git_dirty
+
+
+class RegistrySchemaNewerThanCode(RegistryShadowPublishError):
+    """The registry was migrated past this code by a non-additive migration.
+
+    Deterministic for this deployment: only code at or above the registry's
+    schema (or a later additive declaration) can write it. Detected before any
+    backup or candidate copy is made.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        registry_schema_version: int,
+        code_schema_version: int,
+        blocking_migrations: list[str],
+    ):
+        super().__init__(message)
+        self.registry_schema_version = registry_schema_version
+        self.code_schema_version = code_schema_version
+        self.blocking_migrations = blocking_migrations
 
 
 REGISTRY_WRITER_HOST_ENV = "PALETTE_REGISTRY_WRITER_HOST"
@@ -114,6 +160,47 @@ def validate_registry_sqlite(path: str | Path) -> RegistryValidation:
     )
 
 
+def validate_registry_sqlite_copy(
+    path: str | Path, *, temp_root: str | Path | None = None
+) -> RegistryValidation:
+    """Validate a registry by checking a byte-identical local copy of it.
+
+    ``PRAGMA integrity_check`` and ``foreign_key_check`` are a function of the
+    database file's bytes when no ``-wal``/``-journal`` sidecar exists. Run in
+    place on NFS they read the file in many small round trips (about 200 s for
+    the 71 MB canonical registry, 2026-10-09); on a local copy they take about
+    0.1 s. The copy is proven identical: the source's sha256 before the copy,
+    the copy's, and the source's after it must all agree.
+    """
+
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file() or resolved.stat().st_size <= 0:
+        raise RegistryShadowPublishError(f"Registry is missing or empty: {resolved}")
+    _require_no_sqlite_sidecars(resolved)
+    if temp_root is not None:
+        Path(temp_root).mkdir(parents=True, exist_ok=True)
+    before = _sha256_file(resolved)
+    with tempfile.TemporaryDirectory(
+        prefix="palette-registry-validate-",
+        dir=str(temp_root) if temp_root is not None else None,
+        ignore_cleanup_errors=True,
+    ) as temporary_directory:
+        local = Path(temporary_directory) / "registry.sqlite"
+        shutil.copyfile(resolved, local)
+        copied = _sha256_file(local)
+        after = _sha256_file(resolved)
+        if not before == copied == after:
+            raise RegistryShadowPublishError(
+                f"Registry changed while being copied for validation: {resolved}"
+            )
+        validation = validate_registry_sqlite(local)
+    return replace(
+        validation,
+        path=str(resolved),
+        validation_backend="python_stdlib_sqlite3_local_byte_copy",
+    )
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -150,7 +237,7 @@ def _sqlite_backup(source: Path, destination: Path) -> None:
 def _copy_without_overwrite(source: Path, destination: Path, *, mode: int) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
-        validate_registry_sqlite(destination)
+        validate_registry_sqlite_copy(destination)
         if _sha256_file(source) != _sha256_file(destination):
             raise RegistryShadowPublishError(
                 "Registry backup already exists with different content: "
@@ -257,6 +344,87 @@ def _configured_shadow_paths(
     )
 
 
+def _publish_through_configured_writer(
+    canonical: Path,
+    *,
+    backup_label: str,
+    mutate: Callable[[Path], Mapping[str, Any]],
+) -> RegistryShadowPublication:
+    """One shadow publication under the designated writer's host-local mutex."""
+
+    host_lock, local_temp_root, backup_dir = _configured_shadow_paths(canonical)
+    local_temp_root.mkdir(parents=True, exist_ok=True)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / (f"{canonical.name}.before-{backup_label}-{uuid.uuid4().hex}.sqlite")
+    with _host_writer_lock(host_lock):
+        return publish_registry_shadow(
+            canonical_registry=canonical,
+            backup_path=backup,
+            mutate=mutate,
+            local_temp_root=local_temp_root,
+        )
+
+
+def preflight_recording_import_receipts(imports: Sequence[tuple[Path, object | None]]) -> None:
+    """Refuse, before any backup, a receipt this checkout can never bind.
+
+    Runs the identity authority's own live receipt verification with its
+    producing-commit requirement (``_verify_live_import_receipt(...,
+    require_current_producer_code=True)``), the same check the mutation would
+    hit only after the full registry backup had been copied. Only actual
+    :class:`RecordingImportReceipt` objects are checked; ``None`` (refresh of
+    an already-bound import) needs no producing commit.
+    """
+
+    from fisheye.registry.recording_identity_authority import (
+        RecordingIdentityProjectionConflict,
+        _verify_live_import_receipt,
+        collect_regular_source_recording_identity,
+    )
+    from fisheye.shared.recording_import_receipt import RecordingImportReceipt
+
+    for zarr_path, receipt in imports:
+        if not isinstance(receipt, RecordingImportReceipt):
+            continue
+        target = Path(zarr_path).expanduser().resolve()
+        try:
+            _verify_live_import_receipt(
+                resolved_path=target,
+                evidence=collect_regular_source_recording_identity(target),
+                receipt=receipt,
+                require_current_producer_code=True,
+            )
+        except RecordingIdentityProjectionConflict as exc:
+            if "producer commit" not in str(exc):
+                raise
+            import fisheye.registry.recording_identity_authority as authority
+            from fisheye.shared.run_provenance import git_identity
+
+            # Reported for the operator only; the decision is the authority's.
+            code = git_identity(cwd=Path(authority.__file__).resolve().parents[3])
+            if code.get("git_sha") is None or code.get("git_dirty") is None:
+                # git itself failed: not evidence of another commit. Retryable.
+                raise RegistryShadowPublishError(
+                    "the registering checkout's git identity is unavailable "
+                    f"({code.get('git_unavailable_reason') or code.get('git_dirty_unavailable_reason')}); retry"
+                ) from exc
+            raise RegistryProducerCommitMismatch(
+                f"receipt for {target} was produced by commit "
+                f"{receipt.producer_git_sha}; this registering checkout is "
+                f"{code.get('git_sha')} (dirty={code.get('git_dirty')}). Register it "
+                "from a deployment at the receipt's producer commit.",
+                zarr_path=str(target),
+                receipt_producer_git_sha=receipt.producer_git_sha,
+                registrar_git_sha=code.get("git_sha"),
+                registrar_git_dirty=code.get("git_dirty"),
+            ) from exc
+
+
+def _require_decided_by(decided_by: object) -> None:
+    if type(decided_by) is not str or not decided_by.strip():
+        raise RegistryShadowPublishError("decided_by must be non-empty text")
+
+
 def shadow_synchronize_recording_import(
     *,
     canonical_registry: str | Path,
@@ -274,14 +442,8 @@ def shadow_synchronize_recording_import(
 
     canonical = Path(canonical_registry).expanduser().resolve()
     target = Path(zarr_path).expanduser().resolve()
-    if type(decided_by) is not str or not decided_by.strip():
-        raise RegistryShadowPublishError("decided_by must be non-empty text")
-    host_lock, local_temp_root, backup_dir = _configured_shadow_paths(canonical)
-    local_temp_root.mkdir(parents=True, exist_ok=True)
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup = backup_dir / (
-        f"{canonical.name}.before-recording-import-{uuid.uuid4().hex}.sqlite"
-    )
+    _require_decided_by(decided_by)
+    preflight_recording_import_receipts([(target, receipt)])
 
     def mutate(candidate: Path) -> Mapping[str, Any]:
         from fisheye.registry.db import Registry
@@ -302,12 +464,81 @@ def shadow_synchronize_recording_import(
             "decided_by": decided_by,
         }
 
-    with _host_writer_lock(host_lock):
-        return publish_registry_shadow(
-            canonical_registry=canonical,
-            backup_path=backup,
-            mutate=mutate,
-            local_temp_root=local_temp_root,
+    return _publish_through_configured_writer(
+        canonical, backup_label="recording-import", mutate=mutate
+    )
+
+
+def shadow_synchronize_recording_imports(
+    *,
+    canonical_registry: str | Path,
+    imports: Sequence[tuple[Path, object | None]],
+    decided_by: str,
+) -> RegistryShadowPublication:
+    """Synchronize every import of one delivery in ONE shadow publication.
+
+    Each ``(zarr_path, receipt)`` pair goes through the same per-artifact
+    owner as :func:`shadow_synchronize_recording_import`
+    (``Registry.synchronize_recording_import``), in order, against one local
+    candidate. Any failure discards the whole candidate, so the canonical
+    registry receives either every artifact of the delivery or none of them:
+    one backup, one validation, one atomic replace. Each per-artifact step is
+    an idempotent upsert keyed by the artifact, so a retry is safe.
+    """
+
+    canonical = Path(canonical_registry).expanduser().resolve()
+    _require_decided_by(decided_by)
+    targets = [
+        (Path(zarr_path).expanduser().resolve(), receipt) for zarr_path, receipt in imports
+    ]
+    if not targets:
+        raise RegistryShadowPublishError("a batch synchronization needs at least one import")
+    if len({target for target, _receipt in targets}) != len(targets):
+        raise RegistryShadowPublishError("a batch synchronization names one artifact twice")
+    preflight_recording_import_receipts(targets)
+
+    def mutate(candidate: Path) -> Mapping[str, Any]:
+        from fisheye.registry.db import Registry
+
+        registry = Registry(candidate)
+        try:
+            datasets = [
+                {
+                    "zarr_path": str(target),
+                    "dataset_id": registry.synchronize_recording_import(
+                        zarr_path=target,
+                        receipt=receipt,
+                        decided_by=decided_by,
+                    ),
+                }
+                for target, receipt in targets
+            ]
+        finally:
+            registry.close()
+        return {
+            "operation": "synchronize_recording_imports",
+            "datasets": datasets,
+            "decided_by": decided_by,
+        }
+
+    return _publish_through_configured_writer(
+        canonical, backup_label="recording-imports", mutate=mutate
+    )
+
+
+def _require_schema_compatible(path: Path) -> None:
+    """Refuse to write a registry migrated past this code by a non-additive migration."""
+
+    from fisheye.registry.migrations import schema_compatibility
+
+    with _readonly_connection(path) as connection:
+        problem = schema_compatibility(connection)
+    if problem is not None:
+        raise RegistrySchemaNewerThanCode(
+            f"refusing to publish: {problem['message']}",
+            registry_schema_version=problem["registry_schema_version"],
+            code_schema_version=problem["code_schema_version"],
+            blocking_migrations=problem["blocking_migrations"],
         )
 
 
@@ -340,20 +571,25 @@ def publish_registry_shadow(
 
     with _publication_lock(canonical):
         _require_no_sqlite_sidecars(canonical)
-        source_validation = validate_registry_sqlite(canonical)
+        source_validation = validate_registry_sqlite_copy(canonical, temp_root=temp_parent)
         source_stat = canonical.stat()
         source_mode = source_stat.st_mode & 0o777
         source_sha256 = _sha256_file(canonical)
 
+        # Cleanup runs after publication; on NFS it can fail on .nfs* files that
+        # an open handle left behind. That must not turn a completed, validated
+        # publication into a reported failure.
         with tempfile.TemporaryDirectory(
             prefix="palette-registry-shadow-",
             dir=str(temp_parent) if temp_parent is not None else None,
+            ignore_cleanup_errors=True,
         ) as temporary_directory:
             temporary_root = Path(temporary_directory)
             source_snapshot = temporary_root / "source.sqlite"
             candidate = temporary_root / "candidate.sqlite"
             _sqlite_backup(canonical, source_snapshot)
             validate_registry_sqlite(source_snapshot)
+            _require_schema_compatible(source_snapshot)
             _copy_without_overwrite(source_snapshot, backup, mode=source_mode)
             shutil.copyfile(source_snapshot, candidate)
             os.chmod(candidate, source_mode)
@@ -382,7 +618,7 @@ def publish_registry_shadow(
                 shutil.copyfile(candidate, staged)
                 os.chmod(staged, source_mode)
                 _fsync_file(staged)
-                staged_validation = validate_registry_sqlite(staged)
+                staged_validation = validate_registry_sqlite_copy(staged, temp_root=temp_parent)
                 if _sha256_file(staged) != published_sha256:
                     raise RegistryShadowPublishError(
                         "Shared-filesystem registry staging copy changed bytes."
@@ -397,7 +633,7 @@ def publish_registry_shadow(
             finally:
                 staged.unlink(missing_ok=True)
 
-        published_validation = validate_registry_sqlite(canonical)
+        published_validation = validate_registry_sqlite_copy(canonical, temp_root=temp_parent)
         if _sha256_file(canonical) != published_sha256:
             raise RegistryShadowPublishError(
                 "Published registry hash differs from the validated local candidate."
@@ -423,10 +659,15 @@ __all__ = [
     "REGISTRY_SHADOW_TEMP_ROOT_ENV",
     "REGISTRY_WRITER_HOST_ENV",
     "REGISTRY_WRITER_LOCK_PATH_ENV",
+    "RegistryProducerCommitMismatch",
+    "RegistrySchemaNewerThanCode",
     "RegistryShadowPublication",
     "RegistryShadowPublishError",
     "RegistryValidation",
+    "preflight_recording_import_receipts",
     "publish_registry_shadow",
     "shadow_synchronize_recording_import",
+    "shadow_synchronize_recording_imports",
     "validate_registry_sqlite",
+    "validate_registry_sqlite_copy",
 ]

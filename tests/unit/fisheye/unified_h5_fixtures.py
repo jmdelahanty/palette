@@ -59,3 +59,21 @@ def synthetic_receipt_for_mutated_test_file(
     receipt["contract_sha256"] = "sha256:" + digest
     receipt["receipt_id"] = "obsbindfin_" + digest
     return receipt
+
+
+def emit_bound_h5(path: Path, *, root_attrs: dict | None = None, name: str = "base") -> Path:
+    """Copy a pinned fixture to ``path`` for organizer tests.
+
+    Root attributes are stamped only where a test needs legacy-style camera
+    context; the acquisition binding and its source record stay byte-exact.
+    """
+
+    import h5py
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(fixture_bytes(name))
+    if root_attrs:
+        with h5py.File(path, "r+") as h5:
+            for key, value in root_attrs.items():
+                h5.attrs[key] = value
+    return path

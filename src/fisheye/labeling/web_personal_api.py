@@ -32,6 +32,7 @@ from .admin_dashboard import (
     _zarr_backup_policy,
 )
 from .web_app import claimed_route
+from .web_labeler_queue import labeler_queue_payload, queue_task_ids
 from .web_auth import (
     DASHBOARD_PATH,
     DATASET_QUEUE_PATH,
@@ -110,7 +111,7 @@ def _personal_api_response_payload(
             _mark_identity_probe_unknown_labeling_user(payload)
         return payload, HTTPStatus.OK if bool(payload.get("ok")) else HTTPStatus.FORBIDDEN
 
-    if path not in {"/api/me/tasks", "/api/me/datasets"}:
+    if path not in {"/api/me/tasks", "/api/me/datasets", "/api/me/queue"}:
         return (
             _format_error("not_found", status=HTTPStatus.NOT_FOUND),
             HTTPStatus.NOT_FOUND,
@@ -495,6 +496,10 @@ def _personal_api_response_payload(
             HTTPStatus.INTERNAL_SERVER_ERROR,
         )
 
+    if path == "/api/me/queue":
+        row_progress = state.store.task_row_progress(queue_task_ids(work))
+        return labeler_queue_payload(work, user=str(user), row_progress=row_progress), HTTPStatus.OK
+
     if path == "/api/me/datasets":
         return (
             {
@@ -724,6 +729,10 @@ def register_personal_api_routes(
     @claimed_route(app, "/api/me/tasks", methods=["GET"])
     def personal_tasks() -> Response:
         return _respond(state, response_builder, path="/api/me/tasks")
+
+    @claimed_route(app, "/api/me/queue", methods=["GET"])
+    def personal_queue() -> Response:
+        return _respond(state, response_builder, path="/api/me/queue")
 
     @claimed_route(app, "/api/me/datasets", methods=["GET"])
     def personal_datasets() -> Response:

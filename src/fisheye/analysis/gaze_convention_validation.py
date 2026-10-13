@@ -64,6 +64,7 @@ from fisheye.shared.zarr_io import open_zarr_root  # noqa: E402
 from fisheye.shared.zarr_run_completion import (  # noqa: E402
     is_run_complete_in_parent,
 )
+from fisheye.shared.heading_convention import heading_degrees, wrap_delta_degrees
 
 
 SCHEMA_ID = "palette.gaze_convention_validation.v1"
@@ -90,11 +91,8 @@ _STAGED_SUBJECT_SHAPE_CANDIDATE_AUTHORITY_FIELDS = {
 }
 
 
-def wrap_degrees_signed(values: np.ndarray | float) -> np.ndarray:
-    """Wrap degrees into ``[-180, 180)``."""
-
-    array = np.asarray(values, dtype=np.float64)
-    return ((array + 180.0) % 360.0) - 180.0
+# Public name kept for importers; the convention lives in heading_convention.
+wrap_degrees_signed = wrap_delta_degrees
 
 
 def body_frame_angles_from_vectors(
@@ -237,7 +235,7 @@ def validate_gaze_geometry_arrays(
     left_norm = np.linalg.norm(left_axis, axis=1)
     dot = np.einsum("ij,ij->i", forward, left_axis)
     determinant = forward[:, 0] * left_axis[:, 1] - forward[:, 1] * left_axis[:, 0]
-    reconstructed_heading = np.rad2deg(np.arctan2(-forward[:, 1], forward[:, 0]))
+    reconstructed_heading = heading_degrees(forward[:, 0], forward[:, 1])
 
     def axis_check(name: str, error: np.ndarray, explanation: str) -> ValidationCheck:
         values = np.abs(np.asarray(error, dtype=np.float64)[finite_axes])

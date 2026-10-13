@@ -1,0 +1,373 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orange.recording_subject_reference.v2",
+  "title": "Orange recording subject reference (MetaZebrobot identifiers per camera, Palette design c)",
+  "description": "One entry per recording camera, keyed by exact camera serial, in recording_session.json subject_references and recording_snapshot_start.json session.subject_references. Orange records MetaZebrobot identifiers as served at record start (one lookup, never refreshed, bounded timeout, never blocks the start) or declares that nothing was collected. No biological fields: Palette fetches the record at intake and pins it by (dish_uuid, revision). Agreed with Palette 2026-10-05. Version 2 (2026-10-05) adds three fields to the zebrobot block naming the MetaZebrobot build that served the identifiers, read once at record start from GET /version (MetaZebrobot pin 509a3eb8, consumer_openapi.json sha256 f5280e43...): service_commit (string|null), service_commit_dirty (boolean|null) and consumer_schema_sha256 (string|null); all three are null when the version read failed or was not attempted. Everything else is identical to version 1. Palette accepts both versions; recordings made under version 1 keep validating against the version 1 schema.",
+  "type": "object",
+  "minProperties": 1,
+  "propertyNames": {
+    "type": "string",
+    "minLength": 1
+  },
+  "additionalProperties": {
+    "$ref": "#/$defs/entry"
+  },
+  "$defs": {
+    "error": {
+      "type": "object",
+      "required": [
+        "kind",
+        "detail_error",
+        "message"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "transport",
+            "http"
+          ]
+        },
+        "detail_error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "MetaZebrobot detail.error (e.g. dish_not_found, database_error) when the body carried one"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "fish": {
+      "type": "object",
+      "required": [
+        "fish_id",
+        "revision",
+        "updated_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fish_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "required": [
+        "schema_id",
+        "schema_version",
+        "status",
+        "reason",
+        "zebrobot",
+        "dish",
+        "dish_fish",
+        "dish_fish_lookup",
+        "subject_count"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_id": {
+          "const": "orange.recording_subject_reference"
+        },
+        "schema_version": {
+          "type": "integer",
+          "const": 2
+        },
+        "status": {
+          "enum": [
+            "collected",
+            "not_collected",
+            "lookup_failed"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "description": "empty when collected; otherwise non-empty (e.g. no_dish_declared, synthetic_bundle, zebrobot_not_configured, dish_lookup_http_404, dish_lookup_transport_failure)"
+        },
+        "zebrobot": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "base_url",
+                "endpoint",
+                "fish_endpoint",
+                "api_schema_version",
+                "queried_at_utc",
+                "http_status",
+                "error",
+                "service_commit",
+                "service_commit_dirty",
+                "consumer_schema_sha256"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "base_url": {
+                  "type": "string",
+                  "pattern": "^http://"
+                },
+                "endpoint": {
+                  "type": "string",
+                  "pattern": "^/dishes/[^/]+/citrus-snapshot$"
+                },
+                "fish_endpoint": {
+                  "type": "string",
+                  "pattern": "^/dishes/[^/]+/fish$"
+                },
+                "api_schema_version": {
+                  "type": "integer",
+                  "const": 2
+                },
+                "queried_at_utc": {
+                  "type": "string",
+                  "pattern": "Z$"
+                },
+                "http_status": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "error": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/error"
+                    }
+                  ]
+                },
+                "service_commit": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^[0-9a-f]{7,40}$",
+                  "description": "GET /version service_commit: git SHA of the code the MetaZebrobot process loaded, as served at record start; null when MetaZebrobot served null or the version read failed or was not attempted"
+                },
+                "service_commit_dirty": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ],
+                  "description": "GET /version service_commit_dirty: true when the MetaZebrobot process ran with uncommitted changes to tracked files; null when MetaZebrobot served null or the version read failed or was not attempted"
+                },
+                "consumer_schema_sha256": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^[0-9a-f]{64}$",
+                  "description": "GET /version consumer_schema_sha256: sha256 of the consumer OpenAPI slice computed from the running MetaZebrobot app (not read from a file), as served at record start; Palette cross-checks it against the MetaZebrobot consumer pin it relies on; null when the version read failed or was not attempted"
+                }
+              }
+            }
+          ]
+        },
+        "dish": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "dish_id",
+                "dish_uuid",
+                "revision",
+                "updated_at"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "dish_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dish_uuid": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "revision": {
+                  "type": "integer"
+                },
+                "updated_at": {
+                  "type": "string",
+                  "description": "as served by MetaZebrobot (YYYY-MM-DD HH:MM:SS)"
+                }
+              }
+            }
+          ]
+        },
+        "dish_fish": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/fish"
+          },
+          "description": "fish subjects registered to the dish at record start, as served by /dishes/{dish_id}/fish; not the fish imaged"
+        },
+        "dish_fish_lookup": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "status",
+                "http_status",
+                "error"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "enum": [
+                    "complete",
+                    "failed",
+                    "not_attempted"
+                  ]
+                },
+                "http_status": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "error": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/error"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "subject_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "operator-declared number of animals this camera records; null when not declared; independent of status; never derived from the dish registry or dish_fish. Palette publishes experiment setup only when non-null."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "collected"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "const": ""
+              },
+              "dish": {
+                "type": "object"
+              },
+              "zebrobot": {
+                "type": "object",
+                "properties": {
+                  "error": {
+                    "type": "null"
+                  },
+                  "http_status": {
+                    "const": 200
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "not_collected"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "minLength": 1
+              },
+              "zebrobot": {
+                "type": "null"
+              },
+              "dish": {
+                "type": "null"
+              },
+              "dish_fish": {
+                "maxItems": 0
+              },
+              "dish_fish_lookup": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "lookup_failed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "minLength": 1
+              },
+              "dish": {
+                "type": "null"
+              },
+              "dish_fish": {
+                "maxItems": 0
+              },
+              "zebrobot": {
+                "type": "object",
+                "properties": {
+                  "error": {
+                    "type": "object"
+                  }
+                }
+              },
+              "dish_fish_lookup": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "not_attempted"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

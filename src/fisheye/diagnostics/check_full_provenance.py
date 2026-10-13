@@ -13,6 +13,9 @@ from rich.console import Console
 from rich.table import Table
 
 from ..shared.provenance_attrs import resolve_source_keypoints_run
+from ..shared.zarr.canonical_detection_activation import (
+    canonical_detection_lineage_equivalent_runs,
+)
 
 
 @dataclass
@@ -130,22 +133,25 @@ def check_provenance(zarr_path: str, console: Optional[Console] = None) -> int:
     console.print(summary)
 
     status = 0
+    # Runs recorded against the legacy source of an activated canonical
+    # successor (validated sealed manifest) reference the selected lineage.
+    detect_lineage = canonical_detection_lineage_equivalent_runs(zarr_path, detect_run)
 
     if detect_run and crop_run:
-        if crop_detect_attr != detect_run:
+        if crop_detect_attr not in detect_lineage:
             console.print(f"[red]Crop run points to detect '{crop_detect_attr}', latest is '{detect_run}'[/red]")
             status = 1
         else:
             console.print("[green]Crop run references latest detect run.[/green]")
     if kp_run:
-        if kp_detect_attr and detect_run and kp_detect_attr != detect_run:
+        if kp_detect_attr and detect_run and kp_detect_attr not in detect_lineage:
             console.print(f"[red]Keypoints detect source '{kp_detect_attr}' != latest '{detect_run}'[/red]")
             status = 1
         if kp_crop_attr and crop_run and kp_crop_attr != crop_run:
             console.print(f"[red]Keypoints crop source '{kp_crop_attr}' != latest '{crop_run}'[/red]")
             status = 1
     if eye_run:
-        if eye_detect_attr and detect_run and eye_detect_attr != detect_run:
+        if eye_detect_attr and detect_run and eye_detect_attr not in detect_lineage:
             console.print(f"[red]Eye masks detect source '{eye_detect_attr}' != latest '{detect_run}'[/red]")
             status = 1
         if eye_kp_attr and kp_run and eye_kp_attr != kp_run:

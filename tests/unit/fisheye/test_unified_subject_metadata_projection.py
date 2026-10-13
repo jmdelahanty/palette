@@ -1,0 +1,398 @@
+"""Unified subject metadata lands where legacy import put it.
+
+Subject metadata and experiment setup are projected from the admitted native
+candidate's ``/metadata/subject`` through the same owners as legacy import.
+A unified H5 and a legacy H5 carrying the same subject attributes must publish
+the same subject record and the same expected subject count.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+import json
+from pathlib import Path
+
+import h5py
+import numpy as np
+import pytest
+import zarr
+
+from fisheye.analysis.import_stimulus_to_zarr import import_stimulus_to_zarr
+from fisheye.shared.experiment_setup import resolve_experiment_setup
+from fisheye.shared.subject_metadata import resolve_subject_metadata
+from fisheye.shared.unified_h5 import UnifiedH5ContractError
+from fisheye.shared.unified_h5.metadata import string_attributes
+from fisheye.shared.unified_h5.reference import REFERENCE_DIGEST_ATTR
+from fisheye.utils import import_recording_analysis as mod
+from tests.unit.fisheye.test_import_recording_analysis import (
+    _acquisition_authority_updates,
+    _write_current_manifest,
+)
+from tests.unit.fisheye.unified_h5_fixtures import (
+    emit_fixture,
+    synthetic_receipt_for_mutated_test_file,
+    write_receipt,
+)
+
+# The production GUI's subject keys (Citrus, 2026-09-23), as string attrs, with
+# values shaped like a real legacy goodbatbadbat /subject_metadata.
+PRODUCTION_SUBJECT = {
+    "fish_id": "4bd7a2f6-92b7-42b8-ba28-6e49cb3cc0c9",
+    "subject_type": "individual",
+    "subject_count": "1",
+    "dish_id": "18867_10",
+    "cross_id": "18867",
+    "source_dish_id": "18867_10",
+    "source_cross_id": "18867",
+    "fish_count": "10",
+    "source_dish_population_count": "10",
+    "genotype": "AB [AB IC] SEPT25",
+    "line_strain": "AB [AB IC] SEPT25",
+    "species": "Danio rerio",
+    "sex": "unknown",
+    "parents": "8750_M08_B2 [unknown]",
+    "date_of_fertilization": "20260804",
+    "days_post_fertilization": "8",
+    "queried_at_utc": "2026-08-12T21:59:55Z",
+}
+
+
+def _native_candidate(
+    tmp_path: Path,
+    subject: dict[str, str] | None,
+    fixture: str = "base",
+) -> mod.RecordingAnalysisPlan:
+    """Import a fixture (optionally with replaced subject attrs) as a native candidate."""
+
+    h5_path = emit_fixture(tmp_path / "source", fixture)
+    receipt = write_receipt(tmp_path / "source", fixture)
+    if subject is not None:
+        with h5py.File(h5_path, "r+") as h5:
+            attrs = h5["/metadata/subject"].attrs
+            for key in list(attrs):
+                del attrs[key]
+            for key, value in subject.items():
+                attrs[key] = value
+        receipt = tmp_path / "source" / "resealed.receipt.json"
+        receipt.write_text(json.dumps(synthetic_receipt_for_mutated_test_file(h5_path, fixture)))
+    zarr_path = tmp_path / "analysis.zarr"
+    import_stimulus_to_zarr(
+        h5_path, zarr_path, run_name="candidate", overwrite=False, verbose=False,
+        source_profile="unified_experimental_h5_v1", finalization_receipt=receipt,
+    )
+    return mod.RecordingAnalysisPlan(
+        recording_dir=tmp_path, h5_path=h5_path, cam_video=None, zarr_path=zarr_path,
+        finalization_receipt_path=receipt,
+    )
+
+
+def _legacy_setup(tmp_path: Path, subject: dict[str, str]):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    h5_path = tmp_path / "legacy.h5"
+    with h5py.File(h5_path, "w") as h5:
+        node = h5.create_group("subject_metadata")
+        for key, value in subject.items():
+            node.attrs[key] = value
+    zarr_path = tmp_path / "legacy.zarr"
+    zarr.open_group(str(zarr_path), mode="w")
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=tmp_path, h5_path=h5_path, cam_video=None, zarr_path=zarr_path
+    )
+    mod.import_experiment_setup(plan)
+    return zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+
+
+def test_unified_and_legacy_publish_the_same_subject_and_setup(tmp_path: Path) -> None:
+    plan = _native_candidate(tmp_path / "unified", PRODUCTION_SUBJECT)
+
+    published = mod.project_unified_subject_metadata(plan, "candidate")
+
+    unified_root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
+    legacy_root = _legacy_setup(tmp_path / "legacy", PRODUCTION_SUBJECT)
+    unified_subject = resolve_subject_metadata(unified_root, allow_legacy=False)
+    legacy_subject = resolve_subject_metadata(legacy_root, allow_legacy=False)
+    assert unified_subject.metadata == legacy_subject.metadata
+    assert unified_subject.subject_ids == legacy_subject.subject_ids == (PRODUCTION_SUBJECT["fish_id"],)
+    assert unified_subject.record_sha256 == legacy_subject.record_sha256
+
+    unified_setup = resolve_experiment_setup(unified_root, allow_legacy=False)
+    legacy_setup = resolve_experiment_setup(legacy_root, allow_legacy=False)
+    assert unified_setup.expected_subject_count == legacy_setup.expected_subject_count == 1
+    assert unified_setup.subject_assignment_status == legacy_setup.subject_assignment_status
+    assert published["expected_subject_count"] == 1
+
+
+def test_setup_records_its_verified_native_source(tmp_path: Path) -> None:
+    plan = _native_candidate(tmp_path, PRODUCTION_SUBJECT)
+
+    mod.project_unified_subject_metadata(plan, "candidate")
+
+    root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
+    source = dict(resolve_experiment_setup(root, allow_legacy=False).source)
+    assert source["kind"] == "unified_native_subject_metadata"
+    assert source["citrus_snapshot_status"] == "absent"
+    assert source["group_path"] == "/metadata/subject"
+    assert source["native_run_path"] == "analysis/stimulus_runs/candidate"
+    assert source["unified_reference_sha256"] == root[
+        "analysis/stimulus_runs/candidate"
+    ].attrs[REFERENCE_DIGEST_ATTR]
+
+
+def test_pre_contract_citrus_snapshot_is_recorded_not_paired(tmp_path: Path) -> None:
+    # e1bbc75 writes a pre-contract snapshot_json that also says schema_version 2.
+    plan = _native_candidate(tmp_path, None, fixture="admission_v2_roundtrip")
+
+    mod.project_unified_subject_metadata(plan, "candidate")
+
+    root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
+    source = dict(resolve_experiment_setup(root, allow_legacy=False).source)
+    assert source["citrus_snapshot_status"] == "pre_contract"
+
+
+# Citrus 288f14d sealed full_bound_pair fixtures, subject identity v3
+# (agent-contracts PR 52 #6026862148): admitted and projected unmodified.
+V3_EXPECTED = {
+    "v3_dish_collected": {"count": 1, "assigned": (1, "explicit"), "subject_type": "individual", "uuid": True,
+                          "lookup": "collected", "fish": ("not_collected", "operator_did_not_select"),
+                          "pin": True},
+    "v3_dish_group": {"count": 3, "assigned": (None, "count_only"), "subject_type": "dish_group", "uuid": True,
+                      "lookup": "collected", "fish": ("not_collected", "dish_group_subject"),
+                      "pin": True},
+    "v3_lookup_failed": {"count": 1, "assigned": (1, "explicit"), "subject_type": "individual", "uuid": False,
+                         "lookup": "lookup_failed", "fish": ("lookup_failed", "dish_lookup_failed"),
+                         "pin": True},
+    "v3_version_read_failed": {"count": 1, "assigned": (1, "explicit"), "subject_type": "individual", "uuid": True,
+                               "lookup": "collected", "fish": ("not_collected", "operator_did_not_select"),
+                               "pin": None},
+}
+
+
+@pytest.mark.parametrize("fixture", sorted(V3_EXPECTED))
+def test_citrus_v3_fixtures_project_their_declared_subject(tmp_path: Path, fixture: str) -> None:
+    expected = V3_EXPECTED[fixture]
+    plan = _native_candidate(tmp_path, None, fixture=fixture)
+
+    published = mod.project_unified_subject_metadata(plan, "candidate")
+
+    root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
+    subject = resolve_subject_metadata(root, allow_legacy=False).metadata
+    setup = resolve_experiment_setup(root, allow_legacy=False)
+    source = dict(setup.source)
+    assert published["expected_subject_count"] == expected["count"]
+    # The Citrus v3 singular subject_id is counted like the subject record (B3);
+    # a dish_group id names the group and assigns no individual.
+    assert (setup.assigned_subject_count, setup.subject_assignment_status) == expected["assigned"]
+    assert subject["subject_type"] == expected["subject_type"]
+    assert ("dish_uuid" in subject) is expected["uuid"]
+    assert subject["subject_lookup_status"] == expected["lookup"]
+    assert (subject["fish_reference_status"], subject["fish_reference_reason"]) == expected["fish"]
+    assert source["citrus_snapshot_status"] == "admitted"
+    assert source["citrus_snapshot_schema_version"] == 3
+    assert source["zebrobot_consumer_schema_matches_pin"] is expected["pin"]
+    if fixture == "v3_lookup_failed":  # operator-declared, unverified fish
+        assert subject["mzb_fish_id"] == "F-1" and "mzb_fish_revision" not in subject
+
+
+def test_citrus_v3_no_dish_fixture_records_its_declared_absence(tmp_path: Path) -> None:
+    # v3 writes /metadata/subject in every session; with no dish it holds only
+    # the lookup statuses, which must not demand a subject_count. The declared
+    # absence is itself a (v2) subject record: statuses, no dish, no setup.
+    plan = _native_candidate(tmp_path, None, fixture="v3_no_dish")
+
+    assert mod.project_unified_subject_metadata(plan, "candidate") is None
+
+    root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
+    assert resolve_subject_metadata(root, allow_legacy=False).subject == {
+        "fish_reference": {"status": "not_collected", "reason": "no_dish_declared"},
+        "subject_lookup": {"status": "not_collected", "reason": "no_dish_declared"},
+    }
+    assert "experiment_setup_runs" not in root["analysis"]
+    assert not any(name.startswith("citrus_") for name in root.attrs)
+
+
+def test_missing_subject_count_refuses_rather_than_inventing(tmp_path: Path) -> None:
+    # The pinned fixture is sparse: only subject_id, no subject_count.
+    plan = _native_candidate(tmp_path, None)
+
+    with pytest.raises(ValueError, match="subject_count"):
+        mod.project_unified_subject_metadata(plan, "candidate")
+
+
+def test_subject_id_is_the_citrus_local_identity(tmp_path: Path) -> None:
+    # agent-contracts PR 52: subject_id is the identity field going forward.
+    plan = _native_candidate(tmp_path, {"subject_id": "synthetic-subject", "subject_count": "1"})
+
+    mod.project_unified_subject_metadata(plan, "candidate")
+
+    root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
+    resolved = resolve_subject_metadata(root, allow_legacy=False)
+    assert resolved.subject_ids == ("synthetic-subject",)
+    assert resolved.subject_identity_source_field == "subject_id"
+
+
+def test_subject_id_and_legacy_fish_id_together_are_refused(tmp_path: Path) -> None:
+    plan = _native_candidate(
+        tmp_path, {**PRODUCTION_SUBJECT, "subject_id": PRODUCTION_SUBJECT["fish_id"]}
+    )
+
+    with pytest.raises(ValueError, match="both subject_id and legacy fish_id"):
+        mod.project_unified_subject_metadata(plan, "candidate")
+
+
+def test_records_published_under_the_earlier_rule_still_validate(tmp_path: Path) -> None:
+    from fisheye.shared import subject_metadata as sm
+
+    root = zarr.open_group(str(tmp_path / "old.zarr"), mode="w")
+    earlier = sm.build_subject_metadata_record(
+        {"subject_id": "s1", "subject_count": 1}, legacy_rule=True
+    )
+    assert earlier["subject_ids"] == [] and earlier["subject_identity_source_field"] == "none"
+    sm._validate_record(earlier, sm.subject_metadata_sha256(earlier))
+    root.require_group("analysis_metadata").attrs["subject_metadata"] = {
+        "subject_id": "s1", "fish_id": "f1",
+    }
+    assert resolve_subject_metadata(root).subject_ids == ("f1",)
+
+
+def test_string_attributes_refuse_non_string_values() -> None:
+    assert string_attributes(
+        {"a": {"shape": [], "type": {"class": "string", "variable_length": True, "character_set": "utf8"},
+               "values_hex": ["6869"]}}
+    ) == {"a": "hi"}
+    assert string_attributes(
+        {"b": {"shape": [], "type": {"class": "string", "variable_length": False, "character_set": "ascii",
+                                     "size_bytes": 4, "padding": "null_padded"},
+               "payload_hex": "68690000"}}
+    ) == {"b": "hi"}
+    with pytest.raises(UnifiedH5ContractError, match="attribute_not_scalar_string"):
+        string_attributes(
+            {"n": {"shape": [], "type": {"class": "integer"}, "payload_hex": np.int64(1).tobytes().hex()}}
+        )
+    with pytest.raises(UnifiedH5ContractError, match="attribute_not_scalar_string"):
+        string_attributes(
+            {"v": {"shape": [2], "type": {"class": "string", "variable_length": True, "character_set": "utf8"},
+                   "values_hex": ["61", "62"]}}
+        )
+
+
+def test_process_import_projects_after_the_native_import(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    recording = tmp_path / "rec"
+    (recording / "raw").mkdir(parents=True)
+    h5_path = emit_fixture(recording / "raw", "base")
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=recording, h5_path=h5_path, cam_video=recording / "cams" / "cam.mp4",
+        zarr_path=recording / "zarr" / "rec_analysis.zarr",
+        finalization_receipt_path=write_receipt(recording / "raw", "base"),
+    )
+    opts = mod.RecordingImportOptions(
+        import_video_metadata=True, video_metadata_overwrite=False, import_stimulus=True,
+        stimulus_always=False, stimulus_run_name=None, stimulus_overwrite=False, stimulus_quiet=True,
+    )
+    _write_current_manifest(plan.recording_dir)
+    monkeypatch.setattr(mod, "git_identity", lambda **_kwargs: {"git_sha": "1" * 40, "git_dirty": False})
+    monkeypatch.setattr(mod, "apply_video_metadata", lambda _plan, **_kwargs: _acquisition_authority_updates())
+    monkeypatch.setattr(mod, "ensure_analysis_archive", lambda _plan: None)
+    monkeypatch.setattr(mod, "apply_acquisition_frame_clock", lambda _plan: {})
+    monkeypatch.setattr(mod, "stimulus_runs_present", lambda _path: False)
+    monkeypatch.setattr(
+        mod, "import_experiment_setup",
+        lambda _plan: pytest.fail("legacy subject reader must not run on a unified H5"),
+    )
+    order: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        mod, "run_stimulus_import",
+        lambda _plan, stim_opts: order.append(("import", stim_opts.stimulus_run_name)) or (True, 0, ["cmd", "x"]),
+    )
+    monkeypatch.setattr(
+        mod, "require_unified_source_matches_recording",
+        lambda _plan, run_name: order.append(("identity", run_name)),
+    )
+    monkeypatch.setattr(
+        mod, "project_unified_subject_metadata",
+        lambda _plan, run_name: order.append(("project", run_name)) or None,
+    )
+
+    mod.process_recording_import(plan, opts, logger=None)
+
+    assert [step for step, _ in order] == ["import", "identity", "project"]
+    assert len({run_name for _, run_name in order}) == 1
+    assert order[0][1].startswith("unified_native_")
+
+
+@pytest.mark.parametrize(
+    ("session", "camera", "ok"),
+    [
+        ("synthetic-paired-recording", "CAM-42", True),
+        ("another-acquisition", "CAM-42", False),
+        ("synthetic-paired-recording", "CAM-43", False),
+    ],
+)
+def test_unified_source_must_match_the_recording_identity(
+    tmp_path: Path, session: str, camera: str, ok: bool
+) -> None:
+    plan = _native_candidate(tmp_path, PRODUCTION_SUBJECT)
+    root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    root.attrs.update(session_uuid=session, camera_id=camera)
+    zarr.consolidate_metadata(str(plan.zarr_path))
+
+    if ok:
+        mod.require_unified_source_matches_recording(plan, "candidate")
+    else:
+        with pytest.raises(ValueError, match="unified_h5_recording_mismatch"):
+            mod.require_unified_source_matches_recording(plan, "candidate")
+
+
+def test_retried_unified_intake_projects_the_subject_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A sealed native run already exists (an earlier attempt failed after the
+    # stimulus import), so the stimulus step is skipped. The retry must still
+    # project the subject exactly as a first run would, and a second retry
+    # must publish nothing new.
+    plan = replace(
+        _native_candidate(tmp_path, PRODUCTION_SUBJECT), cam_video=tmp_path / "cams" / "cam.mp4"
+    )
+    root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    root.attrs.update(session_uuid="synthetic-paired-recording", camera_id="CAM-42")
+    zarr.consolidate_metadata(str(plan.zarr_path))
+    _write_current_manifest(plan.recording_dir)
+    opts = mod.RecordingImportOptions(
+        import_video_metadata=True, video_metadata_overwrite=False, import_stimulus=True,
+        stimulus_always=False, stimulus_run_name=None, stimulus_overwrite=False, stimulus_quiet=True,
+    )
+    monkeypatch.setattr(mod, "git_identity", lambda **_kwargs: {"git_sha": "1" * 40, "git_dirty": False})
+    monkeypatch.setattr(
+        mod, "load_source_recording_identity_profile",
+        lambda _path: mod.SOURCE_RECORDING_IDENTITY_PROFILE,
+    )
+    monkeypatch.setattr(mod, "recording_import_receipt_paths", lambda _path: [])
+    monkeypatch.setattr(mod, "apply_video_metadata", lambda _plan, **_kwargs: _acquisition_authority_updates())
+    monkeypatch.setattr(mod, "ensure_analysis_archive", lambda _plan: None)
+    monkeypatch.setattr(mod, "apply_acquisition_frame_clock", lambda _plan: {})
+    monkeypatch.setattr(
+        mod, "run_stimulus_import",
+        lambda *_args: pytest.fail("a sealed native run must not be re-imported"),
+    )
+    assert mod.stimulus_runs_present(plan.zarr_path)
+
+    def _state() -> tuple:
+        root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
+        subject = resolve_subject_metadata(root, allow_legacy=False)
+        setup = resolve_experiment_setup(root, allow_legacy=False)
+        return (
+            subject.run_name, subject.subject_ids, setup.run_name, setup.expected_subject_count,
+            sorted(root["analysis/subject_metadata_runs"].group_keys()),
+            sorted(root["analysis/experiment_setup_runs"].group_keys()),
+        )
+
+    events: list[str] = []
+    mod.process_recording_import(plan, opts, logger=lambda event, **_fields: events.append(event))
+    assert "stimulus_skipped" in events
+    first = _state()
+    assert first[1] == (PRODUCTION_SUBJECT["fish_id"],) and first[3] == 1
+    assert len(first[4]) == len(first[5]) == 1
+
+    mod.process_recording_import(plan, opts, logger=None)
+    assert _state() == first

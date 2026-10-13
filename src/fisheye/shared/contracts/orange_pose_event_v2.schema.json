@@ -1,0 +1,484 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orange.pose_event.v2",
+  "title": "Orange pose event log line (orange.pose_event, version 2)",
+  "description": "One JSON object per line of Cam<serial>_pose_events.jsonl (2026-10-09). The first line is a session_header with the session-constant blocks: recording_id, camera, the pose model identity (engine sha256 over the bytes that ran, weights/onnx sha256 from the engine manifest, the SHAMAN v2 ipc_model_id_hash), the skeleton (id, sidecar sha256, ordered keypoint_labels) and the source raster. Every other line is a pose_result frame line: frame identity (frame.recording_frame_id is the join key), timestamps, the inference crop window in source-frame pixels, has_detection and confidence (the detection box is on the same frame's yolo_result line and in the crop ledger), the pose status, the pose instances with keypoints in crop pixels relative to the crop origin (rounded to 0.001 px, confidences to 1e-4, keypoint labels by position from the header), and the stage latencies in ms (rounded to 1 us). event_sequence numbers frame lines only, from 1; the header carries none.",
+  "type": "object",
+  "required": [
+    "schema_id",
+    "schema_version",
+    "event_kind"
+  ],
+  "oneOf": [
+    {
+      "title": "session_header",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "schema_version",
+        "event_kind",
+        "recording_id",
+        "camera_serial",
+        "camera_id",
+        "worker",
+        "frame_identity_key",
+        "source_frame",
+        "pose",
+        "crop",
+        "detection",
+        "line_format"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "orange.pose_event"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "event_kind": {
+          "const": "session_header"
+        },
+        "recording_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "camera_serial": {
+          "type": "string",
+          "minLength": 1
+        },
+        "camera_id": {
+          "type": "integer"
+        },
+        "worker": {
+          "type": "string"
+        },
+        "frame_identity_key": {
+          "const": "frame.recording_frame_id"
+        },
+        "source_frame": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "width_px",
+            "height_px"
+          ],
+          "properties": {
+            "width_px": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "height_px": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "line_format": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "coordinate_decimals",
+            "confidence_decimals",
+            "latency_decimals"
+          ],
+          "properties": {
+            "coordinate_decimals": {
+              "const": 3
+            },
+            "confidence_decimals": {
+              "const": 4
+            },
+            "latency_decimals": {
+              "const": 3
+            }
+          }
+        },
+        "pose": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "worker",
+            "backend",
+            "mode",
+            "model_id",
+            "engine_path",
+            "engine_sha256",
+            "engine_bytes",
+            "worker_engine_sha256",
+            "weights_sha256",
+            "onnx_sha256",
+            "engine_manifest_run_id",
+            "ipc_model_id_hash",
+            "skeleton_id",
+            "skeleton_path",
+            "skeleton_sha256",
+            "ipc_skeleton_id_hash",
+            "keypoint_labels",
+            "gpu_id",
+            "coordinate_space"
+          ],
+          "properties": {
+            "worker": {
+              "const": "PoseWorker"
+            },
+            "backend": {
+              "enum": [
+                "tensorrt",
+                "noop",
+                "none"
+              ]
+            },
+            "mode": {
+              "enum": [
+                "real",
+                "noop",
+                "disabled"
+              ]
+            },
+            "model_id": {
+              "type": "string"
+            },
+            "engine_path": {
+              "type": "string"
+            },
+            "engine_sha256": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{64})?$"
+            },
+            "engine_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "worker_engine_sha256": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{64})?$",
+              "description": "the digest the pose worker computed itself (equal to engine_sha256 when both are set)"
+            },
+            "weights_sha256": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{64})?$"
+            },
+            "onnx_sha256": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{64})?$"
+            },
+            "engine_manifest_run_id": {
+              "type": "string"
+            },
+            "ipc_model_id_hash": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "the 64-bit model hash carried in the SHAMAN v2 live-state slots: the big-endian first 8 bytes of engine_sha256"
+            },
+            "skeleton_id": {
+              "type": "string"
+            },
+            "skeleton_path": {
+              "type": "string"
+            },
+            "skeleton_sha256": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{64})?$"
+            },
+            "ipc_skeleton_id_hash": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "keypoint_labels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "keypoint order of every poses[].keypoints[] on the frame lines"
+            },
+            "gpu_id": {
+              "type": "integer"
+            },
+            "coordinate_space": {
+              "const": "crop_pixels"
+            }
+          }
+        },
+        "crop": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "coordinate_space",
+            "note"
+          ],
+          "properties": {
+            "coordinate_space": {
+              "const": "source_frame_pixels"
+            },
+            "note": {
+              "type": "string"
+            }
+          }
+        },
+        "detection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "coordinate_space",
+            "note"
+          ],
+          "properties": {
+            "coordinate_space": {
+              "const": "source_frame_pixels"
+            },
+            "note": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "pose_result",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "schema_version",
+        "event_sequence",
+        "event_kind",
+        "camera_serial",
+        "frame",
+        "timestamps",
+        "crop",
+        "detection",
+        "pose",
+        "poses",
+        "latency_ms"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "orange.pose_event"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "event_sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "event_kind": {
+          "const": "pose_result"
+        },
+        "camera_serial": {
+          "type": "string"
+        },
+        "frame": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "local_frame_id",
+            "camera_frame_id",
+            "recording_frame_id",
+            "record_active"
+          ],
+          "properties": {
+            "local_frame_id": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "camera_frame_id": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "recording_frame_id": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "record_active": {
+              "type": "boolean"
+            }
+          }
+        },
+        "timestamps": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "camera_timestamp",
+            "timestamp_sys_ns",
+            "event_epoch_us",
+            "event_monotonic_us"
+          ],
+          "properties": {
+            "camera_timestamp": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "timestamp_sys_ns": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "event_epoch_us": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "event_monotonic_us": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "crop": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "x_px",
+            "y_px",
+            "width_px",
+            "height_px",
+            "blank_frame"
+          ],
+          "properties": {
+            "x_px": {
+              "type": "integer"
+            },
+            "y_px": {
+              "type": "integer"
+            },
+            "width_px": {
+              "type": "integer"
+            },
+            "height_px": {
+              "type": "integer"
+            },
+            "blank_frame": {
+              "type": "boolean"
+            }
+          }
+        },
+        "detection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "has_detection",
+            "confidence"
+          ],
+          "properties": {
+            "has_detection": {
+              "type": "boolean"
+            },
+            "confidence": {
+              "type": "number"
+            }
+          }
+        },
+        "pose": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "instance_count"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "poses",
+                "no_result",
+                "failed"
+              ]
+            },
+            "instance_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "error": {
+              "type": "string"
+            }
+          }
+        },
+        "poses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "index",
+              "confidence",
+              "keypoints"
+            ],
+            "properties": {
+              "index": {
+                "type": "integer"
+              },
+              "label": {
+                "type": "string"
+              },
+              "confidence": {
+                "type": "number"
+              },
+              "keypoints": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "x_px",
+                    "y_px",
+                    "confidence",
+                    "visible"
+                  ],
+                  "properties": {
+                    "x_px": {
+                      "type": "number"
+                    },
+                    "y_px": {
+                      "type": "number"
+                    },
+                    "confidence": {
+                      "type": "number"
+                    },
+                    "visible": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "latency_ms": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "capture_to_detect_done",
+            "detect_to_crop_worker_start",
+            "crop_worker_start_to_crop_ready",
+            "detect_to_crop_ready",
+            "crop_ready_to_pose_start",
+            "pose_start_to_pose_done",
+            "capture_to_pose_done"
+          ],
+          "properties": {
+            "capture_to_detect_done": {
+              "type": "number"
+            },
+            "detect_to_crop_worker_start": {
+              "type": "number"
+            },
+            "crop_worker_start_to_crop_ready": {
+              "type": "number"
+            },
+            "detect_to_crop_ready": {
+              "type": "number"
+            },
+            "crop_ready_to_pose_start": {
+              "type": "number"
+            },
+            "pose_start_to_pose_done": {
+              "type": "number"
+            },
+            "capture_to_pose_done": {
+              "type": "number"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

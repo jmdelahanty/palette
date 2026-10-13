@@ -352,7 +352,10 @@ if [[ "$SKIP_HOST_VERIFY" -eq 0 ]]; then
   REMOTE_COMMAND+='test -z "$(git -C "$repo" status --porcelain --untracked-files=all)" && '
   REMOTE_COMMAND+='expected_import=$(readlink -f "$repo/src/fisheye/__init__.py") && '
   REMOTE_COMMAND+='actual_import=$(cd "$repo" && "$repo/scripts/py" -c '\''import pathlib, fisheye; print(pathlib.Path(fisheye.__file__).resolve())'\'') && '
-  REMOTE_COMMAND+='test "$actual_import" = "$expected_import"'
+  REMOTE_COMMAND+='test "$actual_import" = "$expected_import" && '
+  # The environment must be able to run intake on this host, including the
+  # dependencies intake imports lazily (jsonschema was once missing here).
+  REMOTE_COMMAND+='(cd "$repo" && "$repo/scripts/py" -m fisheye.utils.check_intake_runtime)'
   run ssh -o BatchMode=yes "$VERIFY_HOST" "$REMOTE_COMMAND"
 fi
 

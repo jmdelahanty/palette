@@ -28,6 +28,7 @@ class DependentTable:
 
 DEPENDENT_DATASET_TABLES: tuple[DependentTable, ...] = (
     DependentTable("acquisition_video_streams", ("dataset_id",)),
+    DependentTable("recording_realtime_products", ("dataset_id",)),
     DependentTable("crop_quality", ("dataset_id",)),
     DependentTable("dataset_lineage", ("child_dataset_id", "parent_dataset_id")),
     DependentTable("detect_performance", ("dataset_id",)),

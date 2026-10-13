@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Sequence, Dict, Any, Tuple
 from datetime import datetime, timezone
+import functools
 import hashlib
 import json
 import os
@@ -44,6 +45,7 @@ from ..shared.frame_flags import (
 )
 from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 from ..shared.subject_mask_stale import mark_downstream_subject_mask_runs_stale
+from ..shared.zarr_helpers import archive_metadata_publication_lock
 from ..registry.stage_complete import DatasetMetadata, emit_stage_completion
 from ..shared.type_conversions import normalize_attr as _normalize_attr
 from ..shared.zarr_run_completion import resolve_latest_complete_run_name
@@ -1019,6 +1021,16 @@ def launch_review(
     detect_flag_file: Optional[str] = None,
     detect_frame_flag_file: Optional[str] = None,
 ) -> None:
+    def _archive_locked(function):
+        """Hold the archive lock the labeling server's keypoint writers take."""
+
+        @functools.wraps(function)
+        def wrapper(*args, **kwargs):
+            with archive_metadata_publication_lock(str(zarr_path)):
+                return function(*args, **kwargs)
+
+        return wrapper
+
     root = open_zarr_root(zarr_path, mode="a")
 
     refined_parent = root.get("refined_keypoints_runs")
@@ -1302,6 +1314,7 @@ def launch_review(
         ax.set_axis_off()
         fig.canvas.draw_idle()
 
+    @_archive_locked
     def save_current() -> None:
         nonlocal active_idx, idx_pos
         roi_idx = int(failures[idx_pos])
@@ -1401,6 +1414,7 @@ def launch_review(
             load_current_points()
             update_display()
 
+    @_archive_locked
     def mark_no_keypoints() -> None:
         nonlocal active_idx, idx_pos, failures
         roi_idx = int(failures[idx_pos])
@@ -1472,6 +1486,7 @@ def launch_review(
         load_current_points()
         update_display()
 
+    @_archive_locked
     def mark_detection_issue() -> None:
         nonlocal active_idx, idx_pos, failures
         roi_idx = int(failures[idx_pos])
@@ -1554,6 +1569,7 @@ def launch_review(
         load_current_points()
         update_display()
 
+    @_archive_locked
     def clear_failure_label() -> None:
         roi_idx = int(failures[idx_pos])
         frame_idx = int(frame_indices[roi_idx])
@@ -1621,6 +1637,7 @@ def launch_review(
 
     def on_key(event) -> None:
         nonlocal active_idx, show_text
+        @_archive_locked
         def apply_state(state: str) -> None:
             payload, sync = _apply_review_status(
                 refined_parent,
@@ -1734,9 +1751,10 @@ def launch_review(
     fig.canvas.mpl_connect("button_press_event", on_click)
     fig.canvas.mpl_connect("key_press_event", on_key)
     plt.show()
-    if reason_arr is not None:
-        _write_reason_labels(refined, np.asarray(reason_arr[:], dtype=object))
-    refresh_refined_keypoint_heading_fields(refined, root=root)
+    with archive_metadata_publication_lock(str(zarr_path)):
+        if reason_arr is not None:
+            _write_reason_labels(refined, np.asarray(reason_arr[:], dtype=object))
+        refresh_refined_keypoint_heading_fields(refined, root=root)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:

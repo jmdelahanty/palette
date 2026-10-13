@@ -201,6 +201,7 @@ def test_real_current_clipped_import_to_receipt_registry_and_pixel_resolver(
     root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=True)
     assert root.attrs["camera_id"] == CAMERA
     assert root.attrs["source_layout"] == "rolling_clips"
+    assert root.attrs["source_frame_index_schema"] == "palette.recording_frame_index.v1"
     assert root.attrs.get("source_video_path") is None
     assert root.attrs.get("source_video") is None
     assert "images_full" not in root["raw_video"]
@@ -250,6 +251,34 @@ def test_real_current_clipped_import_to_receipt_registry_and_pixel_resolver(
         assert (
             registry.read_verified_recording_import_by_path(plan.zarr_path) == verified
         )
+        # The registry projects the frame-index schema intake recorded.
+        (schema,) = registry.conn.execute(
+            "SELECT source_frame_index_schema FROM datasets WHERE zarr_path = ?",
+            (str(plan.zarr_path),),
+        ).fetchone()
+        assert schema == "palette.recording_frame_index.v1"
+        # Video facts intake verified reach the registry (B5): rolling stream
+        # contracts carry none, so they come from source_video_metadata and,
+        # for the crop stream, the validated crop ledger.
+        dataset_id = registry.conn.execute(
+            "SELECT dataset_id FROM datasets WHERE zarr_path = ?", (str(plan.zarr_path),)
+        ).fetchone()[0]
+        fps, codec, pix_fmt = registry.conn.execute(
+            "SELECT fps, video_codec, video_pix_fmt FROM provenance WHERE dataset_id = ?",
+            (dataset_id,),
+        ).fetchone()
+        assert fps == 2.0 and codec and pix_fmt
+        streams = {
+            row[0]: row[1:]
+            for row in registry.conn.execute(
+                "SELECT stream_key, width, height, frame_rate, codec "
+                "FROM acquisition_video_streams WHERE dataset_id = ?",
+                (dataset_id,),
+            )
+        }
+        assert streams["full"] == (64, 48, 2.0, codec)
+        if crop:
+            assert streams["crop"][:2] == (16, 16)
     finally:
         registry.close()
     before = {
@@ -454,4 +483,53 @@ def test_declared_crop_ledger_is_required_after_real_current_import(
     with pytest.raises(
         RecordingIdentityAuthorityError, match="no acquisition crop stream"
     ):
+        load_verified_recording_import_receipt(plan.zarr_path)
+
+
+def _imported_crop_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    recording = _write_current_clipped_recording(tmp_path, crop=True)
+    _stub_only_checkout_identity(monkeypatch)
+    plan = importer.resolve_single_recording_plan(recording_dir=recording, require_h5=False)
+    result = importer.process_recording_import(plan, _options())
+    assert result.ok, result
+    load_verified_recording_import_receipt(plan.zarr_path)  # the clean import verifies
+    return plan
+
+
+def _ledger_run(plan) -> zarr.Group:
+    root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    crop = root["analysis/acquisition_video_streams/streams/crop"]
+    return crop["ledger_runs"][crop.attrs["canonical_ledger_run"]]
+
+
+def test_a_ledger_changed_only_in_its_direct_metadata_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The ledger is validated through the consolidated view; the direct
+    # declarations must still be proven equal to it.
+    plan = _imported_crop_recording(tmp_path, monkeypatch)
+    _ledger_run(plan).attrs["publication_status"] = "draft"  # not re-consolidated
+    with pytest.raises(RecordingIdentityAuthorityError, match="not complete|Direct/consolidated|differ"):
+        load_verified_recording_import_receipt(plan.zarr_path)
+
+
+def test_a_consistently_changed_ledger_is_refused_by_the_ledger_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _imported_crop_recording(tmp_path, monkeypatch)
+    _ledger_run(plan).attrs["publication_status"] = "draft"
+    consolidate_metadata_capture_expected_warnings(str(plan.zarr_path))
+    with pytest.raises(RecordingIdentityAuthorityError, match="crop ledger run is not complete"):
+        load_verified_recording_import_receipt(plan.zarr_path)
+
+
+def test_a_crop_recording_without_consolidated_metadata_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _imported_crop_recording(tmp_path, monkeypatch)
+    root_metadata = plan.zarr_path / "zarr.json"
+    document = json.loads(root_metadata.read_text())
+    document.pop("consolidated_metadata", None)
+    root_metadata.write_text(json.dumps(document))
+    with pytest.raises(RecordingIdentityAuthorityError):
         load_verified_recording_import_receipt(plan.zarr_path)

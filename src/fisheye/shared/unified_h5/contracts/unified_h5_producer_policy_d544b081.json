@@ -1,0 +1,117 @@
+{
+  "schema_id": "citrus_palette.unified_h5_admission",
+  "schema_version": 2,
+  "status": "draft_not_production_admitted",
+  "producer_candidate": {
+    "repository": "JohnsonLabJanelia/citrus",
+    "branch": "agent/unified-h5-streamed-correspondence-20260923",
+    "commit": "e437fa4752679e5a614378d824e636104c4f095a"
+  },
+  "artifact_profile": "unified_experimental_h5_v1",
+  "versions": {
+    "core": {
+      "schema_id": "citrus.experimental_h5",
+      "schema_version": 1
+    },
+    "correspondence_input": {
+      "schema_id": "citrus.experimental_h5.correspondence_input",
+      "schema_version": 2
+    },
+    "correspondence_receipt": {
+      "schema_id": "citrus.experimental_h5.correspondence_receipt",
+      "schema_version": 2
+    },
+    "acquisition_binding": {
+      "schema_id": "citrus.experimental_h5.acquisition_binding",
+      "schema_version": 1
+    },
+    "optional_pose": {
+      "schema_id": "citrus.pose_observation",
+      "schema_version": 1
+    },
+    "optional_pose_receipt": {
+      "schema_id": "citrus.pose_observation_receipt",
+      "schema_version": 1
+    },
+    "capacity_preflight": {
+      "schema_id": "citrus.experimental_h5.capacity_preflight",
+      "schema_version": 1
+    },
+    "chaser_state": {
+      "schema_id": "citrus.experimental_h5.chaser_state",
+      "schema_version": 2
+    }
+  },
+  "digest_encodings": {
+    "core_tables": "core_schema_json_and_packed_le_v1",
+    "generic_datasets": "hdf5_closed_logical_values_v1",
+    "canonical_json": "canonical_json_utf8_sort_keys_compact_v1"
+  },
+  "resource_profile": {
+    "schema_id": "citrus_palette.unified_h5.long_session_resources",
+    "schema_version": 1,
+    "max_dataset_logical_bytes": 1099511627776,
+    "max_dataset_rows": 1099511627776,
+    "max_single_element_bytes": 67108864,
+    "max_json_payload_bytes": 8388608,
+    "max_variable_string_dataset_payload_bytes": 8388608,
+    "max_decoded_chunk_bytes": 67108864,
+    "target_io_buffer_bytes": 1048576,
+    "max_io_buffer_bytes": 67108864
+  },
+  "table_storage": {
+    "layout": "one_rank1_chunked_dataset_per_table",
+    "segmentation": false,
+    "chunk_shape_authority": "per_file_hdf5_dataset_creation_properties",
+    "chunk_shape_fixed_by_schema": false,
+    "allowed_filter_ids": [],
+    "filter_policy": "no_filters_for_fixed_width_tables_in_this_admission_revision",
+    "logical_digests_independent_of_chunk_shape": true,
+    "physical_chunk_digests_producer_supplied": false
+  },
+  "required_operations": {
+    "hashing": "bounded_row_ranges",
+    "copying": "bounded_buffers",
+    "reading": "genuine_row_range_hyperslabs_no_whole_table_then_slice",
+    "capacity_preflight": "required_before_arming",
+    "runtime_capacity_check": "required_before_dataset_extension",
+    "preflight_evidence_path": "/metadata/admission/capacity_preflight_json",
+    "preflight_evidence_location": "same_experimental_h5_not_a_companion",
+    "output_creation": "exclusive_no_overwrite",
+    "post_receipt_h5_mutation": "forbidden"
+  },
+  "delivery": {
+    "collection_relative_path": "recording_observation_bindings/finalized_collection.json",
+    "receipt_relative_path_template": "recording_observation_bindings/receipts/<observation_context_id>.json",
+    "h5_path_authority": "collection.observation_contexts[].citrus_h5.relative_path",
+    "receipt_path_authority": "collection.observation_contexts[].finalized_receipt.relative_path",
+    "internal_receipt_path": "/evidence/integrity/finalization_receipt_json",
+    "palette_storage_policy": "sealed_reference_to_source_h5_not_native_h5_byte_copy",
+    "palette_storage_version": "assigned_by_palette_not_defined_here"
+  },
+  "core_definition_pins": {
+    "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+    "historical_v1": {
+      "catalog_path": "docs/schemas/experimental_h5_core_v1.json",
+      "catalog_file_sha256": "sha256:febb7516ff96f359b6784bf137682abe387b7922270e9637ebc58b369e07f9c1",
+      "catalog_canonical_json_sha256": "sha256:a8bf656a41cd6ccc4d78a1c896fb54c31a5f9fee1787d04861b2ba4d5df301a7",
+      "chaser_table": {
+        "schema_id": "citrus.experimental_h5.chaser_state",
+        "schema_version": 1,
+        "definition_canonical_json_sha256": "sha256:0a257c510f57c08a2b308aef1901daf01988760fbca5a321b5419eaa944c9e34"
+      },
+      "admitted_by_this_revision": false
+    },
+    "current": {
+      "catalog_path": "docs/schemas/experimental_h5_core_chaser_v2.json",
+      "catalog_file_sha256": "sha256:cb68ab6ecea614030b8f2a3d2096e9122b1efa5156b56ed7a495b3072c70316a",
+      "catalog_canonical_json_sha256": "sha256:cadf30c237c2d00e280554258599fce1ee10c6e7417a1409bb66c945ec72a243",
+      "chaser_table": {
+        "schema_id": "citrus.experimental_h5.chaser_state",
+        "schema_version": 2,
+        "definition_canonical_json_sha256": "sha256:c6c6e41a00efc770fd18bb410a6126ab00c09308ad4affbb6303a36f53138a3c"
+      },
+      "admitted_by_this_revision": true
+    }
+  }
+}

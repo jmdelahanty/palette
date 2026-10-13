@@ -18,6 +18,7 @@ from fisheye.shared.zarr.storage_profiles import (
     EDITABLE_LOCAL_V1,
     PUBLISHED_HTTP_V1,
     TRAINING_IMMUTABLE_V1,
+    TRAINING_REVIEW_RUN_V1,
     get_storage_profile,
     make_benchmark_storage_profile,
     storage_profile_from_manifest,
@@ -467,3 +468,48 @@ def test_invalid_access_shape_and_random_shard_ownership_fail_closed() -> None:
             write_mode=WriteMode.RANDOM_UPDATE,
             whole_shard_writes=True,
         )
+
+
+def test_training_review_profile_keeps_inner_chunks_and_owns_mutable_shards() -> None:
+    profile = TRAINING_REVIEW_RUN_V1
+    assert get_storage_profile(profile.profile_id) is profile
+    manifest = profile.as_manifest()
+    assert manifest["schema_version"] == 3
+    assert manifest["shard_serialized_random_updates"] is True
+    assert storage_profile_from_manifest(manifest) == profile
+    stripped = dict(manifest)
+    del stripped["shard_serialized_random_updates"]
+    with pytest.raises(ValueError):
+        storage_profile_from_manifest(stripped)
+    # Existing profiles keep their exact v2 manifest grammar.
+    assert "shard_serialized_random_updates" not in PUBLISHED_HTTP_V1.as_manifest()
+    assert PUBLISHED_HTTP_V1.as_manifest()["schema_version"] == 2
+
+    def plan(shape, unit, dtype, write_mode, selected=profile):
+        return plan_storage(
+            ArrayIntent(
+                shape=shape,
+                dtype=dtype,
+                access=AccessPattern.PER_ROW,
+                write_mode=write_mode,
+                access_unit_shape=unit,
+            ),
+            selected,
+        )
+
+    # A 229-row keypoint array keeps one-row inner chunks in one whole-run shard.
+    keypoints = plan((229, 19, 2), (1, 19, 2), np.float32, WriteMode.RANDOM_UPDATE)
+    assert keypoints.chunk_shape == (1, 19, 2)
+    assert keypoints.shard_shape == (229, 19, 2)
+    assert keypoints.write_ownership == "serialized_whole_shard_rewrite_single_writer"
+    # Large dense masks are byte-bounded: 16 MiB target per shard.
+    masks = plan((229, 3, 512, 512), (1, 3, 512, 512), np.uint8, WriteMode.IMMUTABLE)
+    assert masks.chunk_shape == (1, 3, 512, 512)
+    assert masks.shard_shape == (22, 3, 512, 512)
+    assert masks.shard_nbytes <= profile.max_shard_bytes
+    # Mutable arrays stay regular-chunked under profiles without the opt-in.
+    regular = plan(
+        (229, 19, 2), (1, 19, 2), np.float32, WriteMode.RANDOM_UPDATE,
+        selected=PUBLISHED_HTTP_V1,
+    )
+    assert regular.shard_shape is None

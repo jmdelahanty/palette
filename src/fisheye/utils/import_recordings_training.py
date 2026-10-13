@@ -545,6 +545,16 @@ def _run_stimulus_import(
     overwrite: bool,
     quiet: bool,
 ) -> Tuple[bool, int]:
+    from fisheye.utils.import_recording_analysis import stimulus_h5_unified_profile
+
+    if stimulus_h5_unified_profile(plan.h5_path) is not None:
+        # Unified H5s carry an external finalization receipt and are imported
+        # once, by the analysis session importer; there is no training mirror.
+        print(
+            f"Refusing training stimulus mirror for unified H5 {plan.h5_path}: "
+            "import it with fisheye.utils.import_recording_analysis."
+        )
+        return False, 2
     cmd = [
         sys.executable,
         "-m",

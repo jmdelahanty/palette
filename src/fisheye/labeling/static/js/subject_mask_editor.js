@@ -4,12 +4,14 @@
     let payload = null;
     let imageData = null;
     let mask = null;
+    let loadedMask = null;
     let maskWidth = 0;
     let maskHeight = 0;
     let maskOverlayCanvas = document.createElement("canvas");
     let maskOverlayCtx = maskOverlayCanvas.getContext("2d");
     let maskOverlayDirty = true;
     let maskOverlayDirtyRect = null;
+    let maskView = "overlay";
     let drawScheduled = false;
     let drawing = false;
     let lassoMode = false;
@@ -22,7 +24,156 @@
     let brushSize = 8;
     let busyAction = false;
     let applyInFlight = false;
+    let uncertainApplyId = null;
+    let tailRefreshResult = null;
+    let foregroundGeneration = 0;
+    let effectsPollTimer = null;
+    const effectsPollMs = 3000;
     const lassoMinPointStepPx = 2;
+    let maskPieceInfo = null;
+    let maskPiecesTimer = null;
+    let bulkUndoMask = null;
+    let reviewSelectTouched = false;
+    // The last row shown before this one, as last saved or loaded (never its
+    // discarded strokes). Its mask can be copied onto the current row when
+    // the animal holds the same position, even across non-adjacent frames.
+    let previousRow = null;
+    // Move tool: one move session per contiguous drag/nudge sequence. Offsets
+    // are always applied to the mask as it was when the session began, so
+    // pixels pushed past the crop edge come back if the mask is moved back.
+    let moveSession = null;
+    let moveDragging = false;
+    // Rotate tool: one rotation session per contiguous drag/arrow sequence,
+    // always resampled once from the mask as it was when the session began
+    // (smoothed: bilinear, threshold 0.5, about the mask centroid). Finished
+    // rotations are recorded with the next Save as edit_operations.
+    let rotateSession = null;
+    let rotateDragging = false;
+    let pendingEditOperations = [];
+    const ROTATE_METHOD = "bilinear_threshold_0.5";
+
+    function hasUnsavedEdits() {
+      return Boolean(mask && loadedMask && mask.some((value, index) => value !== loadedMask[index]));
+    }
+
+    // Leaving a row (Prev/Next/Go to ROI/closing the tab) must never drop
+    // unsaved pixels silently.
+    function confirmDiscardUnsaved(action) {
+      if (!hasUnsavedEdits()) return true;
+      const roi = payload?.roi_idx ?? "this row";
+      return window.confirm(
+        "ROI " + roi + " has unsaved mask changes. Discard them and " + action + "?\n\n" +
+        "Cancel keeps you here; press S to save, or Shift+S to save and go to the next ROI."
+      );
+    }
+
+    function currentReviewState() {
+      return String(payload?.state?.component_review_status?.state || "pending");
+    }
+
+    // The control shows the saved state; it never preselects a value to apply.
+    function syncReviewControl() {
+      const select = document.getElementById("review-state");
+      const current = currentReviewState();
+      if (select && !reviewSelectTouched) select.value = current;
+      const label = document.getElementById("review-current");
+      if (label) label.textContent = "Current: " + current;
+      const button = document.getElementById("set-review-button");
+      if (button) button.disabled = !select || select.value === current;
+    }
+
+    function reviewSelectChanged() {
+      reviewSelectTouched = true;
+      syncReviewControl();
+    }
+    let bulkUndoLabel = "";
+
+    // Connected pieces of a binary mask. Pixels that touch at an edge or a
+    // corner (8-connectivity) are one piece, as in the server's
+    // fragmented_subject_body_mask check, so the counts agree.
+    function maskPieces(values, width, height) {
+      const labels = new Int32Array(width * height);
+      const sizes = [0];
+      const boxes = [null];
+      const stack = new Int32Array(width * height);
+      let next = 0;
+      for (let start = 0; start < values.length; start++) {
+        if (!values[start] || labels[start]) continue;
+        next += 1;
+        let top = 0;
+        stack[top++] = start;
+        labels[start] = next;
+        let size = 0, x0 = width, y0 = height, x1 = -1, y1 = -1;
+        while (top > 0) {
+          const idx = stack[--top];
+          const x = idx % width, y = (idx - x) / width;
+          size += 1;
+          if (x < x0) x0 = x; if (x > x1) x1 = x;
+          if (y < y0) y0 = y; if (y > y1) y1 = y;
+          for (let dy = -1; dy <= 1; dy++) {
+            const ny = y + dy;
+            if (ny < 0 || ny >= height) continue;
+            for (let dx = -1; dx <= 1; dx++) {
+              const nx = x + dx;
+              if ((dx || dy) && nx >= 0 && nx < width) {
+                const n = ny * width + nx;
+                if (values[n] && !labels[n]) { labels[n] = next; stack[top++] = n; }
+              }
+            }
+          }
+        }
+        sizes.push(size);
+        boxes.push({x0, y0, x1, y1});
+      }
+      let main = 0;
+      for (let id = 1; id < sizes.length; id++) if (sizes[id] > (sizes[main] || 0)) main = id;
+      return {labels, sizes, boxes, main, count: sizes.length - 1};
+    }
+
+    // Fill every hole enclosed by the piece under (x, y). Background pixels
+    // that cannot reach the image edge without crossing that piece (moving
+    // edge-to-edge, 4-connectivity) are holes. Returns the pixels filled, or
+    // -1 when (x, y) is not on the mask.
+    function fillPieceHoles(values, width, height, x, y) {
+      const at = y * width + x;
+      if (!values[at]) return -1;
+      const pieces = maskPieces(values, width, height);
+      const piece = pieces.labels[at];
+      const reached = new Uint8Array(width * height);
+      const stack = new Int32Array(width * height);
+      let top = 0;
+      const seed = (idx) => {
+        if (!reached[idx] && pieces.labels[idx] !== piece) { reached[idx] = 1; stack[top++] = idx; }
+      };
+      for (let xx = 0; xx < width; xx++) { seed(xx); seed((height - 1) * width + xx); }
+      for (let yy = 0; yy < height; yy++) { seed(yy * width); seed(yy * width + width - 1); }
+      while (top > 0) {
+        const idx = stack[--top];
+        const xx = idx % width, yy = (idx - xx) / width;
+        if (xx > 0) seed(idx - 1);
+        if (xx < width - 1) seed(idx + 1);
+        if (yy > 0) seed(idx - width);
+        if (yy < height - 1) seed(idx + width);
+      }
+      let filled = 0;
+      for (let i = 0; i < values.length; i++) {
+        if (!reached[i] && pieces.labels[i] !== piece) {
+          if (!values[i]) filled += 1;
+          values[i] = 1;
+        }
+      }
+      return filled;
+    }
+
+    // Keep only the largest piece. Returns the pixels removed.
+    function removeStrayPieces(values, width, height) {
+      const pieces = maskPieces(values, width, height);
+      let removed = 0;
+      for (let i = 0; i < values.length; i++) {
+        if (values[i] && pieces.labels[i] !== pieces.main) { values[i] = 0; removed += 1; }
+      }
+      return removed;
+    }
 
     function setStatus(text, isError=false) {
       const node = document.getElementById("status");
@@ -54,11 +205,13 @@
     }
 
     function setBusy(isBusy, text=null) {
+      if (isBusy) foregroundGeneration += 1;
       busyAction = Boolean(isBusy);
       document.querySelectorAll("button, select, input").forEach((node) => {
         node.disabled = busyAction;
       });
       updateNavButtons();
+      updateCopyPreviousButton();
       if (text) setStatus(text);
     }
 
@@ -102,6 +255,11 @@
       maskWidth = maskPayload.shape[1];
       mask = new Uint8Array(maskWidth * maskHeight);
       for (let i = 0; i < mask.length; i++) mask[i] = bytes[i] > 0 ? 1 : 0;
+      loadedMask = mask.slice();
+      endMoveSession();
+      endRotateSession(false);
+      pendingEditOperations = [];
+      forgetUndo();
       markMaskOverlayDirty();
     }
 
@@ -119,9 +277,273 @@
       };
     }
 
+    function schedulePieceRefresh() {
+      // Recount once per frame, after this frame's edits.
+      if (maskPiecesTimer !== null) return;
+      maskPiecesTimer = true;
+      window.requestAnimationFrame(() => {
+        maskPiecesTimer = null;
+        refreshPieces();
+      });
+    }
+
+    function refreshPieces() {
+      if (!mask || !maskWidth || !maskHeight) return;
+      maskPieceInfo = maskPieces(mask, maskWidth, maskHeight);
+      renderPieces();
+      scheduleDraw();
+    }
+
+    function renderPieces() {
+      const target = document.getElementById("mask-pieces");
+      const button = document.getElementById("remove-stray-button");
+      if (!target) return;
+      const info = maskPieceInfo;
+      const stray = info ? info.count - (info.count > 0 ? 1 : 0) : 0;
+      if (button) button.disabled = stray <= 0;
+      if (!info || info.count <= 1) {
+        target.textContent = info && info.count === 1 ? "Mask is one piece." : "Mask is empty.";
+        target.classList.toggle("warn", false);
+        return;
+      }
+      const straySizes = [];
+      for (let id = 1; id < info.sizes.length; id++) if (id !== info.main) straySizes.push(info.sizes[id]);
+      straySizes.sort((a, b) => b - a);
+      target.textContent = stray + " stray piece" + (stray === 1 ? "" : "s") + " outside the main body ("
+        + straySizes.slice(0, 5).join(", ") + (straySizes.length > 5 ? ", …" : "") + " px), circled on the image.";
+      target.classList.toggle("warn", true);
+    }
+
+    function rememberForUndo(label) {
+      bulkUndoMask = mask.slice();
+      bulkUndoLabel = label;
+      const button = document.getElementById("undo-bulk-button");
+      if (button) { button.disabled = false; button.textContent = "Undo " + label; }
+    }
+
+    function forgetUndo() {
+      bulkUndoMask = null;
+      bulkUndoLabel = "";
+      const button = document.getElementById("undo-bulk-button");
+      if (button) { button.disabled = true; button.textContent = "Undo"; }
+    }
+
+    function undoBulkEdit() {
+      if (!bulkUndoMask || !mask || bulkUndoMask.length !== mask.length) return;
+      endMoveSession();
+      if (bulkUndoLabel === "rotation") {
+        if (rotateSession) endRotateSession(false);
+        else pendingEditOperations.pop();
+      }
+      mask.set(bulkUndoMask);
+      const label = bulkUndoLabel;
+      forgetUndo();
+      markMaskOverlayDirty();
+      scheduleDraw();
+      setStatus("Undid " + label + " locally.");
+    }
+
+    function updateCopyPreviousButton() {
+      const button = document.getElementById("copy-previous-button");
+      if (!button) return;
+      const sameSize = Boolean(previousRow && mask
+        && previousRow.width === maskWidth && previousRow.height === maskHeight);
+      button.disabled = busyAction || !sameSize;
+      button.textContent = previousRow ? "Copy mask from ROI " + previousRow.roi : "Copy previous mask";
+      button.title = !previousRow
+        ? "Open another row first; its mask can then be copied here."
+        : sameSize ? "" : "ROI " + previousRow.roi + " has a different crop size.";
+    }
+
+    function copyPreviousMask() {
+      if (!mask) return;
+      if (!previousRow) {
+        setStatus("No previous row yet: open another row first, then come back to copy its mask.", true);
+        return;
+      }
+      if (previousRow.width !== maskWidth || previousRow.height !== maskHeight) {
+        setStatus("ROI " + previousRow.roi + " is " + previousRow.width + " × " + previousRow.height
+          + " px; this row is " + maskWidth + " × " + maskHeight + " px, so its mask can't be copied.", true);
+        return;
+      }
+      rememberForUndo("copy from ROI " + previousRow.roi);
+      mask.set(previousRow.mask);
+      markMaskOverlayDirty();
+      scheduleDraw();
+      setStatus("Copied the mask from ROI " + previousRow.roi + " locally (same crop position). Check it, then save.");
+    }
+
+    // Shift a binary mask by whole pixels; pixels landing outside are dropped.
+    function translateMask(source, width, height, dx, dy) {
+      const out = new Uint8Array(width * height);
+      let lost = 0;
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          if (!source[y * width + x]) continue;
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) { lost++; continue; }
+          out[ny * width + nx] = 1;
+        }
+      }
+      return {mask: out, lost};
+    }
+
+    // Rotate a binary mask by `degrees` (clockwise on screen) about (cx, cy):
+    // each output pixel samples the source bilinearly, kept at >= 0.5.
+    function rotateMask(source, width, height, degrees, cx, cy) {
+      const out = new Uint8Array(width * height);
+      const rad = degrees * Math.PI / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      const sample = (x, y) => (x < 0 || y < 0 || x >= width || y >= height) ? 0 : source[y * width + x];
+      // Only output pixels whose sample can touch the mask: the rotated bounding box (with a 1 px bilinear margin).
+      let minX = width, minY = height, maxX = -1, maxY = -1;
+      for (let i = 0; i < source.length; i++) {
+        if (!source[i]) continue;
+        const x = i % width, y = (i - x) / width;
+        if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+      if (maxX < 0) return out;
+      let x0Box = width, y0Box = height, x1Box = -1, y1Box = -1;
+      for (const [px, py] of [[minX - 1, minY - 1], [maxX + 1, minY - 1], [minX - 1, maxY + 1], [maxX + 1, maxY + 1]]) {
+        const ox = cos * (px - cx) - sin * (py - cy) + cx;
+        const oy = sin * (px - cx) + cos * (py - cy) + cy;
+        x0Box = Math.min(x0Box, ox); x1Box = Math.max(x1Box, ox); y0Box = Math.min(y0Box, oy); y1Box = Math.max(y1Box, oy);
+      }
+      const xStart = Math.max(0, Math.floor(x0Box)), xEnd = Math.min(width - 1, Math.ceil(x1Box));
+      const yStart = Math.max(0, Math.floor(y0Box)), yEnd = Math.min(height - 1, Math.ceil(y1Box));
+      for (let y = yStart; y <= yEnd; y++) {
+        for (let x = xStart; x <= xEnd; x++) {
+          const dx = x - cx;
+          const dy = y - cy;
+          const sx = cos * dx + sin * dy + cx;
+          const sy = -sin * dx + cos * dy + cy;
+          const x0 = Math.floor(sx);
+          const y0 = Math.floor(sy);
+          const fx = sx - x0;
+          const fy = sy - y0;
+          const value = sample(x0, y0) * (1 - fx) * (1 - fy) + sample(x0 + 1, y0) * fx * (1 - fy)
+            + sample(x0, y0 + 1) * (1 - fx) * fy + sample(x0 + 1, y0 + 1) * fx * fy;
+          if (value >= 0.5) out[y * width + x] = 1;
+        }
+      }
+      return out;
+    }
+
+    function maskCentroid(values, width, height) {
+      let sx = 0, sy = 0, n = 0;
+      for (let i = 0; i < values.length; i++) {
+        if (!values[i]) continue;
+        sx += i % width; sy += Math.floor(i / width); n++;
+      }
+      return n ? [sx / n, sy / n, n] : null;
+    }
+
+    function beginRotateSession() {
+      if (rotateSession || !mask) return false;
+      const centroid = maskCentroid(mask, maskWidth, maskHeight);
+      if (!centroid) { setStatus("Nothing to rotate: the mask is empty.", true); return false; }
+      rememberForUndo("rotation");
+      rotateSession = {
+        origin: mask.slice(), angle: 0, cx: centroid[0], cy: centroid[1], area: centroid[2],
+        pieces: maskPieces(mask, maskWidth, maskHeight).count, dragAngle: null, dragBase: 0,
+      };
+      return true;
+    }
+
+    function endRotateSession(record=true) {
+      if (rotateSession && record && rotateSession.angle !== 0) {
+        pendingEditOperations.push({op: "rotate", angle_deg: rotateSession.angle, method: ROTATE_METHOD, pivot: "mask_centroid"});
+      }
+      rotateSession = null;
+      rotateDragging = false;
+    }
+
+    function setRotation(degrees) {
+      if (!rotateSession || !mask) return;
+      const angle = Math.round(degrees * 10) / 10;
+      rotateSession.angle = angle;
+      mask.set(rotateMask(rotateSession.origin, maskWidth, maskHeight, angle, rotateSession.cx, rotateSession.cy));
+      markMaskOverlayDirty();
+      scheduleDraw();
+      let area = 0;
+      for (let i = 0; i < mask.length; i++) area += mask[i];
+      const pieces = maskPieces(mask, maskWidth, maskHeight).count;
+      const change = rotateSession.area ? (100 * (area - rotateSession.area) / rotateSession.area) : 0;
+      let text = "Rotated " + Math.abs(angle) + "° " + (angle >= 0 ? "clockwise" : "counterclockwise")
+        + " locally (area " + (change >= 0 ? "+" : "") + change.toFixed(1) + "%, " + pieces + " piece" + (pieces === 1 ? "" : "s") + ").";
+      if (pieces > rotateSession.pieces) {
+        text += " The rotation split the mask: press R to remove stray pieces.";
+      }
+      setStatus(text + " Save to persist.", pieces > rotateSession.pieces);
+    }
+
+    function nudgeRotation(degrees) {
+      if (!mask || busyAction) return;
+      if (!rotateSession && !beginRotateSession()) return;
+      setRotation(rotateSession.angle + degrees);
+    }
+
+    function pointerAngle(point) {
+      return Math.atan2(point[1] - rotateSession.cy, point[0] - rotateSession.cx) * 180 / Math.PI;
+    }
+
+    function beginMoveSession() {
+      if (moveSession || !mask) return;
+      rememberForUndo("move");
+      moveSession = {origin: mask.slice(), dx: 0, dy: 0, dragStart: null, dragBase: [0, 0]};
+    }
+
+    function endMoveSession() {
+      moveSession = null;
+      moveDragging = false;
+    }
+
+    function setMoveOffset(dx, dy) {
+      if (!moveSession || !mask) return;
+      moveSession.dx = dx;
+      moveSession.dy = dy;
+      const moved = translateMask(moveSession.origin, maskWidth, maskHeight, dx, dy);
+      mask.set(moved.mask);
+      markMaskOverlayDirty();
+      scheduleDraw();
+      const lostText = moved.lost ? " " + moved.lost + " px are outside the crop; move back to keep them." : "";
+      setStatus("Moved the mask " + dx + ", " + dy + " px locally." + lostText + " Save to persist.");
+    }
+
+    function nudgeMask(dx, dy) {
+      if (!mask || busyAction) return;
+      beginMoveSession();
+      setMoveOffset(moveSession.dx + dx, moveSession.dy + dy);
+    }
+
+    function removeStrayPiecesAction() {
+      if (!mask) return;
+      rememberForUndo("stray-piece removal");
+      const removed = removeStrayPieces(mask, maskWidth, maskHeight);
+      if (!removed) { forgetUndo(); setStatus("No stray pieces to remove."); return; }
+      markMaskOverlayDirty();
+      scheduleDraw();
+      setStatus("Removed " + removed + " stray px locally. Save to persist.");
+    }
+
+    function fillHolesAt(event) {
+      const [mx, my] = maskPointFromEvent(event);
+      rememberForUndo("hole fill");
+      const filled = fillPieceHoles(mask, maskWidth, maskHeight, mx, my);
+      if (filled < 0) { forgetUndo(); setStatus("Click on a mask piece to fill its holes.", true); return; }
+      if (filled === 0) { forgetUndo(); setStatus("That piece has no holes."); return; }
+      markMaskOverlayDirty();
+      scheduleDraw();
+      setStatus("Filled " + filled + " px of holes locally. Save to persist.");
+    }
+
     function markMaskOverlayDirty(rect=null) {
+      schedulePieceRefresh();
       const wasFullyDirty = maskOverlayDirty && maskOverlayDirtyRect === null;
       maskOverlayDirty = true;
+      if (payload?.tail_crop_border) renderTailBorderStatus();
       if (!rect) {
         maskOverlayDirtyRect = null;
         return;
@@ -146,20 +568,29 @@
       };
     }
 
+    function setMaskView(value) {
+      maskView = value === "binary" ? "binary" : "overlay";
+      document.getElementById("mask-view").value = maskView;
+      markMaskOverlayDirty();
+      scheduleDraw();
+    }
+
     function rebuildMaskOverlay() {
       if (!mask || !maskWidth || !maskHeight) return;
+      const binary = maskView === "binary";
       const resized = maskOverlayCanvas.width !== maskWidth || maskOverlayCanvas.height !== maskHeight;
       if (maskOverlayCanvas.width !== maskWidth) maskOverlayCanvas.width = maskWidth;
       if (maskOverlayCanvas.height !== maskHeight) maskOverlayCanvas.height = maskHeight;
       if (resized || !maskOverlayDirtyRect) {
         const overlay = new ImageData(maskWidth, maskHeight);
         for (let i = 0; i < mask.length; i++) {
-          if (!mask[i]) continue;
+          if (!mask[i] && !binary) continue;
           const dst = i * 4;
-          overlay.data[dst] = 0;
-          overlay.data[dst + 1] = 200;
-          overlay.data[dst + 2] = 148;
-          overlay.data[dst + 3] = 118;
+          const value = mask[i] ? 255 : 0;
+          overlay.data[dst] = binary ? value : 0;
+          overlay.data[dst + 1] = binary ? value : 200;
+          overlay.data[dst + 2] = binary ? value : 148;
+          overlay.data[dst + 3] = binary ? 255 : 118;
         }
         maskOverlayCtx.putImageData(overlay, 0, 0);
       } else {
@@ -171,12 +602,13 @@
         for (let yy = 0; yy < h; yy++) {
           for (let xx = 0; xx < w; xx++) {
             const src = (y0 + yy) * maskWidth + (x0 + xx);
-            if (!mask[src]) continue;
+            if (!mask[src] && !binary) continue;
             const dst = (yy * w + xx) * 4;
-            overlay.data[dst] = 0;
-            overlay.data[dst + 1] = 200;
-            overlay.data[dst + 2] = 148;
-            overlay.data[dst + 3] = 118;
+            const value = mask[src] ? 255 : 0;
+            overlay.data[dst] = binary ? value : 0;
+            overlay.data[dst + 1] = binary ? value : 200;
+            overlay.data[dst + 2] = binary ? value : 148;
+            overlay.data[dst + 3] = binary ? 255 : 118;
           }
         }
         maskOverlayCtx.putImageData(overlay, x0, y0);
@@ -199,6 +631,7 @@
       if (maskOverlayDirty) rebuildMaskOverlay();
       viewport.drawImage();
       viewport.drawCanvas(maskOverlayCanvas);
+      drawStrayPieceRings();
       drawLassoOverlay();
       drawCursorOverlay();
     }
@@ -208,6 +641,26 @@
         (Number(mx) + 0.5) * viewport.imageWidth / maskWidth,
         (Number(my) + 0.5) * viewport.imageHeight / maskHeight
       );
+    }
+
+    function drawStrayPieceRings() {
+      const info = maskPieceInfo;
+      if (!info || info.count <= 1) return;
+      ctx.save();
+      ctx.strokeStyle = "#ff4fd8";
+      ctx.lineWidth = 2;
+      for (let id = 1; id < info.boxes.length; id++) {
+        if (id === info.main) continue;
+        const box = info.boxes[id];
+        const [cx, cy] = maskToCanvasPoint((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2);
+        const [ex] = maskToCanvasPoint(box.x1 + 1, box.y1 + 1);
+        // At least 10 screen pixels so a one-pixel piece is visible when zoomed out.
+        const radius = Math.max(10, Math.abs(ex - cx) + 4);
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
     }
 
     function drawLassoOverlay() {
@@ -240,6 +693,7 @@
 
     function drawCursorOverlay() {
       if (!cursorMaskPoint || !maskWidth || !maskHeight) return;
+      if ((tool === "move" || tool === "rotate") && !lassoMode) return;  // the system "grab" cursor shows instead
       const [x, y] = maskToCanvasPoint(cursorMaskPoint[0], cursorMaskPoint[1]);
       ctx.save();
       ctx.lineWidth = 2;
@@ -256,6 +710,13 @@
         ctx.arc(x, y, 3, 0, Math.PI * 2);
         ctx.fillStyle = "#fff176";
         ctx.fill();
+      } else if (tool === "fill") {
+        ctx.strokeStyle = "#ff4fd8";
+        ctx.beginPath();
+        ctx.arc(x, y, 6, 0, Math.PI * 2);
+        ctx.moveTo(x - 10, y); ctx.lineTo(x + 10, y);
+        ctx.moveTo(x, y - 10); ctx.lineTo(x, y + 10);
+        ctx.stroke();
       } else {
         const radiusMask = Math.max(1, Math.round(brushSize * maskWidth / viewport.imageWidth));
         const radiusCanvas = Math.max(2, radiusMask * viewport.imageWidth * viewport.view.scale / maskWidth);
@@ -276,10 +737,41 @@
       const componentReview = state.component_review_status || {};
       const completionGuard = state.component_review_completion_guard || {};
       const reviewState = componentReview.state || "pending";
-      const reviewWarning = completionGuard.ready ? "" :
-        "<p><b>Action needed</b> Set component review before completing this task.</p>";
+      syncReviewControl();
+      const pendingEffects = Number(state.pending_apply_effect_count || 0);
+      const background = Boolean(state.apply_effects_background);
+      const effectsStatus = state.apply_effects_status || {};
+      const effectsLine = !(background && pendingEffects > 0) ? ""
+        : effectsStatus.state === "failed"
+        ? "<p class=\"status error\"><b>Background update failed</b> " + escapeSupportText(effectsStatus.reason || "") +
+          " It will not retry automatically; the admin has been notified. Press Apply to retry it.</p>"
+        : effectsStatus.state === "retrying"
+        ? "<p class=\"status error\"><b>Background update failed</b> " + escapeSupportText(effectsStatus.reason || "") +
+          " Retrying automatically.</p>"
+        : "<p><b>Updating QC and tail versions…</b> Your mask edits are saved; you can keep working.</p>";
+      const reviewWarning = pendingEffects > 0
+        ? (background
+          ? "<p>Approval and rejection wait for the background update. You can set <b>needs_review</b> now and complete the task.</p>"
+          : "<p><b>Action needed</b> Finish the pending Apply before setting review status or completing this task.</p>")
+        : (completionGuard.ready ? "" :
+          "<p><b>Action needed</b> Set component review before completing this task.</p>");
+      const savedOffer = state.tail_refresh || tailRefreshResult;
+      const tailOffer = Number(savedOffer?.tail_refresh_mask_revision) === Number(state.edit_revision || 0) ? savedOffer : null;
+      const tailTasks = Array.isArray(tailOffer?.tail_refresh_tasks)
+        ? tailOffer.tail_refresh_tasks : [];
+      const tailFailures = Array.isArray(tailOffer?.tail_refresh_failures)
+        ? tailOffer.tail_refresh_failures : [];
+      const tailSummary = tailOffer?.tail_refresh_status === "complete"
+        ? "<p><b>Refreshed tail review</b> Mask revision " + Number(tailOffer.tail_refresh_mask_revision) + "; " + tailTasks.length + " new task(s); " +
+          Number(tailOffer.tail_refresh_valid_rows || 0) + " valid row(s), " +
+          Number(tailOffer.tail_refresh_training_eligible_rows || 0) + " training-eligible row(s), " +
+          Number(tailOffer.tail_refresh_manual_point_count || 0) + " manual point(s) retained, " +
+          tailFailures.length + " failure(s). " +
+          (tailTasks.length ? "Find " + tailTasks.map((task) => escapeSupportText(task.task_id)).join(", ") +
+            " in <a href=\"/my-work\">your task queue</a>." : "") + "</p>"
+        : "";
       document.getElementById("summary").innerHTML =
-        "<p><b>ROI</b> " + payload.roi_idx + " / <b>frame</b> " + (payload.frame_idx ?? "") + "</p>" +
+        "<p><b>ROI</b> " + payload.roi_idx + " / <b>" + (payload.frame_index_domain === "legacy_training_sample_row" ? "source training row" : "frame") + "</b> " + (payload.frame_idx ?? "") + "</p>" +
         "<p><b>Position</b> " + (state.position + 1) + " of " + state.total + "</p>" +
         "<p><b>Component</b> " + payload.component_name + "</p>" +
         "<p><b>Run</b> " + payload.refined_run + "</p>" +
@@ -287,30 +779,94 @@
         "<p><b>Review</b> " + reviewState + "</p>" +
         "<p><b>Session edits</b> " + (state.unapplied_session_edit_count || 0) +
         (payload.session_checkpoint ? " (current ROI is checkpoint overlay)" : "") + "</p>" +
-        reviewWarning;
+        "<p><b>QC</b> " + (state.qc_status || "pending") +
+        (pendingEffects ? " (" + pendingEffects + " Apply effect(s) pending)" : "") + "</p>" +
+        effectsLine + reviewWarning + tailSummary;
+      updateReviewControls(background && pendingEffects > 0);
+      scheduleEffectsPoll();
       const seekInput = document.getElementById("roi-seek-input");
       if (seekInput) seekInput.value = payload.roi_idx;
+      renderTailBorderStatus();
+    }
+
+    function renderTailBorderStatus() {
+      const panel = document.getElementById("tail-border-controls");
+      if (!panel) return;
+      const info = payload?.tail_crop_border;
+      panel.hidden = !info;
+      if (!info) return;
+      const describeReason = (raw) => {
+        const value = String(raw || "");
+        if (value.includes("body_touches_crop_border")) return "Body mask reaches the crop edge (body_touches_crop_border)";
+        if (value.includes("fragmented_subject_body_mask")) return "Body mask has disconnected regions (fragmented_subject_body_mask)";
+        if (value.includes("snout_extension_too_long")) return "Snout extension exceeds the allowed limit (snout_extension_too_long)";
+        if (value.includes("snout_outside_crop")) return "Snout lies outside the crop (snout_outside_crop)";
+        if (value.includes("tail_station_outside_body")) return "A tail point lies outside the body mask (tail_station_outside_body)";
+        if (value.includes("tail_tip_is_visible_crop_endpoint")) return "Tail points derived; the last point is the visible crop-edge endpoint";
+        if (value === "tail_derived") return "Tail points derived from the current mask";
+        if (value.includes("snout_projection")) return "Snout extension exceeds the allowed geometry limit (" + value + ")";
+        return value || "not recorded";
+      };
+      const original = describeReason(info.original_queued_reason);
+      const outcome = info.latest_outcome;
+      const outcomeText = outcome
+        ? outcome.status + " at mask revision " + outcome.mask_revision + ": " + describeReason(outcome.reason)
+        : "No refreshed tail derivation for the current mask revision";
+      const pending = info.pending_action?.action
+        ? "Pending checkpoint: " + info.pending_action.action + "; use Apply saved edits to publish a new tail version."
+        : info.checkpoint_state
+          ? "Saved mask pixels await Apply; the latest derived result has not checked this checkpoint."
+          : "No acceptance action pending.";
+      const localPixelsChanged = mask && loadedMask && mask.some((value, index) => value !== loadedMask[index]);
+      const accepted = localPixelsChanged
+        ? "Unsaved painted pixels are not covered by the applied result. If the clipped endpoint is still acceptable, checkpoint acceptance for the edited mask."
+        : info.accepted
+        ? "Accepted for this exact body mask by " + info.acceptance.accepted_by +
+          " at revision " + info.acceptance.accepted_at_mask_revision + "."
+        : info.malformed_acceptance
+          ? "Saved acceptance evidence is invalid: " + info.malformed_acceptance
+          : (info.stale_acceptance ? "Prior acceptance no longer matches this body mask or row." : "Strict crop-border rule applies.");
+      document.getElementById("tail-border-status").innerHTML =
+        "<p><b>Original queued reason</b> " + escapeSupportText(original) + "</p>" +
+        "<p><b>Current acceptance</b> " + escapeSupportText(accepted) + "</p>" +
+        "<p><b>Latest applied outcome</b> " + escapeSupportText(outcomeText) + "</p>" +
+        "<p><b>Checkpoint</b> " + escapeSupportText(pending) + "</p>" +
+        (info.status_unavailable ? "<p><b>Status unavailable</b> Reload this ROI to verify the applied result.</p>" : "") +
+        (localPixelsChanged ? "<p><b>Local paint</b> Unsaved pixels differ from the latest applied result. Save and Apply to update the derivation.</p>" : "");
     }
 
     async function api(path, options={}) {
       clearMutationSupportReference();
       const response = await fetch("/api/sessions/" + encodeURIComponent(sessionId) + "/subject-mask" + path, options);
       const data = await readApiPayload(response);
-      if (!response.ok || !data.ok) throw apiFailure(response, data, "session_request_failed");
+      if (!response.ok || !data.ok) {
+        const failure = apiFailure(response, data, "session_request_failed");
+        failure.apiData = data;
+        throw failure;
+      }
       return data;
     }
 
     async function loadCurrent() {
       try {
+        const leaving = payload && loadedMask
+          ? {roi: payload.roi_idx, mask: loadedMask.slice(), width: maskWidth, height: maskHeight}
+          : null;
         payload = await api("/roi/current");
+        if (leaving && leaving.roi !== payload.roi_idx) previousRow = leaving;
         imageData = decodeRawImage(payload.roi_image);
         const sizeChanged = viewport.imageWidth !== imageData.width || viewport.imageHeight !== imageData.height;
         viewport.setImageData(imageData, {resetView: sizeChanged});
         decodeMask(payload.mask);
         clearLasso(true);
         renderSummary();
+        const border = payload?.tail_crop_border;
+        loadTailBorderReason(border?.pending_action?.action === "accept"
+          ? (border.pending_action.reason || "")
+          : (border?.accepted ? (border.acceptance.reason || "") : ""));
         scheduleDraw();
         updateNavButtons();
+        updateCopyPreviousButton();
         setStatus("Loaded.");
       } catch (error) {
         updateNavButtons();
@@ -331,6 +887,10 @@
       if (delta > 0 && total > 0 && position >= total - 1) {
         setStatus("Already at the last ROI.");
         updateNavButtons();
+        return;
+      }
+      if (!confirmDiscardUnsaved(delta < 0 ? "go to the previous ROI" : "go to the next ROI")) {
+        setStatus("Stayed on this ROI. Your unsaved changes are still here.");
         return;
       }
       setBusy(true, delta < 0 ? "Loading previous ROI..." : "Loading next ROI...");
@@ -357,6 +917,10 @@
         setStatus("Enter a non-negative integer ROI number.", true);
         return;
       }
+      if (!confirmDiscardUnsaved("go to ROI " + roiIdx)) {
+        setStatus("Stayed on this ROI. Your unsaved changes are still here.");
+        return;
+      }
       setBusy(true, "Loading ROI " + roiIdx + "...");
       try {
         await api("/nav", {
@@ -372,15 +936,22 @@
       }
     }
 
-    async function save(advance) {
+    async function save(advance, tailBorderAction=null) {
       if (busyAction) return;
       setBusy(true, advance ? "Checkpointing mask and advancing..." : "Checkpointing mask...");
       try {
+        endRotateSession();  // a rotation in progress is recorded with this save
         const result = await api("/save", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({mask: encodeMaskPayload(), advance, target_token: payload?.state?.target_token})
+          body: JSON.stringify({mask: encodeMaskPayload(), advance, target_token: payload?.state?.target_token,
+            ...(pendingEditOperations.length ? {edit_operations: pendingEditOperations} : {}),
+            ...(tailBorderAction ? {tail_crop_border_action: tailBorderAction} : {})})
         });
+        // What was just saved is this row's baseline; Save + Next hands it to
+        // the next row as the copy-previous source.
+        if (mask) loadedMask = mask.slice();
+        endMoveSession();
         await loadCurrent();
         setStatus("Checkpoint saved; area " + result.result.checkpoint_area_px + " px." + mutationStatusSuffix(result));
       } catch (error) {
@@ -390,41 +961,175 @@
       }
     }
 
+    const tailBorderPresetReason = "Only the tiny tail tip is clipped; visible tail is usable.";
+    const tailBorderNotesSeparator = " Notes: ";
+
+    function updateTailBorderReasonInput() {
+      const custom = document.getElementById("tail-border-preset")?.value === "custom";
+      const input = document.getElementById("tail-border-reason");
+      const label = document.getElementById("tail-border-reason-label");
+      if (label) label.textContent = custom ? "Custom reason (required)" : "Optional notes";
+      if (input) {
+        input.placeholder = custom ? "Why is the visible tail endpoint usable?" : "Optional details for this ROI";
+        input.maxLength = custom ? 240 : 240 - tailBorderPresetReason.length - tailBorderNotesSeparator.length;
+      }
+    }
+
+    function loadTailBorderReason(reason) {
+      const preset = document.getElementById("tail-border-preset");
+      const input = document.getElementById("tail-border-reason");
+      if (!preset || !input) return;
+      const prefix = tailBorderPresetReason + tailBorderNotesSeparator;
+      const isPreset = !reason || reason === tailBorderPresetReason || reason.startsWith(prefix);
+      preset.value = isPreset ? "slight-tip" : "custom";
+      input.value = isPreset ? (reason.startsWith(prefix) ? reason.slice(prefix.length) : "") : reason;
+      updateTailBorderReasonInput();
+    }
+
+    function saveTailBorder(action) {
+      if (!payload?.tail_crop_border) return;
+      const notes = String(document.getElementById("tail-border-reason")?.value || "").trim();
+      const custom = document.getElementById("tail-border-preset")?.value === "custom";
+      const reason = custom ? notes : tailBorderPresetReason + (notes ? tailBorderNotesSeparator + notes : "");
+      if (action === "accept" && (reason.length < 3 || reason.length > 240)) {
+        setStatus(custom ? "Enter a 3–240 character custom reason." : "Shorten the optional notes to fit the 240-character reason limit.", true);
+        return;
+      }
+      return save(false, {action, reason: action === "accept" ? reason : ""});
+    }
+
+    async function refreshTailStatus(generation, roiIdx) {
+      const result = await api("/roi/status");
+      if (!payload || busyAction || foregroundGeneration !== generation || Number(payload.roi_idx) !== Number(roiIdx) || Number(result.roi_idx) !== Number(roiIdx)) return;
+      payload.tail_crop_border = result.tail_crop_border;
+      renderTailBorderStatus();
+    }
+
     function newApplyId() {
       if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
       return "apply-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
     }
 
+    function scheduleEffectsPoll() {
+      const state = payload?.state || {};
+      const owed = Boolean(state.apply_effects_background) && Number(state.pending_apply_effect_count || 0) > 0;
+      if (!owed) {
+        if (effectsPollTimer !== null) { clearTimeout(effectsPollTimer); effectsPollTimer = null; }
+        return;
+      }
+      if (effectsPollTimer !== null) return;
+      effectsPollTimer = setTimeout(async () => {
+        effectsPollTimer = null;
+        const generation = foregroundGeneration;
+        try {
+          const result = await api("/state");
+          mergeApplyState(result.state, generation);
+        } catch (_error) {
+          // Keep polling; a transient state read failure is not an Apply failure.
+        }
+        scheduleEffectsPoll();
+      }, effectsPollMs);
+    }
+
+    function mergeApplyState(state, generation) {
+      if (!payload || !state || busyAction || foregroundGeneration !== generation) return;
+      // Apply runs in the background. Never replace current pixels, ROI, token,
+      // navigation or a newer foreground request's checkpoint state.
+      for (const key of ["edit_revision", "unapplied_session_edit_count", "has_unapplied_session_edits",
+        "pending_apply_effect_count", "resumable_apply_id", "qc_status", "qc_edit_revision",
+        "component_review_completion_guard", "component_review_completion_ready", "tail_refresh",
+        "apply_effects_background", "apply_effects_status"]) {
+        if (Object.prototype.hasOwnProperty.call(state, key)) payload.state[key] = state[key];
+      }
+      renderSummary();
+    }
+
     async function applySavedEdits() {
       if (busyAction || applyInFlight) return;
       applyInFlight = true;
-      setStatus("Applying saved edits to Zarr in the background. You can continue editing other rows while this runs.");
+      const generation = foregroundGeneration;
+      // In background mode a queued Apply is finished by the server; only a
+      // failed (refused) one is retried by reusing its apply_id.
+      const backgroundOwned = Boolean(payload?.state?.apply_effects_background)
+        && payload?.state?.apply_effects_status?.state !== "failed";
+      const resumable = backgroundOwned ? null : payload?.state?.resumable_apply_id;
+      const applyId = String(resumable || uncertainApplyId || newApplyId());
+      setStatus("Applying saved edits and refreshing QC. You can continue editing other rows while this runs.");
       try {
         const result = await api("/apply", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({apply_id: newApplyId(), target_token: payload?.state?.target_token})
+          body: JSON.stringify({apply_id: applyId, target_token: payload?.state?.target_token})
         });
-        await loadCurrent();
+        uncertainApplyId = null;
+        tailRefreshResult = result.result;
+        mergeApplyState(result.state, generation);
+        try { await refreshTailStatus(generation, payload?.roi_idx); } catch (_error) {
+          if (payload?.tail_crop_border && foregroundGeneration === generation) {
+            payload.tail_crop_border.status_unavailable = true;
+            renderTailBorderStatus();
+          }
+        }
+        renderSummary();
         const applied = result.result.applied_checkpoint_count || 0;
         const stale = result.result.stale_checkpoint_count || 0;
         const staleRows = Array.isArray(result.result.stale_rows) ? result.result.stale_rows : [];
         const before = result.result.edit_revision_before;
         const after = result.result.edit_revision_after;
         const remaining = Number(payload?.state?.unapplied_session_edit_count || 0);
-        const nextStep = remaining > 0
+        const pendingEffects = Number(payload?.state?.pending_apply_effect_count || 0);
+        const qcComplete = payload?.state?.qc_status === "complete" || result.result.qc_status === "complete";
+        const nextStep = result.result.effects === "queued"
+          ? " QC and tail versions are updating in the background; you can keep working."
+          : pendingEffects > 0
+          ? " Follow-up checks are pending; use Apply again to finish them."
+          : remaining > 0
           ? " " + remaining + " saved edit(s) still need applying."
-          : " Saved edits are applied to Zarr. You can now set review status or complete the task.";
+          : qcComplete
+          ? " Saved edits and QC are complete. You can now set review status or complete the task."
+          : " No saved edits were applied.";
         const stalePreview = staleRows.slice(0, 12).join(", ");
         const staleSuffix = stale > 0
           ? " Skipped " + stale + " stale saved edit(s)" + (stalePreview ? " at ROI " + stalePreview : "") + "; revisit and save those ROI(s) again."
           : "";
         setStatus("Applied " + applied + " saved edit(s) to Zarr; revision " + before + " -> " + after + "." + staleSuffix + nextStep + mutationStatusSuffix(result));
       } catch (error) {
-        showOperatorSupport(error, "session_request_failed");
+        uncertainApplyId = applyId;
+        if (error?.operatorSupport?.error === "subject_mask_apply_effects_pending") {
+          mergeApplyState(error.apiData?.state, generation);
+          try { await refreshTailStatus(generation, payload?.roi_idx); } catch (_statusError) {
+            if (payload?.tail_crop_border && foregroundGeneration === generation) {
+              payload.tail_crop_border.status_unavailable = true;
+              renderTailBorderStatus();
+            }
+          }
+          setStatus("Mask pixels were applied; follow-up checks are pending. " + error.message + " Use Apply again to retry the same saved operation.", true);
+        } else if (["previous_update_still_running", "previous_update_failed"].includes(error?.operatorSupport?.error)) {
+          uncertainApplyId = null;  // nothing was claimed; the saved edits are kept
+          mergeApplyState(error.apiData?.state, generation);
+          setStatus(error.message + " Your saved edits are kept; press Apply again later.", true);
+        } else {
+          showOperatorSupport(error, "session_request_failed");
+        }
       } finally {
         applyInFlight = false;
       }
+    }
+
+    // While a background update is owed only needs_review can be recorded;
+    // approval and rejection wait for the update, so disable them visibly.
+    function updateReviewControls(updating) {
+      const select = document.getElementById("review-state");
+      if (!select) return;
+      for (const option of Array.from(select.options || [])) {
+        const waits = updating && option.value !== "needs_review";
+        option.disabled = waits;
+        option.textContent = option.value + (waits ? " (after update)" : "");
+      }
+      if (updating && select.selectedOptions?.[0]?.disabled) select.value = "needs_review";
+      select.title = updating
+        ? "A background QC/tail update is running. Approval and rejection are available when it finishes."
+        : "";
     }
 
     async function setReviewStatus() {
@@ -432,13 +1137,20 @@
       setBusy(true, "Setting component review status...");
       try {
         const reviewState = document.getElementById("review-state").value;
+        if (reviewState === currentReviewState()) {
+          setStatus("Review state is already " + reviewState + ".");
+          return;
+        }
         const result = await api("/review-status", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({state: reviewState, target_token: payload?.state?.target_token})
         });
+        reviewSelectTouched = false;
         await loadCurrent();
-        setStatus("Component review state set to " + reviewState + "." + mutationStatusSuffix(result));
+        setStatus(result?.deferred
+          ? "Review state " + reviewState + " recorded; it is written once the background update finishes. You can complete the task now."
+          : "Component review state set to " + reviewState + "." + mutationStatusSuffix(result));
       } catch (error) {
         showOperatorSupport(error, "session_request_failed");
       } finally {
@@ -463,14 +1175,24 @@
     }
 
     function setTool(nextTool) {
+      if (nextTool !== "move") endMoveSession();
+      if (nextTool !== "rotate") endRotateSession();
       tool = nextTool;
+      if ((tool === "move" || tool === "rotate") && lassoMode) setLassoMode(false);
       document.getElementById("paint-button").classList.toggle("active", tool === "paint");
       document.getElementById("erase-button").classList.toggle("active", tool === "erase");
+      document.getElementById("fill-holes-button")?.classList.toggle("active", tool === "fill");
+      document.getElementById("move-button")?.classList.toggle("active", tool === "move");
+      document.getElementById("rotate-button")?.classList.toggle("active", tool === "rotate");
+      canvas.style.cursor = tool === "move" || tool === "rotate" ? "grab" : "none";
+      if (tool === "fill") setStatus("Fill holes: click a mask piece to fill the holes inside it.");
+      if (tool === "move") setStatus("Move: drag the mask, or use the arrow keys (Shift for 10 px). One Undo reverts the whole move.");
+      if (tool === "rotate") setStatus("Rotate: drag around the mask, or use Left/Right (Shift for 5°). Smoothed, about the mask centre; one Undo reverts the whole rotation.");
       scheduleDraw();
     }
 
     function toggleBrushMode() {
-      setTool(tool === "paint" ? "erase" : "paint");
+      setTool(tool === "erase" ? "paint" : "erase");
       setStatus("Brush mode: " + tool + ".");
     }
 
@@ -629,6 +1351,28 @@
         scheduleDraw();
         return;
       }
+      if (tool === "fill") {
+        fillHolesAt(event);
+        return;
+      }
+      if (tool === "rotate") {
+        if (!mask || busyAction) return;
+        if (!rotateSession && !beginRotateSession()) return;
+        rotateDragging = true;
+        rotateSession.dragAngle = pointerAngle(cursorMaskPoint);
+        rotateSession.dragBase = rotateSession.angle;
+        canvas.style.cursor = "grabbing";
+        return;
+      }
+      if (tool === "move") {
+        if (!mask || busyAction) return;
+        beginMoveSession();
+        moveDragging = true;
+        moveSession.dragStart = cursorMaskPoint;
+        moveSession.dragBase = [moveSession.dx, moveSession.dy];
+        canvas.style.cursor = "grabbing";
+        return;
+      }
       drawing = true;
       paintAt(event);
     }
@@ -645,8 +1389,34 @@
         scheduleDraw();
         return;
       }
+      if (rotateDragging && rotateSession && rotateSession.dragAngle !== null) {
+        event.preventDefault();
+        let delta = pointerAngle(cursorMaskPoint) - rotateSession.dragAngle;
+        if (delta > 180) delta -= 360;
+        if (delta < -180) delta += 360;
+        setRotation(rotateSession.dragBase + delta);
+        return;
+      }
+      if (moveDragging && moveSession && moveSession.dragStart) {
+        event.preventDefault();
+        const [bx, by] = moveSession.dragBase;
+        const [sx, sy] = moveSession.dragStart;
+        setMoveOffset(bx + cursorMaskPoint[0] - sx, by + cursorMaskPoint[1] - sy);
+        return;
+      }
       if (drawing) paintAt(event);
       else scheduleDraw();
+    }
+
+    function endCanvasEdit() {
+      drawing = false;
+      lassoDrawing = false;
+      if (moveDragging || rotateDragging) {
+        moveDragging = false;
+        rotateDragging = false;
+        if (tool === "move" || tool === "rotate") canvas.style.cursor = "grab";
+      }
+      viewport.endPan();
     }
 
     canvas.addEventListener("mousedown", beginCanvasEdit);
@@ -654,9 +1424,14 @@
     canvas.addEventListener("mouseleave", () => { cursorMaskPoint = null; lassoCursor = null; scheduleDraw(); });
     canvas.addEventListener("touchstart", beginCanvasEdit, {passive: false});
     canvas.addEventListener("touchmove", moveCanvasEdit, {passive: false});
-    window.addEventListener("mouseup", () => { drawing = false; lassoDrawing = false; viewport.endPan(); });
-    window.addEventListener("touchend", () => { drawing = false; lassoDrawing = false; viewport.endPan(); });
+    window.addEventListener("mouseup", endCanvasEdit);
+    window.addEventListener("touchend", endCanvasEdit);
     canvas.addEventListener("wheel", viewport.handleWheel, {passive: false});
+    window.addEventListener("beforeunload", (event) => {
+      if (!hasUnsavedEdits()) return;
+      event.preventDefault();
+      event.returnValue = "";
+    });
     window.addEventListener("keydown", (event) => {
       if (event.key === "Shift" && cursorMaskPoint) {
         cursorShiftInvert = true;
@@ -672,10 +1447,37 @@
     window.addEventListener("keydown", (event) => {
       const targetTag = event.target?.tagName?.toLowerCase();
       if (targetTag === "input" || targetTag === "textarea" || targetTag === "select") return;
+      // Browser shortcuts (Ctrl/Cmd/Alt + key) are never editor hotkeys.
+      if (event.ctrlKey || event.metaKey || event.altKey) {
+        // The one exception: Ctrl/Cmd+Z undoes the last fill or stray removal.
+        if ((event.ctrlKey || event.metaKey) && (event.key === "z" || event.key === "Z")) {
+          event.preventDefault();
+          undoBulkEdit();
+        }
+        return;
+      }
       if (event.key === "n") { event.preventDefault(); nav(1); return; }
       if (event.key === "p") { event.preventDefault(); nav(-1); return; }
       if (event.key === "s") { event.preventDefault(); save(false); return; }
       if (event.key === "S") { event.preventDefault(); save(true); return; }
+      if (event.key === "h" || event.key === "H") { event.preventDefault(); setTool("fill"); return; }
+      if (event.key === "r" || event.key === "R") { event.preventDefault(); removeStrayPiecesAction(); return; }
+      if (event.key === "c" || event.key === "C") { event.preventDefault(); copyPreviousMask(); return; }
+      if (event.key === "m" || event.key === "M") { event.preventDefault(); setTool("move"); return; }
+      if (event.key === "t" || event.key === "T") { event.preventDefault(); setTool("rotate"); return; }
+      if (tool === "rotate" && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+        event.preventDefault();
+        const step = event.shiftKey ? 5 : 1;
+        nudgeRotation(event.key === "ArrowRight" ? step : -step);
+        return;
+      }
+      if (tool === "move" && event.key.startsWith("Arrow")) {
+        event.preventDefault();
+        const step = event.shiftKey ? 10 : 1;
+        const delta = {ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step]}[event.key];
+        if (delta) nudgeMask(delta[0], delta[1]);
+        return;
+      }
       if (event.key === "b" || event.key === "B") { event.preventDefault(); setTool("paint"); return; }
       if (event.key === "x" || event.key === "X") { event.preventDefault(); toggleBrushMode(); return; }
       if (event.key === "[") { event.preventDefault(); setBrushSize(brushSize - 1); return; }
@@ -698,4 +1500,3 @@
       }
     });
     loadCurrent();
-  

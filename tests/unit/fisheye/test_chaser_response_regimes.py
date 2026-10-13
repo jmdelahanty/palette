@@ -112,11 +112,18 @@ def _verified_track_reader(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_verified_track_reader(monkeypatch)
 
 
-def _set_protocol(zarr_path: Path, *, chaser_radius_mm: float = 2.0) -> None:
+# A leading non-chaser step, as in goodbatbadbat (SOLID_BLACK before CHASER).
+SOLID_BLACK_STEP = {"parameters": {"stimulus_mode": "SOLID_BLACK"}}
+
+
+def _set_protocol(
+    zarr_path: Path, *, chaser_radius_mm: float = 2.0, leading_steps: tuple = ()
+) -> None:
     root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
     root["analysis/stimulus_runs/stimulus_1"].attrs["protocol_json"] = json.dumps(
         {
             "steps": [
+                *leading_steps,
                 {
                     "parameters": {
                         "position_transition_duration_s": 0.0,
@@ -358,6 +365,20 @@ def test_distance_floor_at_chaser_radius_is_flagged(tmp_path: Path) -> None:
 
     assert float(r.chaser_radius_mm[0]) == pytest.approx(2.0)
     assert float(r.min_distance_mm[0, 0]) == pytest.approx(2.0, abs=0.05)
+    assert bool(r.distance_floor_is_clamp[0, 0])
+    assert any(w.startswith("distance_floor_at_chaser_radius") for w in r.qc_warnings)
+
+
+def test_chaser_radius_comes_from_the_chaser_step_not_step_zero(tmp_path: Path) -> None:
+    n = 200
+    radii = 2.0 + np.abs(np.sin(np.linspace(0, 6.0, n))) * 8.0
+    fish = np.stack([CX + radii, np.full(n, CY)], axis=1)
+    chaser = np.tile(np.asarray([CX, CY]), (n, 1))
+    z = _build(tmp_path, fish, chaser, name="black_first.zarr", chaser_radius_mm=2.0)
+    _set_protocol(z, chaser_radius_mm=2.0, leading_steps=(SOLID_BLACK_STEP,))
+    r = build_chaser_response_regimes_result(z, chaser_distance_run="chaser_distance_1", min_bin_frames=1)
+
+    assert float(r.chaser_radius_mm[0]) == pytest.approx(2.0)
     assert bool(r.distance_floor_is_clamp[0, 0])
     assert any(w.startswith("distance_floor_at_chaser_radius") for w in r.qc_warnings)
 

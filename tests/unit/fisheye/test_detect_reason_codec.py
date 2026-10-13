@@ -5,12 +5,39 @@ import zarr
 from zarr.core.dtype import VariableLengthUTF8
 
 from fisheye.shared.detect_reason_codec import (
+    _stamp_reason_contract,
     decode_reason_bytes,
     open_mutable_reason_column,
     read_reason_labels,
     update_reason_rows,
     write_reason_columns,
 )
+
+
+def test_reason_contract_stamp_is_idempotent_and_repairs_changed_fields(tmp_path, monkeypatch) -> None:
+    group = zarr.open_group(store=tmp_path / "stamp.zarr", mode="w")
+    attrs_type = type(group.attrs)
+    original_update = attrs_type.update
+    calls = []
+
+    def counted_update(attrs, values):
+        calls.append(dict(values))
+        return original_update(attrs, values)
+
+    monkeypatch.setattr(attrs_type, "update", counted_update)
+    _stamp_reason_contract(group, 64)
+    assert len(calls) == 1
+    _stamp_reason_contract(group, 64)
+    assert len(calls) == 1
+    group.attrs["reason_bytes_width"] = 32
+    _stamp_reason_contract(group, 128)
+    assert calls[-1] == {"reason_bytes_width": 128}
+    group.attrs.update({"reason_bytes_width": 128.0, "reason_bytes_null_terminated": 1, "unrelated": "keep"})
+    _stamp_reason_contract(group, 128)
+    assert calls[-1] == {"reason_bytes_width": 128, "reason_bytes_null_terminated": True}
+    assert type(group.attrs["reason_bytes_width"]) is int
+    assert type(group.attrs["reason_bytes_null_terminated"]) is bool
+    assert group.attrs["unrelated"] == "keep"
 
 
 def _legacy_reason(group: zarr.Group, labels: list[str]) -> None:

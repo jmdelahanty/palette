@@ -19,6 +19,9 @@ from fisheye.shared.refined_detect_curation import (
 )
 from fisheye.shared.refined_detect_resolution import resolve_detection_read_source
 from fisheye.shared.experiment_setup import subdish_required
+from fisheye.shared.zarr.canonical_detection_activation import (
+    canonical_detection_lineage_equivalent_runs,
+)
 from fisheye.shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
@@ -1077,10 +1080,19 @@ def _registry_step_rows_for_zarr(
     wanted_recording_id = _normalize_attr(recording_id)
     if wanted_recording_id is None:
         return normalized_rows
+    # The raw H5 carries the short acquisition id (``<ts>_arena_N``) while the
+    # registry keys per-recording rows by the recording directory name
+    # (``<ts>_arena_N_<Protocol>``). Accept both for a per-recording archive
+    # (``<recording>/zarr/<name>.zarr``); shared archives still match exactly.
+    accepted = {wanted_recording_id}
+    if zarr_path.parent.name == "zarr":
+        directory_id = _normalize_attr(zarr_path.parent.parent.name)
+        if directory_id is not None:
+            accepted.add(directory_id)
     return [
         row
         for row in normalized_rows
-        if _normalize_attr(row.get("recording_id")) == wanted_recording_id
+        if _normalize_attr(row.get("recording_id")) in accepted
     ]
 
 
@@ -2274,6 +2286,17 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
             detect_method = _extract_detect_method(detect_group)
             detect_coverage, detect_coverage_basis = _extract_detect_coverage(detect_group, root)
             quality_info = _extract_detect_quality(detect_group)
+            if not quality_info.get("present"):
+                # Nested reports of the legacy source of an activated canonical
+                # successor (validated sealed manifest) still describe it.
+                for equivalent in sorted(
+                    canonical_detection_lineage_equivalent_runs(root, detect_candidate)
+                    - {detect_candidate}
+                ):
+                    equivalent_info = _extract_detect_quality(detect_parent[equivalent])
+                    if equivalent_info.get("present"):
+                        quality_info = equivalent_info
+                        break
             detect_quality_present = bool(quality_info["present"])
             detect_quality_run = _normalize_attr(quality_info["run"])
             detect_quality_grade = _normalize_attr(quality_info["grade"])

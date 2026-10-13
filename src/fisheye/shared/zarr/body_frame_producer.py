@@ -26,6 +26,7 @@ from fisheye.shared.pose_schema import (
     resolve_keypoint_labels_from_attrs,
     resolve_required_keypoint_indices,
 )
+from fisheye.shared.heading_convention import heading_degrees, left_axis
 
 
 BODY_FRAME_RECIPE_SCHEMA_ID = "palette.body_frame.heading_recipe"
@@ -318,10 +319,11 @@ def derive_body_frame_geometry(
         ).astype(np.float32)
         # Camera y increases down. This fixed clockwise rotation is the only
         # v1 lateral-axis construction and always has determinant -1.
-        left[axis_valid, 0] = forward[axis_valid, 1]
-        left[axis_valid, 1] = -forward[axis_valid, 0]
-        heading[axis_valid] = np.rad2deg(
-            np.arctan2(-forward[axis_valid, 1], forward[axis_valid, 0])
+        left[axis_valid, 0], left[axis_valid, 1] = left_axis(
+            forward[axis_valid, 0], forward[axis_valid, 1], dtype=np.float32
+        )
+        heading[axis_valid] = heading_degrees(
+            forward[axis_valid, 0], forward[axis_valid, 1], dtype=np.float32
         ).astype(np.float32)
     return {
         "origin_xy": origin,

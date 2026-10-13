@@ -1,0 +1,22 @@
+/* Admin inspect page; loads after palette.css. */
+.inspect { padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }
+.inspect-picker { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--ink-2); max-width: 900px; }
+.inspect-picker select { font: inherit; font-size: 14px; height: 38px; padding: 0 10px; border-radius: var(--r-control); border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
+.inspect-body { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 16px; min-height: 70vh; }
+.inspect-rows { display: flex; flex-direction: column; min-height: 0; max-height: 80vh; }
+.inspect-counts { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px; border-bottom: 1px solid var(--line-soft); }
+.inspect-counts [aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: #ffffff; }
+.inspect-rows ul { list-style: none; margin: 0; padding: 6px; overflow-y: auto; }
+.row-item { width: 100%; display: flex; justify-content: space-between; gap: 8px; padding: 6px 10px; border: 0; border-radius: var(--r-control); background: transparent; font: inherit; font-size: 13px; color: var(--ink); cursor: pointer; text-align: left; }
+.row-item:hover { background: var(--ground); }
+.row-item[aria-current="true"] { background: #e1f1ec; box-shadow: inset 3px 0 0 var(--accent); }
+.row-item.status-saved span:last-child { color: var(--pending); font-weight: 600; }
+.row-item.status-applied span:last-child { color: var(--ok); }
+.row-item.status-untouched span:last-child { color: var(--ink-2); }
+.inspect-view { display: flex; flex-direction: column; gap: 10px; padding: 14px; }
+.inspect-head { display: flex; align-items: flex-start; gap: 12px; }
+.inspect-stage { flex-grow: 1; min-height: 480px; display: flex; align-items: center; justify-content: center; background: #0f1411; border-radius: 8px; }
+.inspect-stage canvas { display: block; image-rendering: pixelated; }
+.segmented { display: flex; gap: 6px; }
+.segmented [aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: #ffffff; }
+@media (max-width: 900px) { .inspect-body { grid-template-columns: 1fr; } }

@@ -28,6 +28,9 @@ from ..detection.detect_keypoints_traditional import detect_keypoints as detect_
 from ..tracking.crop import crop_detections, infer_detection_source_type
 from ..tracking.arena_assignment import assign_arenas_spatial
 from ..refinement.refine_detect import create_refined_run
+from ..shared.zarr.canonical_detection_activation import (
+    canonical_detection_lineage_equivalent_runs,
+)
 from ..refinement.detect_quality import analyze_detect_quality, save_quality_report
 from ..refinement.refine_keypoints import (
     create_refined_keypoint_run,
@@ -1133,13 +1136,20 @@ class Pipeline:
                 detect_latest = _latest_complete(root['detect_runs'])
                 if detect_latest is None:
                     return False
-                detect_run = root['detect_runs'].get(detect_latest)
-                if detect_run is None:
+                if root['detect_runs'].get(detect_latest) is None:
                     return False
-                qr = detect_run.get('quality_reports')
-                if qr is None:
-                    return False
-                return _latest_complete(qr) is not None
+                # Nested reports of the legacy source of an activated
+                # canonical successor (validated sealed manifest) count.
+                for name in sorted(
+                    canonical_detection_lineage_equivalent_runs(
+                        self.config.zarr_path, detect_latest
+                    )
+                ):
+                    detect_run = root['detect_runs'].get(name)
+                    qr = detect_run.get('quality_reports') if detect_run is not None else None
+                    if qr is not None and _latest_complete(qr) is not None:
+                        return True
+                return False
 
             elif stage == 'crop':
                 if 'crop_runs' not in root:

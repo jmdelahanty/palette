@@ -11,10 +11,11 @@
         .replaceAll("\"", "&quot;");
       const personalQueueHref = esc((typeof sessionReturnHref === "function") ? sessionReturnHref("dataset-queue", "/my-datasets") : "/my-datasets");
       const personalWorkHref = esc((typeof sessionReturnHref === "function") ? sessionReturnHref("work-dashboard", "/my-work") : "/my-work");
-      target.className = "operator-support active";
+      // A saved change's audit reference is quiet; red is reserved for errors.
+      target.className = "operator-support active reference";
       target.innerHTML =
         "<details>" +
-        "<summary>Operator support reference</summary>" +
+        "<summary>Saved · audit reference</summary>" +
         "<p>This operator support reference is only needed if the operator asks for audit details; give audit event id and server target from the block below. Return to <a href=\"" + personalQueueHref + "\">your personalized dataset queue</a> or <a href=\"" + personalWorkHref + "\">your personalized work dashboard</a> before reopening stale or superseded work.</p>" +
         "<pre>" + esc(text) + "</pre>" +
         "<button type=\"button\" onclick=\"copySessionSupport(this)\">Copy support details</button>" +
@@ -108,7 +109,7 @@
       if (!eventId) return "";
       setMutationSupportReference(result, mutation, eventId, eventType, target);
       renderMutationSupportReferenceSoon(latestMutationSupportReference);
-      return " Operator support reference available below.";
+      return "";
     }
     function postCompletionQueueUrl(result) {
       const queue = (result && result.post_completion_queue) || {};
@@ -118,7 +119,7 @@
         queue.personalized_labeler_entry_url ||
         queue.preferred_labeler_entry_url ||
         queue.expected_user_dataset_queue_url ||
-        "/my-datasets"
+        "/queue"
       );
     }
     function postCompletionStatusText(result) {
@@ -126,10 +127,10 @@
       const completion = queue.labeler_work_completion || result.labeler_work_completion || {};
       const status = String(completion.status || "");
       if (status === "complete") return "Task marked complete. All assigned labeling work is complete.";
-      if (status === "waiting") return "Task marked complete. Returning to your datasets waiting queue.";
+      if (status === "waiting") return "Task marked complete. Returning to your queue.";
       if (status === "blocked") return "Task marked complete. Returning to your queue; operator action is required before more labeling.";
       if (status === "unassigned") return "Task marked complete. No active assignments remain.";
-      return "Task marked complete. Returning to your datasets waiting queue.";
+      return "Task marked complete. Returning to your queue.";
     }
     function handleTaskCompletionSuccess(result) {
       setStatus(postCompletionStatusText(result));

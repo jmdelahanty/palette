@@ -1,5 +1,7 @@
 # Unified experimental H5 import integration
 
+> **Superseded 2026-09-24:** the byte-copy native storage described here was replaced by a sealed reference to the raw H5 (see `docs/design/2026-09-24-unified-h5-reference-storage/`). Admission is unchanged.
+
 Status authority: `INGEST-001` in the
 [authority consolidation queue](authority_consolidation_work_queue_2026-08-25.md).
 This is implementation/handoff evidence, not another work queue.

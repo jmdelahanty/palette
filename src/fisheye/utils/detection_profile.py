@@ -14,6 +14,7 @@ from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.refined_detect_review import DEFAULT_DETECT_GROUP_PREFERENCE, resolve_refined_detect_group
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
 from fisheye.shared.run_provenance import build_writer_run_provenance
+from fisheye.shared.subject_metadata import read_profile_composition
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 
 
@@ -25,16 +26,6 @@ SOURCE_CONTENT_FINGERPRINT_CANONICALIZATION = "sha256_detection_source_arrays_v1
 
 GEOMETRY_PERCENTILES = (1, 5, 10, 25, 50, 75, 90, 95, 99)
 
-COMPOSITION_FIELDS = (
-    "rig_id",
-    "camera_id",
-    "arena_id",
-    "dish_design",
-    "canvas_name",
-    "protocol_name",
-    "genotype",
-    "dpf_at_acquisition",
-)
 
 DEFAULT_PROFILE_CONFIG: dict[str, Any] = {
     "edge_margin_norm": 0.05,
@@ -324,64 +315,6 @@ def _array_content_digest_payload(group: zarr.Group) -> tuple[str, list[str]]:
         hasher.update(payload)
         hasher.update(b"\x00")
     return hasher.hexdigest(), included
-
-
-def _extract_subject_snapshot(root: zarr.Group) -> dict[str, Any]:
-    analysis_meta = root.get("analysis_metadata")
-    if analysis_meta is None:
-        return {}
-    for key in ("subject_metadata", "zebrobot_snapshot"):
-        payload = _coerce_mapping(analysis_meta.attrs.get(key))
-        if payload:
-            return payload
-    return {}
-
-
-def _extract_composition(root: zarr.Group) -> dict[str, Any]:
-    session_context: dict[str, Any] = {}
-    analysis_meta = root.get("analysis_metadata")
-    if analysis_meta is not None:
-        payload = _coerce_mapping(analysis_meta.attrs.get("session_context"))
-        if payload:
-            session_context = payload
-    subject_snapshot = _extract_subject_snapshot(root)
-    dish_map = _coerce_mapping(subject_snapshot.get("dish")) if subject_snapshot else None
-    dish_map = dish_map or {}
-
-    protocol_from_context = _normalize_text(
-        session_context.get("protocol_name") or session_context.get("protocol_name_from_definition")
-    )
-    genotype_from_snapshot = _normalize_text(
-        dish_map.get("genotype") or subject_snapshot.get("genotype")
-    )
-    dpf_from_snapshot = _as_int(
-        subject_snapshot.get("dpf_at_acquisition")
-        or subject_snapshot.get("days_post_fertilization")
-    )
-
-    composition: dict[str, Any] = {}
-    for key in COMPOSITION_FIELDS:
-        if key == "protocol_name":
-            value = _normalize_text(root.attrs.get("protocol_name")) or protocol_from_context
-        elif key == "genotype":
-            value = (
-                _normalize_text(root.attrs.get("genotype"))
-                or _normalize_text(session_context.get("genotype"))
-                or genotype_from_snapshot
-            )
-        elif key == "dpf_at_acquisition":
-            value = _as_int(root.attrs.get("dpf_at_acquisition"))
-            if value is None:
-                value = _as_int(session_context.get("dpf_at_acquisition"))
-            if value is None:
-                value = _as_int(session_context.get("days_post_fertilization"))
-            if value is None:
-                value = dpf_from_snapshot
-        else:
-            value = _normalize_text(root.attrs.get(key)) or _normalize_text(session_context.get(key))
-        if value is not None:
-            composition[key] = value
-    return composition
 
 
 def _resolve_review_fields(refined_group: Optional[zarr.Group]) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
@@ -815,7 +748,7 @@ def build_detection_profile_summary(
         ),
     }
 
-    composition = _extract_composition(root)
+    composition = read_profile_composition(root)
     if composition:
         summary["composition"] = composition
 

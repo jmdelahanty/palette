@@ -15,6 +15,9 @@ REGISTRY_PATH="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/regist
 LOG_PATH="${PALETTE_LABELING_LOG:-/tmp/palette-labeling-web-${PORT}.log}"
 PID_PATH="${PALETTE_LABELING_PID:-/tmp/palette-labeling-web-${PORT}.pid}"
 START_WAIT_SECONDS="${PALETTE_LABELING_START_WAIT_SECONDS:-2}"
+# 1: Apply returns after the pixel commit; QC and tail updates run in the
+# server's background worker (serve --background-apply-effects).
+BACKGROUND_APPLY_EFFECTS="${PALETTE_LABELING_BACKGROUND_APPLY_EFFECTS:-0}"
 
 case "${AUTH_MODE}" in
   fixed)
@@ -26,6 +29,15 @@ case "${AUTH_MODE}" in
   *)
     echo "Unsupported PALETTE_LABELING_AUTH_MODE=${AUTH_MODE}" >&2
     echo "Use PALETTE_LABELING_AUTH_MODE=fixed or PALETTE_LABELING_AUTH_MODE=header." >&2
+    exit 2
+    ;;
+esac
+
+case "${BACKGROUND_APPLY_EFFECTS}" in
+  1) EFFECTS_ARGS=(--background-apply-effects) ;;
+  0) EFFECTS_ARGS=() ;;
+  *)
+    echo "Unsupported PALETTE_LABELING_BACKGROUND_APPLY_EFFECTS=${BACKGROUND_APPLY_EFFECTS} (use 0 or 1)." >&2
     exit 2
     ;;
 esac
@@ -54,6 +66,7 @@ setsid env PALETTE_REGISTRY_PATH="${REGISTRY_PATH}" \
     --port "${PORT}" \
     "${AUTH_ARGS[@]}" \
     --admin-user "${ADMIN_USER}" \
+    ${EFFECTS_ARGS[@]+"${EFFECTS_ARGS[@]}"} \
   >"${LOG_PATH}" 2>&1 < /dev/null &
 
 server_pid="$!"
@@ -74,6 +87,7 @@ if kill -0 "${server_pid}" 2>/dev/null; then
     echo "auth_header=${AUTH_HEADER}"
   fi
   echo "admin_user=${ADMIN_USER}"
+  echo "background_apply_effects=${BACKGROUND_APPLY_EFFECTS}"
   echo "log=${LOG_PATH}"
   echo "pid_file=${PID_PATH}"
   echo "admin_url=http://${HOST}:${PORT}/admin/datasets"

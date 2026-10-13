@@ -1455,6 +1455,104 @@ def test_apply_refined_subject_roi_rows_updates_only_requested_component() -> No
     assert swim_provenance.attrs["last_update_mode"] == "create"
 
 
+def test_authority_only_apply_batches_chunk_writes_and_preserves_other_cells(monkeypatch) -> None:
+    root = _build_subject_review_root()
+    source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+    run = refined.group
+    before = np.asarray(run["masks_roi"][:], dtype=np.uint8).copy()
+    batch = before.copy()
+    batch[0, 0] = 0
+    batch[1, 0] = 0
+    batch[:, 0, 0, 0] = 1
+    batch[:, 1] = 1  # The unrequested component must retain its old pixels.
+    array_type = type(run["masks_roi"])
+    original_setitem = array_type.__setitem__
+    store_type = type(run.store)
+    original_store_set = store_type.set
+    writes: dict[str, int] = {}
+    physical_writes: dict[str, int] = {}
+
+    def counted_setitem(array, key, value):
+        path = str(array.path)
+        writes[path] = writes.get(path, 0) + 1
+        return original_setitem(array, key, value)
+
+    async def counted_store_set(store, key, value):
+        path = str(key)
+        if "/c/" in path:
+            physical_writes[path] = physical_writes.get(path, 0) + 1
+        return await original_store_set(store, key, value)
+
+    monkeypatch.setattr(array_type, "__setitem__", counted_setitem)
+    monkeypatch.setattr(store_type, "set", counted_store_set)
+    mod._apply_refined_subject_roi_rows(
+        source=source,
+        refined=refined,
+        roi_indices=[0, 1],
+        edited_masks_batch=batch,
+        component_names=("subject_body",),
+        derived_update_policy=mod.DERIVED_UPDATE_POLICY_AUTHORITY_ONLY,
+    )
+
+    saved = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    np.testing.assert_array_equal(saved[:, 0], batch[:, 0])
+    np.testing.assert_array_equal(saved[:, 1], before[:, 1])
+    component = run["components/subject_body"]
+    np.testing.assert_array_equal(component["row_revision"][:], [1, 1])
+    np.testing.assert_array_equal(run["edit_applied"][:, 0], [True, True])
+    assert writes[run["masks_roi"].path] == 1
+    assert writes[component["row_revision"].path] == 1
+    assert writes[component["row_update_reason_bytes"].path] == 1
+    mask_chunk_writes = {
+        key: count for key, count in physical_writes.items()
+        if key.startswith(run["masks_roi"].path + "/c/")
+    }
+    assert len(mask_chunk_writes) == 1
+    assert set(mask_chunk_writes.values()) == {1}
+
+
+def test_authority_only_apply_can_retry_after_partial_chunk_write(monkeypatch) -> None:
+    root = _build_subject_review_root()
+    source, refined = mod.prepare_refined_subject_run(
+        root, subject_run="subject_masks_001", refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+    run = refined.group
+    batch = np.asarray(run["masks_roi"][:], dtype=np.uint8).copy()
+    untouched_component = batch[:, 1].copy()
+    batch[:, 0] = 0
+    batch[:, 0, 0, 0] = 1
+    array_type = type(run["masks_roi"])
+    original_setitem = array_type.__setitem__
+    fail_once = {"active": True}
+
+    def interrupted_setitem(array, key, value):
+        if array.path == run["edit_applied"].path and fail_once["active"]:
+            fail_once["active"] = False
+            raise OSError("injected flag write failure")
+        return original_setitem(array, key, value)
+
+    monkeypatch.setattr(array_type, "__setitem__", interrupted_setitem)
+    kwargs = dict(
+        source=source, refined=refined, roi_indices=[0, 1], edited_masks_batch=batch,
+        component_names=("subject_body",),
+        derived_update_policy=mod.DERIVED_UPDATE_POLICY_AUTHORITY_ONLY,
+    )
+    with pytest.raises(OSError, match="injected flag write failure"):
+        mod._apply_refined_subject_roi_rows(**kwargs)
+    np.testing.assert_array_equal(run["masks_roi"][:, 0], batch[:, 0])
+    np.testing.assert_array_equal(run["edit_applied"][:, 0], [False, False])
+    mod._apply_refined_subject_roi_rows(**kwargs)
+    np.testing.assert_array_equal(run["masks_roi"][:, 1], untouched_component)
+    np.testing.assert_array_equal(run["edit_applied"][:, 0], [True, True])
+    np.testing.assert_array_equal(run["components/subject_body/row_revision"][:], [1, 1])
+
+
 @pytest.mark.parametrize("tamper", ("unstamped", "inclusive_values"))
 def test_partial_derived_refresh_rejects_noncanonical_bbox_before_write(tamper: str) -> None:
     root = _build_subject_review_root()

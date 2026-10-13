@@ -10,12 +10,20 @@ job, or uses the live registry/poller. Do not run pytest on login nodes or LSF.
 Prerequisites: an existing Palette `scripts/py` environment with the test
 dependencies, `/usr/bin/ffmpeg` with libx264, `/usr/bin/ffprobe`, and an explicitly
 supplied Citrus source directory. The four hashes in `generate_fixture.py`
-must match Citrus commit `e881f5258be83231b62a00a6f9c4e5fcd69cd548` and the
+must match Citrus commit `859a7972104a829e1cc603a614cd4cf79e5cda06` and the
 recorded transfer schema. A source snapshot is sufficient; no Citrus Git
 checkout or acquisition-agent connection is required. Do not replace the pins
 with whatever is currently installed just to obtain a pass.
 
 ## Run a fresh canary
+
+> **Legacy H5 refused (2026-10-07).** New transfer-v2 deliveries must carry a
+> sealed unified H5 or no H5 (intake single-writer decision 1). The
+> `--with-context` generator still writes a synthetic **legacy** H5 per camera
+> (with or without `--stimulus`), so Palette now refuses those fixtures while
+> planning organization, before any write. Until the generator emits a sealed
+> unified H5, the `--with-context` runs below end in that refusal rather than a
+> pass; a fixture without `--with-context` still exercises recording-only intake.
 
 Run from the desired Palette checkout, outside the Codex sandbox. The importer
 requires that checkout to be **clean** and verifies its exact full commit and
@@ -47,6 +55,17 @@ coverage and real import/registry gates. All synthetic acquisition originals
 remain untouched. Replay must run no importer and preserve recording and
 registry bytes. Both success and refusal reports are written in a separate
 fresh `/tmp/palette-parent-intake-e2e-*` directory; failures retain their inputs.
+
+`--layout {rolling,single}` selects the pinned Citrus fixture's transfer-v2
+parent layout (default `rolling`, unchanged). `--layout single` builds Orange's
+native `single_clip` manifest, which Citrus seals as `single_video`: one clip
+per camera, original root-level file paths, two frames with the same explicit
+blank crop row. Palette still stores it as a clip collection
+(`source_layout: rolling_clips`) and keeps the producer label in
+`acquisition_recording_layout`. The runner derives clip/frame expectations from
+the sealed snapshot and cross-checks them against the generator report, so it
+takes no layout option. Run the full-stimulus and recording-only checks for
+each layout on separate fresh fixtures.
 
 For the malformed-H5 control, generate a **separate fresh fixture** using
 `--with-context --stimulus missing-frame-metadata`, then invoke the runner with

@@ -1,0 +1,37 @@
+{
+  "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+  "contract": {
+    "acceptance_contract_sha256": "sha256:2588e4725804044b48c858e896968f723894527c6ab4aa87391e206b3660ac53",
+    "acceptance_id": "obsbindacc_2588e4725804044b48c858e896968f723894527c6ab4aa87391e206b3660ac53",
+    "citrus_experiment_id": "citexp_28181a9de59368f1f08a82d27096a6db66afb89dbc011d3d923970726ab485fc",
+    "citrus_session_uuid": "citsess_4f7734ce5a9efaf93e8c20668343339d6f178713035ce065311c71e5055b3cde",
+    "finalized_at_utc": "2026-09-27T16:17:17Z",
+    "h5_artifact": {
+      "relative_path": "citrus/citsess_4f7734ce5a9efaf93e8c20668343339d6f178713035ce065311c71e5055b3cde_synthetic_roundtrip_chaser.h5",
+      "sha256": "sha256:82b1eef11f825531f2de09829b3591fa381113dc88868a49c5ef4de9fc74ff2b",
+      "size_bytes": 1007646
+    },
+    "observation_context_id": "obsctx_4f7734ce5a9efaf93e8c20668343339d6f178713035ce065311c71e5055b3cde",
+    "protocol_semantic": {
+      "semantic_sha256": "sha256:fa66a2715b4b993d1cb14551c4aa0bad47f4d53b96badc5f7757837348070dfb",
+      "status": "available"
+    },
+    "request_contract_sha256": "sha256:131df9c3fa8d97295ad9485da82b34ade0a9884b344374af9b4a3a10dc67b2be",
+    "request_id": "obsbindreq_131df9c3fa8d97295ad9485da82b34ade0a9884b344374af9b4a3a10dc67b2be",
+    "runtime_geometry_contract_sha256": "sha256:cd7e2550162de71d4b257d3d50b7c9488ab3df3dca5a5b81119d0400c8ec0ad8",
+    "schema_id": "citrus.recording_observation_finalized_receipt",
+    "schema_version": 1,
+    "session_status": "COMPLETE",
+    "target": {
+      "arena_id": "arena_1",
+      "camera_id": "2010093",
+      "canvas_name": "synthetic-canvas",
+      "rig_id": "synthetic-rig",
+      "source_camera_stream_id": "2010093"
+    }
+  },
+  "contract_sha256": "sha256:d9a252c296be9c3c923375585b11bc4d70b4a6c1dcc4a7111dbbaa00a3b0362f",
+  "receipt_id": "obsbindfin_d9a252c296be9c3c923375585b11bc4d70b4a6c1dcc4a7111dbbaa00a3b0362f",
+  "schema_id": "citrus.recording_observation_finalized_receipt",
+  "schema_version": 1
+}

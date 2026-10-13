@@ -257,11 +257,24 @@ def publish_legacy_canonical_detection_shadow(
     profile: StorageProfile = DETECTION_PUBLISHED_ACCESS_AWARE_V1,
     coordinate_catalog: bool = False,
     preserve_source_instance_keys: bool = False,
+    manifest_selector_eligible: bool = False,
 ) -> CanonicalDetectionShadowPublication:
-    """Convert one complete legacy run into a validated canonical shadow."""
+    """Convert one complete legacy run into a validated canonical shadow.
+
+    ``manifest_selector_eligible`` only seals the manifest's publication
+    eligibility claim for a later explicit activation; the shadow run itself
+    always stays selector-ineligible and unselected.
+    """
 
     if type(coordinate_catalog) is not bool:
         raise TypeError("coordinate_catalog must be an exact bool.")
+    if type(manifest_selector_eligible) is not bool:
+        raise TypeError("manifest_selector_eligible must be an exact bool.")
+    if manifest_selector_eligible and not coordinate_catalog:
+        raise ValueError(
+            "A selector-eligible manifest requires the canonical-v3 coordinate "
+            "catalog."
+        )
     if type(preserve_source_instance_keys) is not bool:
         raise TypeError("preserve_source_instance_keys must be an exact bool.")
 
@@ -455,7 +468,7 @@ def publish_legacy_canonical_detection_shadow(
             source_evidence=source_evidence,
             direct_metadata_declarations=direct,
             consolidated_metadata_declarations=consolidated,
-            selector_eligible=False,
+            selector_eligible=manifest_selector_eligible,
             **manifest_kwargs,
         )
         run.attrs["run_manifest"] = manifest

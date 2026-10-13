@@ -22,9 +22,9 @@ from fisheye.shared.recording_transfer_snapshot import (
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures/recording_transfer_v2"
 GOLDENS = {
-    "whole": "8dfeac35339f39b031cb2b33b4358cba0435bcad2e6967322518755d24d5ae21",
-    "rolling": "5f25f35c56561e6d8ac5c00948948373d18f1d9eafedbfedc019f0c6a8e5a97f",
-    "failed_optional_proof": "51ab32e4d2f4be1ebf58703181a1c8bb1a6927e0b1db3f3a0d5546f06679795b",
+    "whole": "42f31170f90744e0969c43fa99b630832fe643077db771bcf11c0b49ad8c4bfc",
+    "rolling": "ad6f52b43b706f1316c450f6476ec0c1f3161df6e201df7abc42805627755cdf",
+    "failed_optional_proof": "5cc2beff1c5a289ce3d957a9c17775f1d73c87f86d291b830788f40623eef5db",
 }
 REVIEW_CASES = json.loads((FIXTURES / "review_cases.json").read_bytes())
 
@@ -81,12 +81,22 @@ def test_marker_refuses_non_rfc3339_datetime_spellings(
     marker = json.loads((root / MARKER_NAME).read_bytes())
     marker["delivery"]["created_utc"] = timestamp
     write_json(root / MARKER_NAME, marker)
-    with pytest.raises(TransferSnapshotError, match="RFC3339"):
+    with pytest.raises(TransferSnapshotError, match="marker violates the transfer-v2 envelope schema at delivery/created_utc: .* is not a .date-time."):
+        verify_transfer_snapshot(root)
+
+
+@pytest.mark.parametrize("timestamp", ["2026-10-06T21:04:05.123456+02:00", "2026-10-06T21:04:05-05:00"])
+def test_marker_refuses_non_utc_offsets(tmp_path: Path, timestamp: str) -> None:
+    root = copy_bundle(tmp_path)
+    marker = json.loads((root / MARKER_NAME).read_bytes())
+    marker["delivery"]["created_utc"] = timestamp
+    write_json(root / MARKER_NAME, marker)
+    with pytest.raises(TransferSnapshotError, match="delivery timestamp must be UTC"):
         verify_transfer_snapshot(root)
 
 
 @pytest.mark.parametrize(
-    "timestamp", ["2026-09-06T00:00:00.123456Z", "2026-09-06t00:00:00z"]
+    "timestamp", ["2026-09-06T00:00:00.123456Z", "2026-09-06t00:00:00z", "2026-10-06T21:04:05.123456+00:00"]
 )
 def test_marker_accepts_rfc3339_utc_spellings_without_rewriting(
     tmp_path: Path, timestamp: str
@@ -385,3 +395,15 @@ def test_inspection_cli_does_not_downgrade_failed_proof(
     captured = capsys.readouterr()
     assert not captured.out
     assert "frame_identity_proof" in json.loads(captured.err)["error"]
+
+
+@pytest.mark.parametrize("key", ["source_dir", "destination_dir"])
+@pytest.mark.parametrize("char", ["\x1f", "\x7f", "\x85", "\x9f"])
+def test_delivery_dirs_refuse_c0_c1_controls_like_the_sealer(tmp_path: Path, key: str, char: str) -> None:
+    # citrus-recording-transfer 1.0.1 refuses U+0000-U+001F and U+007F-U+009F here.
+    root = copy_bundle(tmp_path)
+    marker = json.loads((root / MARKER_NAME).read_bytes())
+    marker["delivery"][key] = f"/fixtures/bad{char}dir"
+    write_json(root / MARKER_NAME, marker)
+    with pytest.raises(TransferSnapshotError, match=f"delivery {key}"):
+        verify_transfer_snapshot(root)

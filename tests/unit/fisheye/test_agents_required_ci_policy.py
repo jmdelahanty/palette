@@ -47,3 +47,19 @@ def test_required_ci_policy_defines_fail_closed_same_tree_integration() -> None:
     assert "attested tested PR tree" in policy
     assert "active strict required-check ruleset has no bypass actors" in policy
     assert "requires a successful manual full CI run" in policy
+
+
+def test_required_ci_policy_tiers_preview_deployments_by_data_risk() -> None:
+    policy = _required_ci_policy()
+
+    assert "the user's live labeling server" in policy
+    assert "Tier 1, presentation-only" in policy
+    assert "only static assets or user-visible strings" in policy
+    assert "does not change which requests the browser sends, their payloads" in policy
+    assert "when a write-capable control is enabled" in policy
+    assert "self-checking cutover" in policy
+    assert "Tier 2, everything else" in policy
+    assert "any server-side code change other than a string literal" in policy
+    assert "A server rollback does not undo written data" in policy
+    assert "When unsure which tier applies, use Tier 2" in policy
+    assert "must state the tier and a one-line reason" in policy

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -105,4 +106,118 @@ def test_camera_evidence_must_agree(
     monkeypatch.setattr(migration, "probe_video_metadata", _probe)
 
     with pytest.raises(ValueError, match="Camera identity evidence conflicts"):
+        migration.plan_migration(zarr_path)
+
+
+def _legacy_archive_without_serials(
+    tmp_path: Path, *, root_camera: str | None, manifest_camera: str | None
+) -> Path:
+    """Mirror the GoodCopBadCop/RedScare layout: no camera_serials, no Cam token in id."""
+
+    recording_id = "2026-05-29T18-11-16Z_arena_1_GoodCopBadCop"
+    recording = tmp_path / recording_id
+    source = recording / "cams" / f"Cam2010093_{recording_id}.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"encoded video identity")
+    if manifest_camera is not None:
+        (recording / "recording_manifest.json").write_text(
+            json.dumps({"recording_id": recording_id, "camera_id": manifest_camera}),
+            encoding="utf-8",
+        )
+    zarr_path = recording / "zarr" / f"{recording_id}_analysis.zarr"
+    zarr_path.parent.mkdir()
+    root = zarr.open_group(str(zarr_path), mode="w")
+    attrs: dict[str, object] = {
+        "recording_id": recording_id,
+        "recording_path": str(recording),
+        "width": 4512,
+        "height": 4512,
+    }
+    if root_camera is not None:
+        attrs["camera_id"] = root_camera
+    root.attrs.update(attrs)
+    root.require_group("raw_video")
+    return zarr_path
+
+
+def test_camera_corroborated_without_camera_serials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _legacy_archive_without_serials(
+        tmp_path, root_camera="2010093", manifest_camera="2010093"
+    )
+    monkeypatch.setattr(migration, "probe_video_metadata", _probe)
+
+    plan, _ = migration.plan_migration(zarr_path)
+
+    assert plan.camera_id == "2010093"
+    assert plan.status == "would_migrate_and_seal"
+
+
+def test_manifest_camera_conflict_blocks_migration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _legacy_archive_without_serials(
+        tmp_path, root_camera="2010093", manifest_camera="2010094"
+    )
+    monkeypatch.setattr(migration, "probe_video_metadata", _probe)
+
+    with pytest.raises(ValueError, match="Camera identity evidence conflicts"):
+        migration.plan_migration(zarr_path)
+
+
+def test_filename_alone_is_not_enough_camera_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _legacy_archive_without_serials(
+        tmp_path, root_camera=None, manifest_camera=None
+    )
+    monkeypatch.setattr(migration, "probe_video_metadata", _probe)
+
+    with pytest.raises(ValueError, match="needs a recorded source"):
+        migration.plan_migration(zarr_path)
+
+
+def test_recorded_color_range_must_match_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _legacy_archive_without_serials(
+        tmp_path, root_camera="2010093", manifest_camera="2010093"
+    )
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    root.attrs.update({"video_color_range": "pc", "video_pix_fmt": "yuvj420p(pc)"})
+    monkeypatch.setattr(
+        migration,
+        "probe_video_metadata",
+        lambda source: {**_probe(source), "pix_fmt": "yuvj420p", "video_color_range": "tv"},
+    )
+
+    with pytest.raises(ValueError, match="video_color_range conflicts"):
+        migration.plan_migration(zarr_path)
+
+
+def test_imageio_range_suffix_does_not_count_as_pix_fmt_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _legacy_archive_without_serials(
+        tmp_path, root_camera="2010093", manifest_camera="2010093"
+    )
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    root.attrs.update({"video_color_range": "tv", "video_pix_fmt": "yuv420p(tv)"})
+    monkeypatch.setattr(
+        migration,
+        "probe_video_metadata",
+        lambda source: {**_probe(source), "pix_fmt": "yuv420p", "video_color_range": "tv"},
+    )
+
+    plan, _ = migration.plan_migration(zarr_path)
+    assert plan.status == "would_migrate_and_seal"
+
+    root.attrs["video_pix_fmt"] = "gray"
+    with pytest.raises(ValueError, match="video_pix_fmt conflicts"):
         migration.plan_migration(zarr_path)
