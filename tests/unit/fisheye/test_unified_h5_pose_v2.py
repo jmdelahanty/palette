@@ -123,3 +123,96 @@ def test_v1_tables_under_a_v2_contract_are_refused(tmp_path):
     with pytest.raises(UnifiedH5ContractError, match="pose_table_attributes_mismatch:objects"):
         _check(path)
 
+
+# Bound-token rule (agent-contracts citrus-pose-observation-v2 amendment
+# 2026-10-13, PR #99): on a bound v2 session every update carries the bound token.
+FIXTURE_ROOT = FIXTURES.parent
+BOUND_V2 = FIXTURE_ROOT / "citrus_unified_h5_frame_identity_v1" / "frame_identity_v1_pose_complete.h5"
+BOUND_V1 = FIXTURE_ROOT / "citrus_unified_h5_bounding_boxes_v2" / "bounding_boxes_v2_capacity_pose_on.h5"
+UPDATES = "/observations/pose/updates"
+FOREIGN = b"sha256:" + b"0" * 64
+
+
+def _copy_of(source: Path, tmp_path: Path) -> Path:
+    return Path(shutil.copy(source, tmp_path / source.name))
+
+
+def _set_token(path: Path, row: int, token: bytes) -> None:
+    with h5py.File(path, "r+") as h5:
+        updates = h5[UPDATES]
+        record = updates[row]
+        record["recording_identity_token"] = token
+        updates[row] = record
+
+
+def _tokens(path: Path) -> set[bytes]:
+    with h5py.File(path, "r") as h5:
+        return set(h5[UPDATES].fields("recording_identity_token")[:])
+
+
+def test_a_bound_v2_session_whose_rows_carry_the_bound_token_is_admitted(tmp_path):
+    path = _copy_of(BOUND_V2, tmp_path)
+    with h5py.File(path, "r") as h5:
+        bound = json.loads(h5[pose.BINDING][()])["recording_identity_token"].encode()
+    assert _tokens(path) == {bound}
+    assert _check(path) is not None
+
+
+def test_a_bound_v2_row_from_another_recording_is_refused(tmp_path):
+    path = _copy_of(BOUND_V2, tmp_path)
+    _set_token(path, 0, FOREIGN)
+    with pytest.raises(
+        UnifiedH5ContractError,
+        match="^pose_update_foreign_recording_token:foreign_rows=1:first_row=0$",
+    ):
+        _check(path)
+
+
+def test_an_advisory_v2_session_admits_foreign_tokens(tmp_path):
+    path = _copy(tmp_path)
+    _set_token(path, 1, FOREIGN)
+    assert len(_tokens(path)) == 2
+    assert _check(path) == 22
+
+
+def test_a_bound_v2_session_without_a_bound_token_is_refused(tmp_path):
+    path = _copy_of(BOUND_V2, tmp_path)
+    with h5py.File(path, "r+") as h5:
+        del h5[pose.BINDING]
+    with pytest.raises(UnifiedH5ContractError, match="pose_bound_recording_token_missing"):
+        _check(path)
+
+
+@pytest.mark.parametrize(
+    ("source", "association_source"),
+    [
+        (BOUND_V2, "mutable_latest_recording_pointer"),
+        (FIXTURES / "pose_complete.h5", pose.BOUND_SOURCE),
+    ],
+)
+def test_a_status_and_source_that_disagree_are_refused(tmp_path, source, association_source):
+    path = _copy_of(source, tmp_path)
+    with h5py.File(path, "r+") as h5:
+        h5[pose.RECORDING].attrs["association_source"] = association_source
+    with pytest.raises(UnifiedH5ContractError, match="pose_association_declaration_inconsistent"):
+        _check(path)
+
+
+def test_an_empty_bound_updates_table_is_left_to_the_receipt(tmp_path):
+    with h5py.File(BOUND_V2, "r") as source:
+        dtype = source[UPDATES].dtype
+        contract = json.loads(source[pose.CONTRACT][()])
+    with h5py.File(tmp_path / "empty.h5", "w") as h5:
+        h5.create_group(pose.RECORDING).attrs["association_source"] = pose.BOUND_SOURCE
+        updates = h5.create_dataset(UPDATES, shape=(0,), dtype=dtype)
+        pose._check_v2_bound_token(h5, contract, updates)
+
+
+def test_a_bound_v1_session_with_a_stale_row_is_not_refused(tmp_path):
+    path = _copy_of(BOUND_V1, tmp_path)
+    with h5py.File(path, "r") as h5:
+        contract = json.loads(h5[pose.CONTRACT][()])
+    assert (contract["schema_version"], contract["association_status"]) == (1, "bound")
+    _set_token(path, 0, FOREIGN)
+    assert _check(path) is not None
+
