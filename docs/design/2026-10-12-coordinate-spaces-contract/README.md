@@ -8,6 +8,7 @@
 - **Builds on:**
   - the heading convention, agent-contracts `citrus-palette/heading/heading_convention_v1.json` (PR #86, merged `6b63aa2`);
   - `citrus.pose_observation` v2 (same PR);
+  - the stimulus angle convention, agent-contracts `citrus-palette/angles/stimulus_angle_convention_v1.json` (PR #91, merged `f3d97d46`): every stimulus angle is `atan2_negative_y_x_degrees`, the retired form is `canvas_y_down_clockwise_legacy`, and directions cross rasters through the homography Jacobian, never by subtracting angles;
   - the 2026-10-12 coordinate audit (agent report, summarised below).
 - **Code base:** palette main `43bdff5f`; agent-contracts main `6b63aa2`. Paths are relative to `src/fisheye/` unless they start with `tests/` or `AC:` (agent-contracts).
 
