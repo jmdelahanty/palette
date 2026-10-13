@@ -1515,13 +1515,22 @@ def verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
         raise TransferSnapshotError(f"invalid transfer-v2 delivery: {error}") from error
 
 
-# Orange's frame-identity proof grammar, byte-identical to Orange 8b359de
-# docs/schemas/orange_external_recorder_frame_identity_proof_v2.schema.json
+# Orange's frame-identity proof grammar, byte-identical to Orange docs/schemas/
 # (producer: tools/external_recorder_ipc_probe.cpp frame_identity_proof_json).
-FRAME_IDENTITY_PROOF_SCHEMA_FILE = "orange_external_recorder_frame_identity_proof_v2.schema.json"
-FRAME_IDENTITY_PROOF_SCHEMA_SHA256 = "c9c2544526044bc1a934ab90a0dbe3fca24f34230a27ec280e58b6afc2ffed8d"
+# v2: Orange 8b359de. v3: Orange 2ef8840 (agent-contracts #87 frame_identity_v1:
+# legacy_aliases removed; every other field and check unchanged). Older
+# recordings keep their v2 proofs.
 FRAME_IDENTITY_PROOF_SCHEMA_ID = "orange.external_recorder.frame_identity_proof"
-FRAME_IDENTITY_PROOF_VERSION = 2
+FRAME_IDENTITY_PROOF_SCHEMAS = {
+    2: (
+        "orange_external_recorder_frame_identity_proof_v2.schema.json",
+        "c9c2544526044bc1a934ab90a0dbe3fca24f34230a27ec280e58b6afc2ffed8d",
+    ),
+    3: (
+        "orange_external_recorder_frame_identity_proof_v3.schema.json",
+        "269fe0b6c8857928f9bc4d93646a45a9d37bc2fd88d1968b466f0d5ae73b06c8",
+    ),
+}
 # Counters that must all equal the stream's encoded frame count (Orange's
 # "verified" condition plus the packet submission counters).
 _PROOF_EQUAL_COUNTERS = (
@@ -1536,17 +1545,13 @@ _PROOF_EQUAL_COUNTERS = (
 
 
 @lru_cache(maxsize=None)
-def _frame_identity_proof_validator():
+def _frame_identity_proof_validator(version: int):
     from jsonschema import Draft202012Validator
 
-    data = (
-        resource_files("fisheye.shared")
-        .joinpath("contracts")
-        .joinpath(FRAME_IDENTITY_PROOF_SCHEMA_FILE)
-        .read_bytes()
-    )
-    if hashlib.sha256(data).hexdigest() != FRAME_IDENTITY_PROOF_SCHEMA_SHA256:
-        raise TransferSnapshotError("packaged_contract_drift:" + FRAME_IDENTITY_PROOF_SCHEMA_FILE)
+    file_name, digest = FRAME_IDENTITY_PROOF_SCHEMAS[version]
+    data = resource_files("fisheye.shared").joinpath("contracts").joinpath(file_name).read_bytes()
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise TransferSnapshotError("packaged_contract_drift:" + file_name)
     return Draft202012Validator(json.loads(data))
 
 
@@ -1578,7 +1583,7 @@ def _stream_proofs(root: Path, output: dict) -> list[tuple[str, dict]]:
 def _require_frame_identity_proof(
     path: str, proof: Any, *, output_kind: str, frame_count: int
 ) -> None:
-    """Accept only Orange's v2 proof, passed, binding exactly this stream's frames.
+    """Accept only Orange's v2/v3 proof, passed, binding exactly this stream's frames.
 
     The proof covers one recording session and camera stream (all of its
     clips), so ``frame_count`` is the stream's total over the parent's clips.
@@ -1587,13 +1592,15 @@ def _require_frame_identity_proof(
 
     from jsonschema.exceptions import best_match
 
+    version = proof.get("schema_version") if type(proof) is dict else None
     require(
         type(proof) is dict
         and proof.get("schema_id") == FRAME_IDENTITY_PROOF_SCHEMA_ID
-        and proof.get("schema_version") == FRAME_IDENTITY_PROOF_VERSION,
+        and type(version) is int
+        and version in FRAME_IDENTITY_PROOF_SCHEMAS,
         "present frame_identity_proof needs a supported semantic proof validator: " + path,
     )
-    error = best_match(_frame_identity_proof_validator().iter_errors(proof))
+    error = best_match(_frame_identity_proof_validator(version).iter_errors(proof))
     require(error is None, f"frame_identity_proof grammar: {path}: {error and error.message}")
     binding = proof["video_binding"]
     require(

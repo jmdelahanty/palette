@@ -29,6 +29,8 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
+from fisheye.shared.orange_frame_identity import keyframe_field_name, keyframe_video_frame_indices
+
 from fisheye.utils.plan_orange_style_clips import (
     DEFAULT_TARGET_DURATION_MINUTES,
     SUPPORTED_SNAP_DIRECTIONS,
@@ -302,7 +304,10 @@ def _clip_keyframe_payload(
     shifted = source_keyframes[(source_keyframes >= start) & (source_keyframes < end_exclusive)] - start
     payload = dict(source_payload)
     payload["total_frames"] = int(row["frame_count"])
-    payload["keyframe_frames"] = [int(value) for value in shifted.tolist()]
+    # Keep the source's own name (frame_identity_v1 renamed keyframe_frames).
+    payload[keyframe_field_name(payload, label="source keyframe JSON")] = [
+        int(value) for value in shifted.tolist()
+    ]
     payload["palette_retro_clip"] = {
         "created_at_utc": _utc_now(),
         "tool": MODULE_NAME,
@@ -332,14 +337,15 @@ def _write_keyframe_slices(
             source_keyframes=summary.keyframe_frames,
             row=row,
         )
-        if not payload["keyframe_frames"] or int(payload["keyframe_frames"][0]) != 0:
+        clip_keyframes = keyframe_video_frame_indices(payload, label=str(path))
+        if not clip_keyframes or int(clip_keyframes[0]) != 0:
             raise RuntimeError(f"Clip keyframe sidecar does not start at frame 0: {row['clip_id']}")
         _atomic_write_json(path, payload, overwrite=overwrite)
         outputs.append(
             {
                 "clip_id": row["clip_id"],
                 "keyframe_path": str(path),
-                "keyframe_count": len(payload["keyframe_frames"]),
+                "keyframe_count": len(clip_keyframes),
                 "total_frames": int(payload["total_frames"]),
             }
         )

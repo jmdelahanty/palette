@@ -265,7 +265,13 @@ def _read_keyframe_sidecar(path: Path) -> _KeyframeSidecarSummary:
                                 "sidecar total_frames is not a non-negative integer"
                             )
                         total_frames = value
-                    elif key == "keyframe_frames":
+                    elif key in ("keyframe_frames", "keyframe_video_frame_indices"):
+                        # frame_identity_v1 renamed keyframe_frames; never both.
+                        if keyframe_count is not None:
+                            raise OrangeSyncEvidenceError(
+                                "keyframe sidecar carries both keyframe_frames and "
+                                "keyframe_video_frame_indices"
+                            )
                         keyframe_count = _read_keyframe_array(reader)
                     else:
                         _skip_json_value(reader, depth=1)
@@ -286,7 +292,9 @@ def _read_keyframe_sidecar(path: Path) -> _KeyframeSidecarSummary:
     if total_frames is None:
         raise OrangeSyncEvidenceError("keyframe sidecar is missing total_frames")
     if keyframe_count is None:
-        raise OrangeSyncEvidenceError("keyframe sidecar is missing keyframe_frames")
+        raise OrangeSyncEvidenceError(
+            "keyframe sidecar is missing keyframe_video_frame_indices/keyframe_frames"
+        )
     return _KeyframeSidecarSummary(
         total_frames=total_frames,
         keyframe_count=keyframe_count,

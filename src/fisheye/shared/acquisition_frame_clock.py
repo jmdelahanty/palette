@@ -27,6 +27,10 @@ import pyarrow.parquet as pq
 from fisheye.shared.archive_identity import archive_identity
 from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
 from fisheye.shared.json_safety import json_attr_safe_mapping, strict_json_dumps
+from fisheye.shared.orange_frame_identity import (
+    FrameIdentityError,
+    require_frame_identity_names,
+)
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.selector_activation import (
     DeferredSelectorActivation,
@@ -751,6 +755,17 @@ def parse_acquisition_frame_clock_csv(path: str | Path) -> ParsedFrameClockCsv:
         reader = csv.DictReader(handle)
         fields = tuple(str(value).strip() for value in (reader.fieldnames or ()))
         frame_field = clock_csv_frame_field(fields)
+        if "stream_frame_id" in fields:
+            # An Orange file that adopted frame_identity_v1: recording_frame_id
+            # is the key and no unsuffixed frame reference may remain.
+            try:
+                require_frame_identity_names(fields, label=str(path))
+            except FrameIdentityError as exc:
+                raise AcquisitionFrameClockError(str(exc)) from exc
+            if frame_field != "recording_frame_id":
+                raise AcquisitionFrameClockError(
+                    f"Frame-clock CSV {path} adopts frame_identity_v1 without recording_frame_id."
+                )
         if frame_field is None or not set(CLOCK_CSV_TIMESTAMP_FIELDS) <= set(fields):
             raise AcquisitionFrameClockError(
                 f"Frame-clock CSV {path} must contain recording_frame_id/frame_id, "

@@ -27,11 +27,22 @@ import numpy as np
 
 
 RECORDING_GEOMETRY_CONTRACT_SCHEMA_ID = "orange.recording.geometry_contract"
-RECORDING_GEOMETRY_CONTRACT_SCHEMA_VERSION = 1
 RECORDING_GEOMETRY_ASSETS_SCHEMA_ID = "orange.recording.geometry_assets"
-RECORDING_GEOMETRY_ASSETS_SCHEMA_VERSION = 1
 RIM_OBSERVATION_SCHEMA_ID = "orange.calibration.dish_top_rim_observation"
+# Contract version -> the assets-manifest and dish-rim-observation versions it
+# binds. v2 (Orange bb6c4f5, agent-contracts #87 frame_identity_v1) changes only
+# version constants: the rim observation it embeds is v3 (renamed frame
+# references, which Palette does not read). Older recordings stay v1.
+GEOMETRY_CONTRACT_VERSIONS = {
+    1: {"assets": 1, "rim_observation": 2},
+    2: {"assets": 2, "rim_observation": 3},
+}
+RECORDING_GEOMETRY_CONTRACT_SCHEMA_VERSION = 1  # the first version; kept for callers
+RECORDING_GEOMETRY_ASSETS_SCHEMA_VERSION = 1
 RIM_OBSERVATION_SCHEMA_VERSION = 2
+RIM_OBSERVATION_SCHEMA_VERSIONS = frozenset(
+    versions["rim_observation"] for versions in GEOMETRY_CONTRACT_VERSIONS.values()
+)
 H5_SCOPE_SCHEMA_ID = "citrus.session.orange_recording_geometry_contract_scope"
 H5_SCOPE_SCHEMA_VERSION = 1
 DAILY_REGISTRATION_SCHEMA_ID = "citrus.calibration.daily_registration"
@@ -278,6 +289,39 @@ def _require_schema(
         )
 
 
+def _require_geometry_contract(contract: Mapping[str, Any], *, label: str) -> int:
+    """A supported geometry contract whose embedded rim observations are the
+    version that contract version binds. Returns the contract version."""
+
+    version = contract.get("schema_version")
+    if (
+        contract.get("schema_id") != RECORDING_GEOMETRY_CONTRACT_SCHEMA_ID
+        or type(version) is not int
+        or version not in GEOMETRY_CONTRACT_VERSIONS
+    ):
+        raise RecordingGeometryError(
+            f"{label} must be {RECORDING_GEOMETRY_CONTRACT_SCHEMA_ID!r} version "
+            f"{' or '.join(str(v) for v in sorted(GEOMETRY_CONTRACT_VERSIONS))}."
+        )
+    rim_version = GEOMETRY_CONTRACT_VERSIONS[version]["rim_observation"]
+    pending: list[Any] = [contract]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, Mapping):
+            if (
+                node.get("artifact_schema_id") == RIM_OBSERVATION_SCHEMA_ID
+                and node.get("artifact_schema_version") != rim_version
+            ):
+                raise RecordingGeometryError(
+                    f"{label} version {version} must embed dish rim observation "
+                    f"version {rim_version}."
+                )
+            pending.extend(node.values())
+        elif isinstance(node, (list, tuple)):
+            pending.extend(node)
+    return version
+
+
 def _circle_from_boundary(
     boundary: Mapping[str, Any],
     *,
@@ -308,14 +352,14 @@ def _validate_mask_entry(
     camera_serial: str,
     arena_id: str,
 ) -> tuple[CircleGeometry, CircleGeometry, int, int, bool, tuple[str, ...]]:
-    _require_schema(
-        entry,
-        schema_id=RIM_OBSERVATION_SCHEMA_ID,
-        schema_version=RIM_OBSERVATION_SCHEMA_VERSION,
-        id_field="artifact_schema_id",
-        version_field="artifact_schema_version",
-        label="recording_snapshot_entry",
-    )
+    if (
+        entry.get("artifact_schema_id") != RIM_OBSERVATION_SCHEMA_ID
+        or entry.get("artifact_schema_version") not in RIM_OBSERVATION_SCHEMA_VERSIONS
+    ):
+        raise RecordingGeometryError(
+            f"recording_snapshot_entry must be {RIM_OBSERVATION_SCHEMA_ID!r} version "
+            f"{' or '.join(str(v) for v in sorted(RIM_OBSERVATION_SCHEMA_VERSIONS))}."
+        )
     if str(entry.get("camera_serial")) != camera_serial:
         raise RecordingGeometryError("Rim observation camera_serial does not match its camera key.")
     if entry.get("arena_id") != arena_id:
@@ -478,10 +522,11 @@ def _verify_asset_manifest(
     if actual != expected:
         raise RecordingGeometryError("Geometry asset manifest checksum mismatch.")
     manifest = _strict_json_loads(payload, label="recording geometry asset manifest")
+    contract_version = _require_geometry_contract(contract, label="recording geometry contract")
     _require_schema(
         manifest,
         schema_id=RECORDING_GEOMETRY_ASSETS_SCHEMA_ID,
-        schema_version=RECORDING_GEOMETRY_ASSETS_SCHEMA_VERSION,
+        schema_version=GEOMETRY_CONTRACT_VERSIONS[contract_version]["assets"],
         label="recording geometry asset manifest",
     )
     rows = manifest.get("files")
@@ -559,12 +604,7 @@ def verify_recording_geometry_bundle(
     if pointer_sha is not None and pointer_sha != contract_sha:
         raise RecordingGeometryError("Snapshot contract checksum mismatch.")
     contract = _strict_json_loads(contract_bytes, label="recording_geometry_contract.json")
-    _require_schema(
-        contract,
-        schema_id=RECORDING_GEOMETRY_CONTRACT_SCHEMA_ID,
-        schema_version=RECORDING_GEOMETRY_CONTRACT_SCHEMA_VERSION,
-        label="recording geometry contract",
-    )
+    _require_geometry_contract(contract, label="recording geometry contract")
     asset_status, manifest_sha, rows = _verify_asset_manifest(
         bundle_root,
         contract,
@@ -757,12 +797,7 @@ def load_registered_dish_masks_from_recording_folder(
         if contract_sha != expected_sha:
             raise RecordingGeometryError("Recording geometry contract checksum mismatch.")
         contract = _strict_json_loads(contract_bytes, label="recording geometry contract")
-        _require_schema(
-            contract,
-            schema_id=RECORDING_GEOMETRY_CONTRACT_SCHEMA_ID,
-            schema_version=RECORDING_GEOMETRY_CONTRACT_SCHEMA_VERSION,
-            label="recording geometry contract",
-        )
+        _require_geometry_contract(contract, label="recording geometry contract")
         daily = _required_mapping(contract.get("daily_registration_geometry"), label="daily_registration_geometry")
         selection_status = str(daily.get("status") or "missing")
         if daily.get("mode") != "selected_daily_registration" or selection_status not in {
@@ -1014,11 +1049,11 @@ def load_registered_dish_masks_from_citrus_h5(
                     code="legacy_missing_recording_bound_mask",
                     message="H5 recording geometry was not embedded and verified.",
                 )
+            group_version = int(recording_group.attrs.get("schema_version", -1))
             if (
                 recording_group.attrs.get("schema_id")
                 != RECORDING_GEOMETRY_CONTRACT_SCHEMA_ID
-                or int(recording_group.attrs.get("schema_version", -1))
-                != RECORDING_GEOMETRY_CONTRACT_SCHEMA_VERSION
+                or group_version not in GEOMETRY_CONTRACT_VERSIONS
             ):
                 raise RecordingGeometryError(
                     "H5 /recording_geometry_contract schema declaration is unsupported."
@@ -1028,12 +1063,13 @@ def load_registered_dish_masks_from_citrus_h5(
                 "contract_json",
                 label="recording geometry contract_json",
             )
-            _require_schema(
-                contract,
-                schema_id=RECORDING_GEOMETRY_CONTRACT_SCHEMA_ID,
-                schema_version=RECORDING_GEOMETRY_CONTRACT_SCHEMA_VERSION,
-                label="embedded recording geometry contract",
-            )
+            if (
+                _require_geometry_contract(contract, label="embedded recording geometry contract")
+                != group_version
+            ):
+                raise RecordingGeometryError(
+                    "H5 /recording_geometry_contract declares another version than its contract_json."
+                )
             scope, _scope_bytes, scope_sha = _verified_h5_json_dataset(
                 recording_group,
                 "h5_scope_json",
