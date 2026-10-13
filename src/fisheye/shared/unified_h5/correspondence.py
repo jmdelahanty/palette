@@ -29,6 +29,7 @@ from .schema import (
     preflight_admission,
     require_selected_catalog_versions,
     require_declared_core_tables,
+    require_stimulus_angle_convention,
     contract,
     describe_internal_dataset,
     describe_table,
@@ -213,18 +214,20 @@ class _RowReader:
 
 
 @contract_errors
-def validate_capacity_preflight(h5) -> None:
+def validate_capacity_preflight(h5) -> dict:
     """Whole-recording capacity-preflight evidence under the frozen producer policy.
 
     Admission of a finalized recording requires it; component-only witnesses
-    validated for correspondence alone do not carry it.
+    validated for correspondence alone do not carry it. Returns the admitted
+    binding, whose ``stimulus_angle_convention`` fixes the file's stimulus
+    angle sign.
     """
 
     document = read_json(h5, PREFLIGHT, canonical=True)
     declared = document.get("admission_policy_sha256")
     require(isinstance(declared, str), "capacity_preflight_producer_policy")
     # The preflight schema_version selects the admission revision (v1 -> 3,
-    # v2 -> 4); the file's table versions, declared policy and (revision 4)
+    # v2 -> 4, v3 -> 5); the file's table versions, declared policy and (revision 4)
     # catalog_id select one admitted catalog binding, whose own preflight
     # schema then applies.
     binding = admitted_binding(h5, declared, document)
@@ -233,6 +236,10 @@ def validate_capacity_preflight(h5) -> None:
         h5, (table["path"] for table in document["tables"]), binding["catalog_file"]
     )
     require_selected_catalog_versions(h5, binding["catalog_file"])
+    # The binding fixes the stimulus angle convention; the file's session and
+    # protocol declarations must agree with it (absent on legacy bindings).
+    require_stimulus_angle_convention(h5, binding)
+    return binding
 
 
 def _validate_v2(h5, binding, total, inputs) -> CorrespondenceSummary:
