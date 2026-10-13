@@ -145,7 +145,7 @@ def _check_v2_bound_token(h5, contract: dict, updates) -> None:
     """A bound session's pose rows all carry the bound recording's token.
 
     agent-contracts ``citrus-pose-observation-v2`` amendment 2026-10-13
-    (PR #99, e3841f3): bound means ``association_status`` "bound" and
+    (PR #99, merged 08689f0d): bound means ``association_status`` "bound" and
     ``/metadata/recording`` ``association_source`` the accepted request, and
     the two must agree; effective from Citrus 22be7f4, so a foreign token is a
     Citrus bug. Advisory sessions carry no constraint. An empty table is left

@@ -125,7 +125,7 @@ def test_v1_tables_under_a_v2_contract_are_refused(tmp_path):
 
 
 # Bound-token rule (agent-contracts citrus-pose-observation-v2 amendment
-# 2026-10-13, PR #99): on a bound v2 session every update carries the bound token.
+# 2026-10-13, PR #99, merged 08689f0d): on a bound v2 session every update carries the bound token.
 FIXTURE_ROOT = FIXTURES.parent
 BOUND_V2 = FIXTURE_ROOT / "citrus_unified_h5_frame_identity_v1" / "frame_identity_v1_pose_complete.h5"
 BOUND_V1 = FIXTURE_ROOT / "citrus_unified_h5_bounding_boxes_v2" / "bounding_boxes_v2_capacity_pose_on.h5"
