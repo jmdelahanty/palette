@@ -26,3 +26,13 @@ before use. Change only with an explicit producer/consumer contract review.
 | `citrus_pose_observation_tables.v2.json` | agent-contracts PR 86, merged `6b63aa2`, `citrus-pose-observation-v2/` | `0737ee7598eaf5cf03af80c9aab4eb8c9c3847418d01de29696c0b0d92696b3f` |
 | `citrus_palette_heading_convention_v1.json` | agent-contracts PR 86, merged `6b63aa2`, `citrus-palette/heading/` (Palette authority); implemented by `fisheye.shared.heading_convention` | `95a1076107e778e7c7b9df79726c8904835226945f983590476fb687ed014e30` |
 | `citrus_palette_heading_cases_v1.json` | agent-contracts PR 86, merged `6b63aa2`, `citrus-palette/heading/fixtures/heading_cases.json` | `9af3436fd63eeb00ea0efe2283f098b2e9e6a9905556498761a02f9bf34d6d06` |
+
+## Palette-published contracts
+
+Palette is the producer of these. Other programs (Orange's TensorRT engine
+tools) may pin them by path and SHA-256 at a Palette commit.
+
+| Resource | Producer | SHA-256 |
+| --- | --- | --- |
+| `palette_canonical_onnx_model_manifest_v1.schema.json` | `fisheye.utils.promote_registered_pose_model` before 2026-10-12 (pose only; bare-hex digests, `payload_digest`); still valid | `6b218c139a5f78fd1f0a751dca03e49677d7170ee54c08a6881c0d8fa03b94d8` |
+| `palette_canonical_onnx_model_manifest_v2.schema.json` | `fisheye.utils.promote_registered_model` (pose and detect; adopts agent-contracts `orange-palette/digest_form_v1`: `sha256:` tokens, `payload_sha256`, `canonicalization`); written by every new promotion | `50916e1f5e7e626a55d79b33ef79e39a6834f04274e62a8cd060b868286d657d` |
