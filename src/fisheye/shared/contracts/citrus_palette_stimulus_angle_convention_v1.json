@@ -1,0 +1,197 @@
+{
+  "schema_id": "citrus_palette.stimulus_angle_convention",
+  "schema_version": 1,
+  "title": "Stimulus direction and orientation angle convention shared by Citrus and Palette",
+  "status": "draft: Citrus implementation pending; no admitted catalog uses it yet",
+  "authority": {
+    "repository": "JohnsonLabJanelia/citrus",
+    "branch": "agent/citrus/stimulus-angle-convention-20261012",
+    "design_note": "docs/stimulus_angle_convention_unit_circle_design_2026-10-12.md (sections 2 and 9; decisions section 10)",
+    "surveyed_at": "Citrus main 53b68a7; agent-contracts origin/main 9e37316; Palette main ba5a78a",
+    "enforcement": "src/stimuli/angle_convention.h (planned): UnitCircleDegreesToYDownVector, YDownVectorToUnitCircleDegrees; a source-scan test refuses any other degrees-to-vector conversion under src/stimuli/"
+  },
+  "consumers": [
+    {
+      "repository": "jmdelahanty/palette",
+      "artifact": "import_stimulus_to_zarr (record the convention per admission binding; stop treating the authored angle as a camera angle)"
+    },
+    {
+      "repository": "jmdelahanty/palette",
+      "artifact": "stimulus_response_grating and stimulus_response_omr (compare heading to stimulus direction by mapping the direction vector through the homography, never by subtracting angles)"
+    },
+    {
+      "repository": "Crimson",
+      "artifact": "stimulus step reads, via Palette only (Palette docs/crimson_stimulus_step_read_contract.md); Crimson never reads Citrus angles directly"
+    }
+  ],
+  "angle": {
+    "id": "atan2_negative_y_x_degrees",
+    "same_id_as": "citrus-palette/heading/heading_convention_v1.json angle.id; the id names a rule for any y-down raster, and heading v1 is one instance of it (the source-camera raster)",
+    "applies_to": "any y-down raster: stimulus canvas, arena-relative canvas, camera view. The raster is named by the field's frame (field name suffix or direction_reference_frame), never by the angle id.",
+    "raster": {
+      "origin": "top_left",
+      "x": "right",
+      "y": "down"
+    },
+    "angle_to_vector": "theta_deg names the unit vector (cos(theta), -sin(theta)) in the raster, theta in radians = radians(theta_deg)",
+    "vector_to_angle": "theta_deg = degrees(atan2(-y, x))",
+    "zero": "raster +x (right)",
+    "positive_rotation": "counter-clockwise as seen on the image (+90 = up on the raster)",
+    "cardinals": {
+      "0": "right",
+      "90": "up",
+      "180": "left",
+      "-90": "down (270 is the same direction)"
+    },
+    "units": "degrees"
+  },
+  "range": {
+    "rule": "Authored and recorded values are finite degrees and are NOT normalised: 270, -90 and 630 are all legal and name the same direction. Non-finite values are refused. Vector-to-angle results lie in [-180, 180]; -180 and +180 are the same direction (atan2(-0.0, negative) = -180 in IEEE arithmetic).",
+    "compare": "two angles a and b in the same raster agree when |wrap_delta(a - b)| <= tolerance; never raw equality",
+    "delta_wrap": "((d + 180) mod 360) - 180",
+    "mod": "floored modulo with result in [0, 360) (Python %); C/C++ fmod truncates toward zero and needs +360 on a negative result"
+  },
+  "plane": {
+    "rule": "The convention is per raster. An angle never crosses rasters by number: never subtract or add a canvas angle and a camera angle. To compare a canvas direction with a camera direction (for example a fish heading), convert the angle to its vector in the source raster, map the VECTOR through the local Jacobian of the homography at the relevant point (camera->canvas, or its inverse for canvas->camera), and take the angle of the mapped vector in the destination raster. The homography's determinant sign carries the rig's reflection: det < 0 reverses rotation sense, so a canvas-up direction is camera-down on a y-reflected rig.",
+    "jacobian": "for H = [[h00,h01,h02],[h10,h11,h12],[h20,h21,h22]] at source point (x, y): w = h20 x + h21 y + h22, u = (h00 x + h01 y + h02) / w, v = (h10 x + h11 y + h12) / w; J = [[(h00 - u h20)/w, (h01 - u h21)/w], [(h10 - v h20)/w, (h11 - v h21)/w]]; mapped vector = J * (vx, vy)",
+    "reflection": "sign(det J) = sign(det H) * sign(w)^3; det J < 0 means the rig mirrors the raster",
+    "citrus_implementation": "src/calibration/direction_frame_mapping.h",
+    "same_rule_as": "heading_convention_v1.json projection.rule (two points mapped through the homography, which is the finite-difference form of the Jacobian map)",
+    "known_violation": "Palette stimulus_response_grating.py:126-133 subtracts the legacy clockwise canvas angle from the counter-clockwise camera heading; it is right only on a reflected rig (omnifin0, det < 0). Fixing it is required for both legacy and v1 bindings."
+  },
+  "declared_in": [
+    {
+      "carrier": "Citrus H5",
+      "location": "/metadata/session attribute stimulus_angle_convention",
+      "value": "atan2_negative_y_x_degrees",
+      "note": "beside software_version; one attribute per session, never per stimulus table, chaser attribute or field"
+    },
+    {
+      "carrier": "Citrus protocol file",
+      "location": "top-level stimulus_angle_convention",
+      "value": "atan2_negative_y_x_degrees",
+      "requires": "schema_id citrus.stimulus_protocol, schema_version 2; a file with no top-level version is legacy version 1 (clockwise) and is refused by the loader"
+    },
+    {
+      "carrier": "Citrus trial index",
+      "location": "top-level stimulus_angle_convention",
+      "value": "atan2_negative_y_x_degrees",
+      "requires": "trial index schema_version 3"
+    },
+    {
+      "carrier": "Citrus protocol semantic hash",
+      "location": "hash envelope field stimulus_angle_convention",
+      "value": "atan2_negative_y_x_degrees",
+      "requires": "envelope policy citrus.protocol.semantic.v2; every protocol's hash changes, including angle-free protocols"
+    }
+  ],
+  "legacy": {
+    "id": "canvas_y_down_clockwise_legacy",
+    "definition": "0 = +x (right), +90 = down on the raster, positive clockwise on the image; vector (cos(theta), sin(theta)); angle degrees(atan2(y, x))",
+    "conversion": "theta_v1 = -theta_legacy (same raster, same vector); compare under wrap_delta",
+    "applies_to_catalogs": [
+      "historical_v1",
+      "chaser_v2",
+      "bounding_boxes_v2",
+      "frame_identity_v1"
+    ],
+    "classification": "by admission catalog binding, never by the session attribute. A file without catalog_id, or bound to one of the catalogs above, is canvas_y_down_clockwise_legacy. A file whose binding selects a catalog admitted under this convention but lacks or contradicts the /metadata/session attribute is refused (catalog_id_mismatch precedent).",
+    "admission": "the per-catalog pin field and the new catalog belong to a later unified H5 admission revision; this document does not create one",
+    "moving_grating_drift_rule": {
+      "note": "Amends qa/answers/citrus-to-palette/Q-20260302-1258-grating-orientation-answer.yaml, which named orientation_degrees as the grating axis but did not state the drift relation.",
+      "orientation_era": "Protocol files before Citrus c8c146b (2026-04-17) carry orientation_degrees (the render axis, the grating normal) and a signed speed_pps, no motion_direction_degrees. The kernel is pos = x*cos(axis) + y*sin(axis) with phase increasing at +speed, so the pattern drifts toward -axis: drift_deg = orientation_degrees + 180 when speed_pps > 0, drift_deg = orientation_degrees when speed_pps < 0. Clockwise, +90 = down.",
+      "motion_direction_era": "From c8c146b (2026-04-17) until the unit-circle switch, files carry motion_direction_degrees (+ direction_reference_frame, default STIMULUS_CANVAS) and not orientation_degrees; motion_direction_degrees IS the drift direction (clockwise, +90 = down; CAMERA_VIEW values map through the Jacobian). Citrus derived orientation_degrees = motion + 180 at positive speed on load and never wrote it back.",
+      "unit_circle_era": "From citrus.stimulus_protocol schema_version 2: motion_direction_degrees is the drift direction under atan2_negative_y_x_degrees (+90 = up), finite, unnormalised.",
+      "zero_speed": "speed_pps == 0 in any era: the grating is static and has no drift direction. Consumers record it as static and refuse to assign a direction; they never pick one.",
+      "motion_era_negative_speed": "In the motion era (and the unit-circle era) motion_direction_degrees is the drift for either sign of speed_pps: Citrus derives the render axis as motion + 180 when speed_pps >= 0 and motion when speed_pps < 0, so the sign is absorbed by the axis, never by the drift. The orientation-era flip applies only to files that carry orientation_degrees without motion_direction_degrees.",
+      "fixtures": "fixtures/angle_cases.json moving_grating_drift"
+    }
+  },
+  "governs": [
+    {
+      "carrier": "H5 moving_grating_state",
+      "fields": [
+        "motion_direction_degrees_canvas",
+        "render_axis_degrees_canvas"
+      ],
+      "raster": "stimulus canvas"
+    },
+    {
+      "carrier": "H5 moving_grating_state and protocol moving grating",
+      "fields": [
+        "motion_direction_degrees_authored (protocol: motion_direction_degrees)"
+      ],
+      "raster": "named by direction_reference_frame (STIMULUS_CANVAS or CAMERA_VIEW)"
+    },
+    {
+      "carrier": "protocol independent motion grid and H5 independent_motion_grid_state",
+      "fields": [
+        "direction_degrees"
+      ],
+      "raster": "grid-local texture axes on the canvas (y down)"
+    },
+    {
+      "carrier": "protocol moving dots",
+      "fields": [
+        "uniform_direction_angle"
+      ],
+      "raster": "stimulus canvas"
+    },
+    {
+      "carrier": "protocol coherent dots",
+      "fields": [
+        "motion_direction_degrees"
+      ],
+      "raster": "named by direction_reference_frame"
+    },
+    {
+      "carrier": "protocol scrolling grid",
+      "fields": [
+        "orientation_degrees"
+      ],
+      "raster": "stimulus canvas"
+    },
+    {
+      "carrier": "trial index",
+      "fields": [
+        "motion_direction_deg"
+      ],
+      "raster": "as the authored field it exports"
+    },
+    {
+      "carrier": "H5 direction-mapping session attributes",
+      "fields": [
+        "camera_view_right_in_canvas_angle_deg",
+        "camera_view_down_in_canvas_angle_deg"
+      ],
+      "raster": "stimulus canvas",
+      "note": "direction_mapping_canvas_angle_convention changes from \"0=right,90=down\" to the id; the _x/_y vector attributes are unchanged"
+    }
+  ],
+  "does_not_govern": [
+    {
+      "what": "calibration ring marker and offset angles (ring_orientation_marker_angle_deg, calibration pattern points, CalibrationGridStimulus)",
+      "convention": "calibration-internal, y-down clockwise; the matcher uses only relative angles and the chirality marker fixes handedness, so flipping would invalidate every existing fit"
+    },
+    {
+      "what": "visual-angle magnitudes: looming start/end angle, chaser trigger/max/visual angle, angular velocity, retreat angular deviation",
+      "convention": "unsigned magnitudes, not directions"
+    },
+    {
+      "what": "grating phase_radians",
+      "convention": "a phase, not a direction"
+    },
+    {
+      "what": "uniform-random spawn, noise and wander angles (coherent dots noise, moving dots random branch, chaser wander/retreat samples, concentric dots spawn)",
+      "convention": "symmetric draws left unchanged so seeded runs stay reproducible"
+    },
+    {
+      "what": "projector_mount_rotation_deg_about_optical_axis",
+      "convention": "out of scope; its sense belongs to the rig document"
+    },
+    {
+      "what": "axis declarations (positive_y: down, y_axis_direction)",
+      "convention": "positional, not angular"
+    }
+  ]
+}

@@ -26,6 +26,8 @@ before use. Change only with an explicit producer/consumer contract review.
 | `citrus_pose_observation_tables.v2.json` | agent-contracts PR 86, merged `6b63aa2`, `citrus-pose-observation-v2/` | `0737ee7598eaf5cf03af80c9aab4eb8c9c3847418d01de29696c0b0d92696b3f` |
 | `citrus_palette_heading_convention_v1.json` | agent-contracts PR 86, merged `6b63aa2`, `citrus-palette/heading/` (Palette authority); implemented by `fisheye.shared.heading_convention` | `95a1076107e778e7c7b9df79726c8904835226945f983590476fb687ed014e30` |
 | `citrus_palette_heading_cases_v1.json` | agent-contracts PR 86, merged `6b63aa2`, `citrus-palette/heading/fixtures/heading_cases.json` | `9af3436fd63eeb00ea0efe2283f098b2e9e6a9905556498761a02f9bf34d6d06` |
+| `citrus_palette_stimulus_angle_convention_v1.json` | agent-contracts PR 91 head `4d0fa1597ad80fb1a1f39bdd0774da66d4dee5d9` (unchanged), merged `f3d97d46966077f3330ef8239901f78cd5a43f53`, `citrus-palette/angles/stimulus_angle_convention_v1.json`; ids in `fisheye.shared.heading_convention` (`STIMULUS_ANGLE_CONVENTION`, `LEGACY_CANVAS_ANGLE`) | `a99d82e708445db38f48919ba7ed76933b89cdb1f501d1d42b58394327e1b23c` |
+| `citrus_palette_stimulus_angle_cases_v1.json` | agent-contracts PR 91 head `4d0fa159`, merged `f3d97d46`, `citrus-palette/angles/fixtures/angle_cases.json` | `b05f4b19739c1d6ce64e1a47d30b7f0ab53910a10900418fea8b7514a10452a8` |
 
 ## Palette-published contracts
 
