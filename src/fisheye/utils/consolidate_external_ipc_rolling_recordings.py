@@ -229,6 +229,13 @@ def _looks_like_frame_clock_csv(path: Path) -> bool:
     return "recording_frame_id" in fields or "frame_id" in fields
 
 
+def _is_full_recorder_metadata(fields: set[str]) -> bool:
+    # frame_identity_v1 renamed frame_index_within_gop -> position_in_gop.
+    return {"gop_index", "bytes"}.issubset(fields) and bool(
+        {"position_in_gop", "frame_index_within_gop"} & fields
+    )
+
+
 def _frame_clock_kind(path: Path) -> str:
     try:
         with path.open("r", newline="", encoding="utf-8") as fh:
@@ -236,7 +243,7 @@ def _frame_clock_kind(path: Path) -> str:
     except (OSError, UnicodeError, StopIteration, csv.Error):
         return "unknown"
     fields = {field.strip() for field in header}
-    if {"gop_index", "frame_index_within_gop", "bytes"}.issubset(fields):
+    if _is_full_recorder_metadata(fields):
         return "full"
     if {"crop_video_frame_index", "crop_state"}.issubset(fields):
         return "crop"
@@ -839,7 +846,7 @@ def _fast_csv_stats(path: Path) -> dict[str, Any]:
         "last_recording_frame_id": _frame_id_from_line(last_line, key_index),
         "stream_kind": (
             "full"
-            if {"gop_index", "frame_index_within_gop", "bytes"}.issubset(header_fields)
+            if _is_full_recorder_metadata(header_fields)
             else (
                 "crop"
                 if {"crop_video_frame_index", "crop_state"}.issubset(header_fields)

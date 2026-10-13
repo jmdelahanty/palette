@@ -16,6 +16,7 @@ import numpy as np
 
 from fisheye.registry.db import RegistryPaths
 from fisheye.shared.crop_defaults import DEFAULT_ZEBRAFISH_CROP_SIZE_PX
+from fisheye.shared.orange_frame_identity import crop_meta_stream_frame_field
 
 
 SCHEMA_VERSION = "palette.acquisition_crop_video_roi_readiness_report.v1"
@@ -296,13 +297,15 @@ def _read_crop_meta_rows(path: Path) -> list[dict[str, Any]]:
         missing = sorted(required - set(reader.fieldnames or ()))
         if missing:
             raise ValueError(f"Crop metadata missing required columns: {missing}")
+        # frame_identity_v1: stream_frame_id (adopted) or local_frame_id (before).
+        stream_field = crop_meta_stream_frame_field(reader.fieldnames or (), label=str(path))
         for row_index, row in enumerate(reader):
             rows.append(
                 {
                     "row_index": row_index,
                     "recording_frame_index": int(_safe_int(row.get("recording_frame_id")) or 0) - 1,
                     "crop_video_frame_index": int(_safe_int(row.get("crop_video_frame_index")) or row_index),
-                    "local_frame_id": int(_safe_int(row.get("local_frame_id")) or row_index),
+                    "local_frame_id": int(_safe_int((row.get(stream_field) if stream_field else None)) or row_index),
                     "has_detection": bool(_safe_int(row.get("has_detection")) or 0),
                     "blank_frame": bool(_safe_int(row.get("blank_frame")) or 0),
                     "crop_xywh": (

@@ -209,11 +209,13 @@ def test_one_proof_shared_by_full_and_crop_refuses(tmp_path: Path) -> None:
         plan(root)
 
 
-def test_packaged_schema_is_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("version", [2, 3])
+def test_packaged_schema_is_pinned(monkeypatch: pytest.MonkeyPatch, version: int) -> None:
     rts._frame_identity_proof_validator.cache_clear()
-    monkeypatch.setattr(rts, "FRAME_IDENTITY_PROOF_SCHEMA_SHA256", "0" * 64)
+    file_name, _digest = rts.FRAME_IDENTITY_PROOF_SCHEMAS[version]
+    monkeypatch.setitem(rts.FRAME_IDENTITY_PROOF_SCHEMAS, version, (file_name, "0" * 64))
     try:
         with pytest.raises(TransferSnapshotError, match="packaged_contract_drift"):
-            rts._frame_identity_proof_validator()
+            rts._frame_identity_proof_validator(version)
     finally:
         rts._frame_identity_proof_validator.cache_clear()
