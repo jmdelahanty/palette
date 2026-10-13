@@ -24,6 +24,7 @@ from fisheye.shared.zarr.array_contracts import (
     ArrayContractCatalog,
 )
 from fisheye.shared.zarr.keypoint_schema import derive_frame_row_offsets
+from fisheye.shared.heading_convention import heading_degrees
 
 BODY_FRAME_RUN_SCHEMA_ID = "palette.analysis.body_frame"
 BODY_FRAME_RUN_SCHEMA_VERSION = 1
@@ -386,8 +387,8 @@ class BodyFrameSchema:
                             "Valid axes must be orthonormal with anatomical-left orientation.",
                         )
                     )
-                expected_heading = np.rad2deg(
-                    np.arctan2(-forward[:, 1], forward[:, 0])
+                expected_heading = heading_degrees(
+                    forward[:, 0], forward[:, 1], dtype=forward.dtype
                 ).astype(np.float32)
                 expected_heading[invalid] = np.nan
                 if np.any(

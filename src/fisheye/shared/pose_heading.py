@@ -9,6 +9,7 @@ from typing import Optional
 import numpy as np
 
 from .pose_schema import PoseSchema, canonicalize_keypoint_label
+from fisheye.shared.heading_convention import heading_degrees
 
 
 @dataclass(frozen=True)
@@ -188,7 +189,7 @@ def compute_heading_from_spec(
         head_vec = end - start
         if not np.all(np.isfinite(head_vec)) or np.linalg.norm(head_vec) == 0:
             return float("nan")
-        return float(np.rad2deg(np.arctan2(-head_vec[1], head_vec[0])))
+        return float(heading_degrees(head_vec[0], head_vec[1], dtype=head_vec.dtype))
     except Exception:
         if strict:
             raise

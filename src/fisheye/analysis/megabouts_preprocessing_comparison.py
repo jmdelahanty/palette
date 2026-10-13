@@ -47,6 +47,7 @@ from fisheye.analysis.megabouts_classifier_inputs import (
     summarize_input_pack,
 )
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.heading_convention import wrap_delta_radians
 
 COMPARISON_METHOD = "palette_megabouts_preprocessing_comparison"
 COMPARISON_METHOD_VERSION = 1
@@ -581,10 +582,6 @@ def build_megabouts_preprocessed_input_pack(
     )
 
 
-def _wrap_signed_radians(values: np.ndarray) -> np.ndarray:
-    return (np.asarray(values, dtype=np.float64) + math.pi) % (2.0 * math.pi) - math.pi
-
-
 def _array_stats(
     a: np.ndarray,
     b: np.ndarray,
@@ -606,7 +603,7 @@ def _array_stats(
             "corr": math.nan,
         }
     if angular_radians:
-        delta = _wrap_signed_radians(values_b[valid] - values_a[valid])
+        delta = wrap_delta_radians(values_b[valid] - values_a[valid])
         corr_a = np.unwrap(values_a[valid])
         corr_b = np.unwrap(values_a[valid] + delta)
     else:

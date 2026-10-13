@@ -68,6 +68,7 @@ from .tail_posture_view_schema import (
     validate_tail_posture_view_arrays,
     write_tail_posture_view_array_schema_manifest,
 )
+from fisheye.shared.heading_convention import megabouts_head_yaw_radians
 
 TAIL_POSTURE_VIEW_SCHEMA_ID = TAIL_POSTURE_VIEW_RUN_SCHEMA_ID
 TAIL_POSTURE_VIEW_SCHEMA_VERSION = TAIL_POSTURE_VIEW_RUN_SCHEMA_VERSION
@@ -323,9 +324,9 @@ def compute_cumulative_segment_angles_from_keypoints(
                 segments_valid[:, idx + 1, :],
             )
         angles[valid, :] = np.cumsum(relative, axis=1).astype(np.float32)
-        head_yaw[valid] = np.arctan2(-start_valid[:, 1], -start_valid[:, 0]).astype(
-            np.float32
-        )
+        head_yaw[valid] = megabouts_head_yaw_radians(
+            start_valid[:, 0], start_valid[:, 1]
+        ).astype(np.float32)
     return angles, head_yaw, valid
 
 
