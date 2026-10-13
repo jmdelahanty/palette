@@ -519,10 +519,17 @@ def test_folder_loader_rejects_native_frame_dimension_mismatch(tmp_path: Path) -
     assert "dimensions disagree" in result.issues[0].message
 
 
-def _write_h5(path: Path, *, runtime_registration_id: str = "dailyreg-1") -> None:
+def _write_h5(
+    path: Path,
+    *,
+    runtime_registration_id: str = "dailyreg-1",
+    contract_version: int = 1,
+    scope_version: int = 1,
+    source_version: int | None = None,
+) -> None:
     contract = {
         "schema_id": "orange.recording.geometry_contract",
-        "schema_version": 1,
+        "schema_version": contract_version,
         "status": "resolved",
     }
     contract_bytes = _json_bytes(contract, newline=True)
@@ -549,9 +556,12 @@ def _write_h5(path: Path, *, runtime_registration_id: str = "dailyreg-1") -> Non
     entry = _rim_entry()
     scope = {
         "schema_id": "citrus.session.orange_recording_geometry_contract_scope",
-        "schema_version": 1,
+        "schema_version": scope_version,
         "scope_status": "resolved",
-        "source_contract": {"sha256": _sha(contract_bytes)},
+        "source_contract": {
+            "sha256": _sha(contract_bytes),
+            "schema_version": contract_version if source_version is None else source_version,
+        },
         "target": {
             "rig_id": "omnifin0",
             "canvas_name": "shadow",
@@ -585,7 +595,7 @@ def _write_h5(path: Path, *, runtime_registration_id: str = "dailyreg-1") -> Non
         recording.attrs["capture_status"] = "embedded_verified"
         recording.attrs["checksum_verified"] = 1
         recording.attrs["schema_id"] = "orange.recording.geometry_contract"
-        recording.attrs["schema_version"] = 1
+        recording.attrs["schema_version"] = contract_version
         contract_dataset = recording.create_dataset("contract_json", data=contract_bytes)
         contract_dataset.attrs["checksum_sha256"] = _sha(contract_bytes)
         scope_dataset = recording.create_dataset("h5_scope_json", data=scope_bytes)
@@ -660,6 +670,73 @@ def test_h5_loader_classifies_unreferenced_geometry_as_legacy(tmp_path: Path) ->
 
     assert result.mask_geometry_status is MaskGeometryStatus.LEGACY_MISSING
     assert result.issues[0].code == "legacy_missing_recording_bound_mask"
+
+
+@pytest.mark.parametrize(
+    ("scope_version", "contract_version"),
+    [(1, 1), (2, 1), (2, 2)],
+)
+def test_h5_loader_reads_scope_v2_like_v1(
+    tmp_path: Path, scope_version: int, contract_version: int
+) -> None:
+    # Citrus #35: scope v2 changes only version fields, and may reference a v2
+    # geometry contract.
+    path = tmp_path / "experiment.h5"
+    _write_h5(path, scope_version=scope_version, contract_version=contract_version)
+
+    result = load_registered_dish_masks_from_citrus_h5(path)
+
+    assert result.mask_geometry_status is MaskGeometryStatus.VALID
+    assert result.issues == ()
+    assert len(result.masks) == 1
+
+
+@pytest.mark.parametrize(
+    ("scope_version", "contract_version", "source_version", "message"),
+    [
+        (1, 2, 2, "scope version 1 cannot reference geometry contract version 2"),
+        (1, 1, None, "cannot reference"),
+        (2, 2, 1, "another version than /recording_geometry_contract"),
+        (2, 1, 2, "another version than /recording_geometry_contract"),
+        (3, 1, 1, "version 1 or 2"),
+    ],
+)
+def test_h5_loader_refuses_mismatched_scope_versions(
+    tmp_path: Path,
+    scope_version: int,
+    contract_version: int,
+    source_version: int | None,
+    message: str,
+) -> None:
+    path = tmp_path / "experiment.h5"
+    _write_h5(
+        path,
+        scope_version=scope_version,
+        contract_version=contract_version,
+        source_version=source_version,
+    )
+    if source_version is None:
+        _drop_scope_source_version(path)
+
+    result = load_registered_dish_masks_from_citrus_h5(path)
+
+    assert result.mask_geometry_status is MaskGeometryStatus.INVALID
+    assert result.masks == {}
+    assert message in result.issues[0].message
+
+
+def _drop_scope_source_version(path: Path) -> None:
+    with h5py.File(path, "a") as h5:
+        group = h5["recording_geometry_contract"]
+        scope = json.loads(bytes(group["h5_scope_json"][()]))
+        del scope["source_contract"]["schema_version"]
+        attrs = dict(group["h5_scope_json"].attrs)
+        del group["h5_scope_json"]
+        scope_bytes = _json_bytes(scope)
+        dataset = group.create_dataset("h5_scope_json", data=scope_bytes)
+        for key, value in attrs.items():
+            dataset.attrs[key] = value
+        dataset.attrs["checksum_sha256"] = _sha(scope_bytes)
 
 
 def test_folder_loader_reads_a_v2_geometry_contract_like_v1(tmp_path: Path) -> None:
