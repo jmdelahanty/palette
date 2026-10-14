@@ -65,6 +65,25 @@ timelines inside Palette.
    Rekeying `dishes` by UUID is out of scope.
 6. No MZB call at registry time.
 
+## Manual linking (Jeremy, 2026-10-14; agent-contracts 5eb446c)
+
+A recording whose fish was never confirmed (v4 `unverified`, `queued` or
+`failed`; v3 without a verified fish reference) may be linked by a person to
+an MZB fish. A person's link is one form of the confirmation Palette requires
+before linking; it is not an exception to that rule.
+
+- Stored as a separate link record, never by editing the as-recorded columns
+  and never by editing the H5: recording, subject, `mzb_fish_id`, who linked
+  it, when, the evidence, and the fish revision served when the link was
+  checked.
+- Palette confirms the fish exists (`GET /fish/{fish_id}`) when the link is
+  made and refuses an unknown id.
+- A link is superseded by a new link record, not overwritten, so earlier links
+  stay auditable.
+- Queries resolve a recording's fish as: sealed and `registered`, else
+  confirmed at intake/reconcile, else the latest manual link, else unresolved.
+  The source of the answer is returned with it.
+
 ## Existing data
 
 The live registry is written only through `register_from_root` /
@@ -92,7 +111,9 @@ tens more before v4), and back up with `scripts/backup_palette_registry.sh`.
   registration status other than `registered`, the recording is linked to an
   MZB fish only after intake or reconcile confirms the fish exists
   (`create_fish_id_conflict` means the id names a different MZB record).
-  Palette's review of the v4 contract: agent-contracts PR 103.
+  Palette's review of the v4 contract: agent-contracts PR 103, merged as
+  0b468c7; pin schema sha256 `8c3ccd55…0208`. Citrus emits v4 only after
+  MZB's create endpoint and re-pin and after Palette's v4 pin is on main.
 - Phase C: experiment usage records in MZB (open; Jeremy leans to Palette
   confirming at intake).
 - Group fish ids: see `group_fish_ids_open_question.md`.
