@@ -103,6 +103,7 @@ STIMULUS_MODE: Dict[int, str] = {
     19: "DARK_FLASH",
     20: "BRIGHT_FLASH",
     21: "CONCENTRIC_DOTS",
+    22: "SOLID_COLOR",
     99: "NONE",
 }
 

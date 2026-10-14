@@ -248,14 +248,15 @@ def test_citrus_modes_17_through_21_validate_as_other_context(mode: str) -> None
 def test_unmirrored_citrus_mode_id_fails_closed() -> None:
     semantic_hash, semantic_json, trial_json = _documents(("DARK_FLASH",))
     semantic = json.loads(semantic_json)
-    semantic["identity"]["steps"][0]["stimulus_mode_id"] = 22
+    # 23 is past the last mode Palette mirrors (22 SOLID_COLOR is live).
+    semantic["identity"]["steps"][0]["stimulus_mode_id"] = 23
     semantic_json = _json(semantic)
     semantic_hash = "sha256:" + sha256(semantic_json.encode("utf-8")).hexdigest()
     trial = json.loads(trial_json)
     trial["protocol_semantic_hash"] = semantic_hash
-    trial["steps"][0].update(stimulus_mode="SOLID_COLOR", stimulus_mode_id=22)
+    trial["steps"][0].update(stimulus_mode="UNKNOWN_MODE", stimulus_mode_id=23)
 
-    with pytest.raises(ProtocolSemanticContractError, match="unknown stimulus_mode_id 22"):
+    with pytest.raises(ProtocolSemanticContractError, match="unknown stimulus_mode_id 23"):
         validate_protocol_semantic_snapshot(
             semantic_hash=semantic_hash,
             semantic_json=semantic_json,
