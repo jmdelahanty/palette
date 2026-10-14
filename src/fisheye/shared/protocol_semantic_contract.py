@@ -108,6 +108,31 @@ HEADING_SPLIT_LEFT_SIDES = frozenset({"side_a", "side_b"})
 HEADING_SPLIT_FILL_CONSTANTS = MappingProxyType(
     {"domain": "experimental_area", "outside_area_policy": "side_b_v1"}
 )
+# The semantic identity's phototaxis parameters (Citrus protocol_semantic_hash
+# Phototaxis(), c0c0607): fill_type_id 2 with a nested heading_split object of
+# enum ids and scaled numbers, mirrored by name in the trial index.
+HEADING_SPLIT_SEMANTIC_FILL_TYPE_ID = 2
+HEADING_SPLIT_SEMANTIC_IDS = MappingProxyType(
+    {
+        "fill_style": ("fill_style_id", ("two_tone", "gradient")),
+        "left_side": ("left_side_id", ("side_a", "side_b")),
+        "unknown_heading_fallback": (
+            "unknown_heading_fallback_id",
+            ("static_fill", "uniform_side_a", "uniform_side_b"),
+        ),
+    }
+)
+HEADING_SPLIT_SEMANTIC_SCALED = MappingProxyType(
+    {
+        "minimum_keypoint_confidence": "fraction",
+        "minimum_heading_displacement_degrees": "scalar",
+    }
+)
+HEADING_SPLIT_SEMANTIC_KEYS = frozenset(
+    [field for field, _names in HEADING_SPLIT_SEMANTIC_IDS.values()]
+    + list(HEADING_SPLIT_SEMANTIC_SCALED)
+    + ["maximum_held_heading_updates", "module"]
+)
 
 PROTOCOL_SNAPSHOT_SCHEMA_ID = "citrus.protocol.snapshot"
 PROTOCOL_SNAPSHOT_SCHEMA_VERSION = 2
@@ -381,6 +406,7 @@ def _validate_heading_split_step(
     stimulus_mode_id: int,
     trial_schema_version: int,
     admits_heading_split: bool,
+    semantic_parameters: object = None,
 ) -> None:
     """Refuse or check a reactive heading-split step (agent-contracts #98 r5).
 
@@ -395,7 +421,17 @@ def _validate_heading_split_step(
     fill_type = fill.get("type") if isinstance(fill, Mapping) else None
     has_style = isinstance(fill, Mapping) and "style" in fill
     has_reactive = "reactive" in features
-    if fill_type != HEADING_SPLIT_FILL_TYPE and not has_style and not has_reactive:
+    parameters = semantic_parameters if isinstance(semantic_parameters, Mapping) else {}
+    semantic_reactive = stimulus_mode_id == HEADING_SPLIT_STIMULUS_MODE_ID and (
+        parameters.get("fill_type_id") == HEADING_SPLIT_SEMANTIC_FILL_TYPE_ID
+        or "heading_split" in parameters
+    )
+    if (
+        fill_type != HEADING_SPLIT_FILL_TYPE
+        and not has_style
+        and not has_reactive
+        and not semantic_reactive
+    ):
         return
     if not admits_heading_split:
         raise ProtocolSemanticContractError(
@@ -474,6 +510,56 @@ def _validate_heading_split_step(
         if type(reactive[key]) is not str or reactive[key] not in allowed:
             raise ProtocolSemanticContractError(
                 f"{name}.features.reactive.{key} must be one of {sorted(allowed)}."
+            )
+    _validate_heading_split_semantic(parameters, reactive, step_index=step_index)
+
+
+def _validate_heading_split_semantic(
+    parameters: Mapping[str, Any], reactive: Mapping[str, Any], *, step_index: int
+) -> None:
+    """The semantic identity must declare exactly what the trial index names."""
+
+    name = f"semantic step {step_index}.parameters"
+    _require_exact(
+        parameters.get("fill_type_id"),
+        HEADING_SPLIT_SEMANTIC_FILL_TYPE_ID,
+        name=f"{name}.fill_type_id",
+    )
+    semantic = parameters.get("heading_split")
+    if not isinstance(semantic, Mapping) or set(semantic) != HEADING_SPLIT_SEMANTIC_KEYS:
+        raise ProtocolSemanticContractError(
+            f"{name}.heading_split must have exactly the keys "
+            f"{sorted(HEADING_SPLIT_SEMANTIC_KEYS)}."
+        )
+    _require_exact(
+        semantic["module"], reactive["module"], name=f"{name}.heading_split.module"
+    )
+    _require_exact(
+        semantic["maximum_held_heading_updates"],
+        reactive["maximum_held_heading_updates"],
+        name=f"{name}.heading_split.maximum_held_heading_updates",
+    )
+    for key, (field, names) in HEADING_SPLIT_SEMANTIC_IDS.items():
+        _require_exact(
+            semantic[field],
+            names.index(reactive[key]),
+            name=f"{name}.heading_split.{field} for {reactive[key]!r}",
+        )
+    for key, unit in HEADING_SPLIT_SEMANTIC_SCALED.items():
+        scaled = semantic[key]
+        if (
+            not isinstance(scaled, Mapping)
+            or set(scaled) != {"scale", "unit", "value"}
+            or scaled["scale"] != "1e-6"
+            or scaled["unit"] != unit
+            or type(scaled["value"]) is not int
+        ):
+            raise ProtocolSemanticContractError(
+                f"{name}.heading_split.{key} must be one 1e-6 {unit} scaled integer."
+            )
+        if scaled["value"] / 10**6 != reactive[key]:
+            raise ProtocolSemanticContractError(
+                f"{name}.heading_split.{key} differs from the trial index."
             )
 
 
@@ -720,6 +806,7 @@ def validate_protocol_semantic_snapshot(
             stimulus_mode_id=semantic_mode_id,
             trial_schema_version=trial_schema_version,
             admits_heading_split=admits_heading_split,
+            semantic_parameters=semantic_step.get("parameters"),
         )
         if semantic_mode_id == 4:
             parameters = semantic_step.get("parameters")

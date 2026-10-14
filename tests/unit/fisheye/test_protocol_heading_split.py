@@ -53,8 +53,68 @@ STATIC_FEATURES = {
 }
 
 
-def _validate(features: dict[str, object], *, mode_id: int = 18, admits: bool = True, trial_version: int = 3):
+# Verbatim from Citrus c0c0607 tools/protocol_identity_dump, protocol B
+# (phototaxis_heading_split_30trials_seed1.json) semantic step 1 and its trial
+# index reactive block.
+CITRUS_SEMANTIC_PARAMETERS = json.loads(
+    '{"brightness":{"scale":"1e-6","unit":"scalar","value":1000000},'
+    '"circle_radius_fraction":{"scale":"1e-6","unit":"fraction","value":500000},"fill_type_id":2,'
+    '"half_side_id":0,"heading_split":{"fill_style_id":0,"left_side_id":0,"maximum_held_heading_updates":60,'
+    '"minimum_heading_displacement_degrees":{"scale":"1e-6","unit":"scalar","value":5000000},'
+    '"minimum_keypoint_confidence":{"scale":"1e-6","unit":"fraction","value":500000},'
+    '"module":"PhototaxisHeadingSplit","unknown_heading_fallback_id":2},"quarter_id":0,"region_type_id":0,'
+    '"side_a_color":{"color_space":"srgb","rgba8":[255,255,255,255]},'
+    '"side_b_color":{"color_space":"srgb","rgba8":[0,0,0,255]},"type":"ProtocolPhototaxisParams"}'
+)
+CITRUS_REACTIVE = json.loads(
+    '{"camera_view_assumed":"dorsal_unmirrored","fill_style":"two_tone",'
+    '"heading_definition_ref":"agent-contracts:citrus-palette/heading/heading_convention_v1.json",'
+    '"hysteresis_frame":"camera","left_side":"side_a","maximum_held_heading_updates":60,'
+    '"minimum_heading_displacement_degrees":5.0,"minimum_keypoint_confidence":0.5,'
+    '"module":"PhototaxisHeadingSplit","side_rule_id":"projected_left_axis_v1",'
+    '"unknown_heading_fallback":"uniform_side_b"}'
+)
+
+
+def _semantic_parameters(reactive: object) -> dict[str, object]:
+    """Citrus's semantic parameters re-derived from a (valid) reactive block."""
+
+    parameters = json.loads(json.dumps(CITRUS_SEMANTIC_PARAMETERS))
+    if not isinstance(reactive, dict):
+        return parameters
+    split = parameters["heading_split"]
+    ids = {
+        "fill_style": ("fill_style_id", ["two_tone", "gradient"]),
+        "left_side": ("left_side_id", ["side_a", "side_b"]),
+        "unknown_heading_fallback": ("unknown_heading_fallback_id", ["static_fill", "uniform_side_a", "uniform_side_b"]),
+    }
+    for key, (field, names) in ids.items():
+        if reactive.get(key) in names:
+            split[field] = names.index(reactive[key])
+    if "maximum_held_heading_updates" in reactive:
+        split["maximum_held_heading_updates"] = reactive["maximum_held_heading_updates"]
+    for key in ("minimum_keypoint_confidence", "minimum_heading_displacement_degrees"):
+        value = reactive.get(key)
+        if type(value) in (int, float):
+            split[key]["value"] = round(value * 10**6)
+    if type(reactive.get("module")) is str:
+        split["module"] = reactive["module"]
+    return parameters
+
+
+def _validate(
+    features: dict[str, object],
+    *,
+    mode_id: int = 18,
+    admits: bool = True,
+    trial_version: int = 3,
+    parameters: object = "auto",
+):
     mode, family = {18: ("PHOTOTAXIS", "phototaxis"), 17: ("STATIC_GRID", "static_grid")}[mode_id]
+    if parameters == "auto":
+        reactive = features.get("reactive")
+        heading_split = isinstance(features.get("fill"), dict) and features["fill"].get("type") == "heading_split"
+        parameters = _semantic_parameters(reactive) if heading_split and mode_id == 18 else {}
     angle_v1 = trial_version == 3
     semantic = {
         "identity": {
@@ -62,7 +122,7 @@ def _validate(features: dict[str, object], *, mode_id: int = 18, admits: bool = 
             "steps": [
                 {
                     "duration": {"scale": "1e-3", "unit": "s", "value": 30000},
-                    "parameters": {},
+                    "parameters": parameters,
                     "post_stimulus_iti": {"scale": "1e-3", "unit": "s", "value": 0},
                     "stimulus_mode_id": mode_id,
                 }
@@ -186,3 +246,50 @@ def test_heading_split_requires_phototaxis() -> None:
 def test_heading_split_requires_trial_index_v3() -> None:
     with pytest.raises(ProtocolSemanticContractError, match="trial index schema_version"):
         _validate(_heading_split_features(), trial_version=2)
+
+
+def test_citrus_bytes_validate() -> None:
+    features = {**_heading_split_features(), "reactive": CITRUS_REACTIVE}
+    _validate(features, parameters=CITRUS_SEMANTIC_PARAMETERS)
+
+
+def _split(**changes: object) -> dict[str, object]:
+    parameters = json.loads(json.dumps(CITRUS_SEMANTIC_PARAMETERS))
+    for key, value in changes.items():
+        if value is None:
+            del parameters["heading_split"][key]
+        else:
+            parameters["heading_split"][key] = value
+    return parameters
+
+
+@pytest.mark.parametrize(
+    ("parameters", "message"),
+    [
+        ({**CITRUS_SEMANTIC_PARAMETERS, "fill_type_id": 0}, "fill_type_id"),
+        ({k: v for k, v in CITRUS_SEMANTIC_PARAMETERS.items() if k != "heading_split"}, "heading_split must have exactly the keys"),
+        (_split(module="Other"), "heading_split.module"),
+        (_split(maximum_held_heading_updates=61), "maximum_held_heading_updates"),
+        (_split(maximum_held_heading_updates="never"), "maximum_held_heading_updates"),
+        (_split(fill_style_id=1), "fill_style_id"),
+        (_split(left_side_id=1), "left_side_id"),
+        (_split(unknown_heading_fallback_id=0), "unknown_heading_fallback_id"),
+        (_split(minimum_heading_displacement_degrees={"scale": "1e-6", "unit": "scalar", "value": 5000001}), "differs from the trial index"),
+        (_split(minimum_keypoint_confidence={"scale": "1e-6", "unit": "scalar", "value": 500000}), "1e-6 fraction scaled integer"),
+        (_split(minimum_keypoint_confidence={"scale": "1e-3", "unit": "fraction", "value": 500}), "1e-6 fraction scaled integer"),
+        (_split(minimum_keypoint_confidence=0.5), "1e-6 fraction scaled integer"),
+        (_split(module=None), "exactly the keys"),
+        (_split(extra=1), "exactly the keys"),
+    ],
+)
+def test_semantic_identity_must_match_the_trial_index(parameters: dict, message: str) -> None:
+    features = {**_heading_split_features(), "reactive": CITRUS_REACTIVE}
+    with pytest.raises(ProtocolSemanticContractError, match=message):
+        _validate(features, parameters=parameters)
+
+
+def test_semantic_only_heading_split_is_refused() -> None:
+    with pytest.raises(ProtocolSemanticContractError, match="no admission revision before 6"):
+        _validate(STATIC_FEATURES, admits=False, parameters=CITRUS_SEMANTIC_PARAMETERS)
+    with pytest.raises(ProtocolSemanticContractError, match="allowed only when features.fill.type is 'heading_split'"):
+        _validate(STATIC_FEATURES, parameters=CITRUS_SEMANTIC_PARAMETERS)
