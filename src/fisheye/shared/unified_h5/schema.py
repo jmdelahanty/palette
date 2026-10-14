@@ -67,13 +67,13 @@ CONTRACT_HASHES = {
     "experimental_h5_capacity_preflight_v4.schema.json": "5892090691243097abbd952f72655c45bcc7d8998fce74a86a1e4b71d87eeb9e",
     "reactive_phototaxis_states_v1.json": "4270da37b8cacc2722494eef99a0652576902955e35de07904fd23ee9c77408c",
     # Admission revision 7 (video_overlay_v1: video tracking overlay states and
-    # pose observation v3; agent-contracts PR 104 head d2876ba, Citrus PR 42 at
+    # pose observation v3; agent-contracts PR 104 head c8c92f1, Citrus PR 42 at
     # a3849567 / 1855e374 / 20f27395).
     "unified_h5_admission_v7.json": "82d9d3ca0205c23e8d0e2936d60a866677d9ba094c37e616a8699c29b70a57a7",
     "unified_h5_producer_policy_543102f7.json": "543102f7b9610f2ab7d55880ab02cf863e0bd791fcc62b067d964a55ffd24e5d",
     "experimental_h5_core_video_overlay_v1.json": "544d7d1095a1591961b307b5acd0a0d61a0c486ea475d7ea218289f62f980733",
     "experimental_h5_capacity_preflight_v5.schema.json": "dfad0cd22cb3a6de6b18adf768395ef30713d9dbe6618fac6ae872d0188c1337",
-    "video_tracking_overlay_states_v1.json": "2ab392926dc396c3af8391ae9f0ec241ab5ca87b4f2716b511314febeb1737ac",
+    "video_tracking_overlay_states_v1.json": "a407533eb5e5dcde9963643a5af95910efcfa5be35ae8965c5544e15ae1245d1",
 }
 # The admission revision a file is judged under is chosen by its capacity
 # preflight's schema_version: preflight v1 files (no catalog_id) keep revision

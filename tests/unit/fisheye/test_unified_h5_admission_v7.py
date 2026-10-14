@@ -1,6 +1,6 @@
 """Unified H5 admission revision 7: video_overlay_v1 and pose observation v3.
 
-agent-contracts PR 104 (head d2876ba), Citrus PR 42 commits a3849567 (catalog),
+agent-contracts PR 104 (head c8c92f1), Citrus PR 42 commits a3849567 (catalog),
 1855e374 (policy pin) and 20f27395 (witnesses). Revision 7 adds
 ``/components/video_tracking_overlay/states`` and its settings JSON to
 phototaxis_v1, and requires pose observation v3 (skeleton sidecar in the
@@ -47,7 +47,7 @@ OVERLAY = FIXTURES / "citrus_unified_h5_video_overlay_v1"
 COMPLETE = "video_overlay_v1_complete.h5"
 RIG = "video_overlay_v1_rig_homography_complete.h5"
 HORIZON = "video_overlay_v1_probe_horizon_complete.h5"
-# agent-contracts PR 104 head d2876ba, generated at Citrus 20f27395 (commit C).
+# agent-contracts PR 104 head c8c92f1, generated at Citrus 20f27395 (commit C).
 DIGESTS = {
     COMPLETE: "8057641421531d4b12ba829f877ccebda0d2f614b59db653b92228049de082f8",
     RIG: "0fcfd8aeec0ea591d8597a31671766370836bd7cf40acaa37549c85c6dd58c53",

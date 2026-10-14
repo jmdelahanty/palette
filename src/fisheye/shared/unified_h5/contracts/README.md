@@ -36,11 +36,11 @@ They are not Palette scientific-acceptance or activation schemas.
 | `experimental_h5_core_phototaxis_v1.json` (core catalog `phototaxis_v1`: angle_v1 plus `/components/phototaxis/states` v1) | Citrus PR 41 commit C `d6754a3e6c620d3acc4c473b47db29bfcfc5a0e8` `docs/schemas/` (unchanged since `bb1bce18`), merged `eab6b3b` | `cb6b86fe16f46a7aef64b051a388dc9d4b3e6bc4fbf0c6cc9791f76b755d33ed` |
 | `experimental_h5_capacity_preflight_v4.schema.json` (`catalog_id` const `phototaxis_v1`, policy const `012cd25f…`) | Citrus PR 41 `d6754a3e` `docs/schemas/`, merged `eab6b3b` | `5892090691243097abbd952f72655c45bcc7d8998fce74a86a1e4b71d87eeb9e` |
 | `reactive_phototaxis_states_v1.json` (states contract, admitted form of #98) | agent-contracts PR 101 `citrus-palette/reactive_phototaxis/`, merged `b723380` (main `8927594`) | `4270da37b8cacc2722494eef99a0652576902955e35de07904fd23ee9c77408c` |
-| `unified_h5_admission_v7.json` (admission revision 7: catalog `video_overlay_v1`, video tracking overlay states, pose observation v3) | agent-contracts PR 104 head `d2876ba`, not yet merged | `82d9d3ca0205c23e8d0e2936d60a866677d9ba094c37e616a8699c29b70a57a7` |
-| `unified_h5_producer_policy_543102f7.json` (agent-contracts `citrus-palette/producer_policies/unified_h5_admission_543102f7.json`, renamed; bound to `video_overlay_v1`) | agent-contracts PR 104 head `d2876ba`, not yet merged | `543102f7b9610f2ab7d55880ab02cf863e0bd791fcc62b067d964a55ffd24e5d` |
+| `unified_h5_admission_v7.json` (admission revision 7: catalog `video_overlay_v1`, video tracking overlay states, pose observation v3) | agent-contracts PR 104 head `c8c92f1`, not yet merged | `82d9d3ca0205c23e8d0e2936d60a866677d9ba094c37e616a8699c29b70a57a7` |
+| `unified_h5_producer_policy_543102f7.json` (agent-contracts `citrus-palette/producer_policies/unified_h5_admission_543102f7.json`, renamed; bound to `video_overlay_v1`) | agent-contracts PR 104 head `c8c92f1`, not yet merged | `543102f7b9610f2ab7d55880ab02cf863e0bd791fcc62b067d964a55ffd24e5d` |
 | `experimental_h5_core_video_overlay_v1.json` (core catalog `video_overlay_v1`: phototaxis_v1 plus `/components/video_tracking_overlay/states` v1) | Citrus PR 42 commit A `a3849567` `docs/schemas/` (unchanged at `1855e374`, `20f27395`), not yet merged | `544d7d1095a1591961b307b5acd0a0d61a0c486ea475d7ea218289f62f980733` |
 | `experimental_h5_capacity_preflight_v5.schema.json` (`catalog_id` const `video_overlay_v1`, policy const `543102f7…`) | Citrus PR 42 commit B `1855e374` `docs/schemas/` (unchanged at `20f27395`), not yet merged | `dfad0cd22cb3a6de6b18adf768395ef30713d9dbe6618fac6ae872d0188c1337` |
-| `video_tracking_overlay_states_v1.json` (overlay states contract: fields, invariants, exact arithmetic) | agent-contracts PR 104 head `d2876ba` `citrus-palette/video_tracking_overlay/`, not yet merged | `2ab392926dc396c3af8391ae9f0ec241ab5ca87b4f2716b511314febeb1737ac` |
+| `video_tracking_overlay_states_v1.json` (overlay states contract: fields, invariants, exact arithmetic) | agent-contracts PR 104 head `c8c92f1` `citrus-palette/video_tracking_overlay/`, not yet merged | `a407533eb5e5dcde9963643a5af95910efcfa5be35ae8965c5544e15ae1245d1` |
 
 The geometry and presentation adapters follow that producer's
 `src/logging/experimental_h5_geometry.cpp`, `stimulus_geometry_contract.cpp`, and
@@ -116,7 +116,7 @@ pose observations; a reactive file must carry pose observation v2. The
 phototaxis_v1 witness H5s are under `tests/fixtures/citrus_unified_h5_phototaxis_v1`
 (agent-contracts PR 101 `citrus-palette/fixtures/phototaxis_v1/`, README verbatim).
 
-Admission revision 7 (agent-contracts PR 104 head `d2876ba`, Citrus PR 42
+Admission revision 7 (agent-contracts PR 104 head `c8c92f1`, Citrus PR 42
 commits `a3849567` / `1855e374` / `20f27395`; not yet merged, digests to be
 re-checked byte-for-byte against the merges) sits next to revision 6:
 preflight v5 files (`catalog_id video_overlay_v1`) are selected the same way.
