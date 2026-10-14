@@ -207,6 +207,8 @@ def _picked(unit=UNIT):
 def test_every_not_collected_reason_is_admitted(reason):
     snapshot = copy.deepcopy(V3)
     snapshot["fish_reference"].update(reason=reason, mzb_fish_unit_id=None)
+    if reason == "fish_list_unavailable":
+        snapshot["errors"] = [{"endpoint": "/dishes/19220_1/fish", "kind": "http", "http_status": 503, "detail_error": "database_error", "message": "HTTP 503"}]
     attrs = dict(ATTRS, fish_reference_reason=reason)
     assert admit_subject_snapshot(snapshot, attrs)["citrus_snapshot_status"] == "admitted"
 
@@ -267,3 +269,32 @@ def test_the_schema_ties_the_unit_and_reasons_to_the_status(fish_reference):
     snapshot["fish_reference"] = fish_reference
     with pytest.raises(UnifiedH5ContractError, match="citrus_snapshot_schema"):
         admit_subject_snapshot(snapshot, ATTRS)
+
+
+@pytest.mark.parametrize(
+    "lookup, endpoint, admitted",
+    [
+        ("collected", "/dishes/19220_1/fish", True),
+        ("collected", "/dishes/19220_2/fish", False),
+        ("lookup_failed", "/dishes/19220_1/citrus-snapshot", True),
+        ("lookup_failed", "/dishes/19220_2/citrus-snapshot", False),
+    ],
+)
+def test_fish_list_unavailable_names_the_snapshots_own_dish(lookup, endpoint, admitted):
+    """The schema checks the endpoint's shape; Palette checks its {dish_id}."""
+
+    snapshot = copy.deepcopy(V3)
+    snapshot["fish_reference"].update(reason="fish_list_unavailable", mzb_fish_unit_id=None)
+    snapshot["errors"] = [{"endpoint": endpoint, "kind": "http", "http_status": 503, "detail_error": None, "message": "HTTP 503"}]
+    attrs = dict(ATTRS, fish_reference_reason="fish_list_unavailable")
+    if lookup != "collected":
+        snapshot.update(subject_lookup_status=lookup, subject_lookup_reason="dish_lookup_http_404", dish=None)
+        attrs = {k: v for k, v in attrs.items() if k not in {
+            "dish_uuid", "dish_revision", "dish_updated_at", "genotype", "species", "sex",
+            "cross_id", "date_of_fertilization"}}
+        attrs.update(subject_lookup_status=lookup, subject_lookup_reason="dish_lookup_http_404")
+    if admitted:
+        assert admit_subject_snapshot(snapshot, attrs)["citrus_snapshot_status"] == "admitted"
+    else:
+        with pytest.raises(UnifiedH5ContractError, match="fish_list_unavailable_error_not_for_dish"):
+            admit_subject_snapshot(snapshot, attrs)

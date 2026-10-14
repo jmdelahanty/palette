@@ -36,10 +36,11 @@ SNAPSHOT_PATH = "/metadata/zebrobot/snapshot_json"
 PRE_CONTRACT_VERSION = 2
 CONTRACT_VERSION = 3
 SCHEMA_FILE = "citrus_zebrobot_snapshot_v3.schema.json"
-# agent-contracts PR 52 at e16f6251, amended 2026-10-14 by PR 110 head 407eda8
-# (Citrus PR 43; contract md sha256 6d313826...): three not_collected fish
-# reasons and the optional fish_reference.mzb_fish_unit_id, schema_version 3.
-SCHEMA_SHA256 = "c7eabda360346ea7c9758be36848c819edb3d0444b44d229f8d1ed7553a4c58b"
+# agent-contracts PR 52 at e16f6251, amended 2026-10-14 by PR 110 head 8281410
+# (Citrus PR 43 533ce76; contract md sha256 6c23e38d...): three not_collected
+# fish reasons, which require the optional fish_reference.mzb_fish_unit_id, and
+# fish_list_unavailable's failed request in errors[]; schema_version 3.
+SCHEMA_SHA256 = "ff362fe03245819660f449b60b00a78cf7004d0db97073d41005179c588f068c"
 # Keys only the never-emitted contract v2 carries: such a v2 document is refused.
 CONTRACT_ONLY_KEYS = frozenset(
     {"api_schema_version", "subject_lookup_status", "fish_reference", "errors"}
@@ -119,6 +120,27 @@ def _same(attr: Any, value: Any) -> bool:
     return attr == value
 
 
+def _check_fish_list_unavailable_error(snapshot: Mapping[str, Any]) -> None:
+    """The failed request names the snapshot's own dish (the schema cannot say so).
+
+    The schema already requires an errors[] entry whose endpoint is
+    ``/dishes/<id>/fish`` (dish served) or ``/dishes/<id>/(citrus-snapshot|fish)``.
+    """
+
+    if snapshot["fish_reference"]["reason"] != "fish_list_unavailable":
+        return
+    dish_id = snapshot["dish_id"]
+    suffixes = ("fish",) if snapshot["subject_lookup_status"] == "collected" else ("citrus-snapshot", "fish")
+    wanted = {f"/dishes/{dish_id}/{suffix}" for suffix in suffixes} if isinstance(dish_id, str) else set()
+    endpoints = {
+        error.get("endpoint") for error in snapshot["errors"] if isinstance(error, Mapping)
+    }
+    require(
+        bool(wanted & endpoints),
+        "citrus_snapshot_fish_list_unavailable_error_not_for_dish:" + ",".join(sorted(wanted)),
+    )
+
+
 def admit_subject_snapshot(
     snapshot: Mapping[str, Any] | None, attributes: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -141,6 +163,7 @@ def admit_subject_snapshot(
 
     errors = sorted(e.message for e in Draft202012Validator(_schema()).iter_errors(snapshot))
     require(not errors, f"citrus_snapshot_schema:{errors[0] if errors else ''}")
+    _check_fish_list_unavailable_error(snapshot)
     paired = dict(PAIRED_FIELDS)
     if snapshot["cross"] is not None:
         paired.update(CROSS_PAIRED_FIELDS)

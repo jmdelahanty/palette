@@ -221,6 +221,86 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "required": [
+          "fish_reference"
+        ],
+        "properties": {
+          "fish_reference": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "const": "fish_list_unavailable"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "errors": {
+            "contains": {
+              "type": "object",
+              "required": [
+                "endpoint"
+              ],
+              "properties": {
+                "endpoint": {
+                  "type": "string",
+                  "pattern": "^/dishes/[^/]+/(citrus-snapshot|fish)$"
+                }
+              }
+            }
+          }
+        }
+      },
+      "description": "fish_list_unavailable (2026-10-14): the failed request is in errors[], the dish lookup's (/dishes/{dish_id}/citrus-snapshot) when the dish was not served, else the fish list's (next rule). The endpoint's {dish_id} equals the snapshot's dish_id; a consumer checks that equality itself."
+    },
+    {
+      "if": {
+        "required": [
+          "subject_lookup_status",
+          "fish_reference"
+        ],
+        "properties": {
+          "subject_lookup_status": {
+            "const": "collected"
+          },
+          "fish_reference": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "const": "fish_list_unavailable"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "errors": {
+            "contains": {
+              "type": "object",
+              "required": [
+                "endpoint"
+              ],
+              "properties": {
+                "endpoint": {
+                  "type": "string",
+                  "pattern": "^/dishes/[^/]+/fish$"
+                }
+              }
+            }
+          }
+        }
+      },
+      "description": "fish_list_unavailable with a served dish: errors[] has the failed GET /dishes/{dish_id}/fish."
     }
   ],
   "$defs": {
@@ -372,7 +452,7 @@
           "description": "Added 2026-10-14 (additive, optional so earlier files stay valid; Citrus writes it in every snapshot from this revision): the picked fish's current_unit_id exactly as MetaZebrobot served it in GET /dishes/{dish_id}/fish at start (for example a well, \"19234_3:C1\"). A string only when status is collected; null when MetaZebrobot served none, and under lookup_failed or not_collected. Never inferred. It is MetaZebrobot's housing record at the sealed fish revision (mzb_fish_revision), not proof of where the fish was during the recording."
         }
       },
-      "description": "mzb_fish_id is a verified MetaZebrobot reference only when status is collected with revision and updated_at present; under lookup_failed it is an operator declaration (PR 52 #6002828990). Revised 2026-10-14 (additive): not_collected reasons gain no_registered_fish (the dish has no registered fish, so none could be picked) and fish_list_unavailable (no fish was picked and the dish's fish list could not be read); operator_did_not_select now means fish were available and none was picked. schema_version stays 3: every earlier file is still valid. Revised 2026-10-14 again (additive, approved by Jeremy): a start that would record operator_did_not_select (fish registered, none picked) is now refused, unless the operator deliberately ticks \"Record without a fish\" in the GUI start summary, recorded as not_collected reason operator_declined_pick; operator_did_not_select remains valid for earlier files. New optional mzb_fish_unit_id seals the picked fish's MetaZebrobot housing unit as served at start (see its description). schema_version stays 3: every earlier file is still valid.",
+      "description": "mzb_fish_id is a verified MetaZebrobot reference only when status is collected with revision and updated_at present; under lookup_failed it is an operator declaration (PR 52 #6002828990). Revised 2026-10-14 (additive): not_collected reasons gain no_registered_fish (the dish has no registered fish, so none could be picked) and fish_list_unavailable (no fish was picked and the dish's fish list could not be read); operator_did_not_select now means fish were available and none was picked. schema_version stays 3: every earlier file is still valid. Revised 2026-10-14 again (additive, approved by Jeremy): a start that would record operator_did_not_select (fish registered, none picked) is now refused, unless the operator deliberately ticks \"Record without a fish\" in the GUI start summary, recorded as not_collected reason operator_declined_pick; operator_did_not_select remains valid for earlier files. New optional mzb_fish_unit_id seals the picked fish's MetaZebrobot housing unit as served at start (see its description). schema_version stays 3: every earlier file is still valid. A fish_reference with one of the reasons this amendment added (operator_declined_pick, no_registered_fish, fish_list_unavailable) must carry mzb_fish_unit_id, since the same producer revision writes both; a collected fish_reference from that revision carries it too, which only the producer can guarantee.",
       "allOf": [
         {
           "if": {
@@ -481,6 +561,27 @@
                 "type": "null"
               }
             }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "enum": [
+                  "operator_declined_pick",
+                  "no_registered_fish",
+                  "fish_list_unavailable"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "mzb_fish_unit_id"
+            ]
           }
         }
       ]
