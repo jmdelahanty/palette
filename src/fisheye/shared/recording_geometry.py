@@ -44,7 +44,10 @@ RIM_OBSERVATION_SCHEMA_VERSIONS = frozenset(
     versions["rim_observation"] for versions in GEOMETRY_CONTRACT_VERSIONS.values()
 )
 H5_SCOPE_SCHEMA_ID = "citrus.session.orange_recording_geometry_contract_scope"
-H5_SCOPE_SCHEMA_VERSION = 1
+# Scope version -> the source contract versions it may reference. v2 (Citrus
+# #35) changes only version fields: it may reference a v2 geometry contract.
+H5_SCOPE_SOURCE_CONTRACT_VERSIONS = {1: frozenset({1}), 2: frozenset({1, 2})}
+H5_SCOPE_SCHEMA_VERSION = 1  # the first version; kept for callers
 DAILY_REGISTRATION_SCHEMA_ID = "citrus.calibration.daily_registration"
 DAILY_REGISTRATION_SCHEMA_VERSION = 1
 
@@ -1075,15 +1078,29 @@ def load_registered_dish_masks_from_citrus_h5(
                 "h5_scope_json",
                 label="recording geometry h5_scope_json",
             )
-            _require_schema(
-                scope,
-                schema_id=H5_SCOPE_SCHEMA_ID,
-                schema_version=H5_SCOPE_SCHEMA_VERSION,
-                label="recording geometry H5 scope",
-            )
+            scope_version = scope.get("schema_version")
+            if (
+                scope.get("schema_id") != H5_SCOPE_SCHEMA_ID
+                or scope_version not in H5_SCOPE_SOURCE_CONTRACT_VERSIONS
+            ):
+                raise RecordingGeometryError(
+                    f"recording geometry H5 scope must be {H5_SCOPE_SCHEMA_ID!r} "
+                    f"version {' or '.join(str(v) for v in sorted(H5_SCOPE_SOURCE_CONTRACT_VERSIONS))}."
+                )
             if scope.get("scope_status") != "resolved":
                 raise RecordingGeometryError("H5 recording geometry scope is unresolved.")
             source_contract = _required_mapping(scope.get("source_contract"), label="scope.source_contract")
+            source_version = source_contract.get("schema_version")
+            if source_version not in H5_SCOPE_SOURCE_CONTRACT_VERSIONS[scope_version]:
+                raise RecordingGeometryError(
+                    f"H5 scope version {scope_version} cannot reference geometry "
+                    f"contract version {source_version!r}."
+                )
+            if source_version != group_version:
+                raise RecordingGeometryError(
+                    "H5 scope source_contract declares another version than "
+                    "/recording_geometry_contract."
+                )
             if _normalized_sha256(source_contract.get("sha256"), label="scope source contract sha256") != contract_sha:
                 raise RecordingGeometryError("H5 scope source-contract checksum mismatch.")
             attr_source_sha = recording_group["h5_scope_json"].attrs.get("source_contract_sha256")
