@@ -67,11 +67,24 @@ SCHEMA_FILES = {
 # docs/zebrobot_snapshot.md; Palette's reliance: agent-contracts PR 54.
 MZB_PIN = {
     "repo": "jmdelahanty/metazebrobot",
-    "commit": "509a3eb88d6ff44fe07e7ea20d212be5eafe46b7",
-    "consumer_openapi_sha256": "f5280e430d4b5f10c3643cb89a6187eacc45fdac7af55b2e81f5e315b7b754dc",
-    # agent-contracts metazebrobot-consumers/consumers.json (PR 54, merge 5fc735fe).
-    "consumers_json_sha256": "8d2b38780ad08c7111cb6f5bd81723169e5ce96cad44f489e6cf442ee071bda3",
+    "commit": "c93b2530030bd80e65a008299a26442b1f5fb3ce",
+    "consumer_openapi_sha256": "a8cb88841430739f16958777062e1c6ed1e01c98583e6a2b0bc14e9864752d03",
+    # agent-contracts metazebrobot-consumers/consumers.json (#113 fish endings; main 5d9b1727).
+    "consumers_json_sha256": "511a0aae1c931c50329ccb894cce604c94118115699d8424f2ef6ee5334d7d02",
 }
+# Consumer slices a recording's serving build may report and still match: the
+# pin, plus earlier slices the pin only adds to. None qualify at c93b2530:
+# GET /dishes/{dish_id}/fish, which Palette relies on, changed meaning twice
+# since 509a3eb8 ("registered to the dish" -> "in the dish now" at ed39b042,
+# then ended fish hidden at c93b2530), so a list sealed by an earlier build
+# means something else. Add a slice here only when the pin strictly extends it.
+COMPATIBLE_CONSUMER_OPENAPI_SHA256 = frozenset({MZB_PIN["consumer_openapi_sha256"]})
+
+
+def consumer_schema_matches_pin(served: str | None) -> bool | None:
+    """Whether a sealed serving build's consumer slice is compatible with the pin."""
+
+    return None if served is None else served in COMPATIBLE_CONSUMER_OPENAPI_SHA256
 
 
 def _require(condition: bool, message: str) -> None:
@@ -214,9 +227,7 @@ def _served_build(zebrobot: Mapping[str, Any]) -> dict[str, Any]:
         "zebrobot_service_commit": zebrobot["service_commit"],
         "zebrobot_service_commit_dirty": zebrobot["service_commit_dirty"],
         "zebrobot_consumer_schema_sha256": served,
-        "zebrobot_consumer_schema_matches_pin": (
-            None if served is None else served == MZB_PIN["consumer_openapi_sha256"]
-        ),
+        "zebrobot_consumer_schema_matches_pin": consumer_schema_matches_pin(served),
         "zebrobot_consumer_pin": dict(MZB_PIN),
     }
 
@@ -309,7 +320,9 @@ def resolve_subject_reference(
 
 
 __all__ = [
+    "COMPATIBLE_CONSUMER_OPENAPI_SHA256",
     "MZB_PIN",
+    "consumer_schema_matches_pin",
     "REFERENCE_SCHEMA_ID",
     "ResolvedSubjectReference",
     "SubjectReferenceError",

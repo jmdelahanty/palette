@@ -14,6 +14,7 @@ from fisheye.shared.unified_h5.citrus_subject_snapshot import (
     subject_attributes,
 )
 from fisheye.shared.unified_h5.metadata import native_attributes
+from fisheye.shared.zebrobot_subject_reference import MZB_PIN
 
 UUID = "28c29cc6-a1ef-4382-9dc5-414fbb445d92"
 SUBJECT = "4bd7a2f6-92b7-42b8-ba28-6e49cb3cc0c9"
@@ -60,7 +61,12 @@ def test_v3_is_admitted_with_the_serving_build():
     admitted = admit_subject_snapshot(V3, ATTRS)
     assert admitted["citrus_snapshot_status"] == "admitted"
     assert admitted["citrus_snapshot_schema_version"] == 3
-    assert admitted["zebrobot_consumer_schema_matches_pin"] is True
+    assert admitted["zebrobot_consumer_schema_sha256"] == PIN
+    # 509a3eb8's slice is recorded, but no longer matches: the fish list changed meaning.
+    assert admitted["zebrobot_consumer_schema_matches_pin"] is False
+    current = copy.deepcopy(V3)
+    current["zebrobot_service"]["consumer_schema_sha256"] = MZB_PIN["consumer_openapi_sha256"]
+    assert admit_subject_snapshot(current, ATTRS)["zebrobot_consumer_schema_matches_pin"] is True
 
 
 @pytest.mark.parametrize(

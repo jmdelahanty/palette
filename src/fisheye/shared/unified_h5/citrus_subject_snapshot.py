@@ -38,7 +38,7 @@ from importlib.resources import files
 import json
 from typing import Any, Mapping
 
-from fisheye.shared.zebrobot_subject_reference import MZB_PIN
+from fisheye.shared.zebrobot_subject_reference import consumer_schema_matches_pin
 
 from .common import UnifiedH5ContractError, require
 from .metadata import string_attributes
@@ -304,9 +304,7 @@ def admit_subject_snapshot(
         "zebrobot_service_commit": service["service_commit"],
         "zebrobot_service_commit_dirty": service["service_commit_dirty"],
         "zebrobot_consumer_schema_sha256": served,
-        "zebrobot_consumer_schema_matches_pin": (
-            None if served is None else served == MZB_PIN["consumer_openapi_sha256"]
-        ),
+        "zebrobot_consumer_schema_matches_pin": consumer_schema_matches_pin(served),
     }
 
 
