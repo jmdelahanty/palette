@@ -9,10 +9,9 @@ from typing import Mapping
 
 from .web_auth import (
     DASHBOARD_PATH,
-    PERSONAL_DATASET_QUEUE_PATH,
     _dashboard_url_for_expected_user,
 )
-from .web_policy import PERSONAL_WORK_PATH
+from .web_policy import LABELER_QUEUE_PAGE_PATH, PERSONAL_WORK_PATH
 
 
 def _browser_error_html(payload: Mapping[str, object]) -> bytes:
@@ -89,10 +88,10 @@ def _browser_error_html(payload: Mapping[str, object]) -> bytes:
                 f"\n{support_key}="
                 + html.escape(str(payload.get(support_key)))
             )
-    personal_dataset_queue_url = html.escape(
-        _dashboard_url_for_expected_user(PERSONAL_DATASET_QUEUE_PATH, return_expected_user)
+    queue_url = html.escape(
+        _dashboard_url_for_expected_user(LABELER_QUEUE_PAGE_PATH, return_expected_user)
         if return_expected_user
-        else PERSONAL_DATASET_QUEUE_PATH
+        else LABELER_QUEUE_PAGE_PATH
     )
     personal_work_url = html.escape(
         _dashboard_url_for_expected_user(PERSONAL_WORK_PATH, return_expected_user)
@@ -170,7 +169,7 @@ def _browser_error_html(payload: Mapping[str, object]) -> bytes:
 status={status}
 details={html.escape(details)}
 return_expected_user={html.escape(return_expected_user)}
-return_personal_dataset_queue_url={personal_dataset_queue_url}
+return_queue_url={queue_url}
 return_personal_dataset_queue_expected_user_guarded={bool(return_expected_user)}
 return_personal_work_url={personal_work_url}
 return_personal_work_expected_user_guarded={bool(return_expected_user)}{closure_support_line}{authorization_support_line}{read_authorization_support_line}{signed_link_policy_support_line}{extra_support_lines}</pre>
@@ -178,7 +177,7 @@ return_personal_work_expected_user_guarded={bool(return_expected_user)}{closure_
     </details>
     <p><a href="/">Return to your labeling landing page</a></p>
     <p><a href="{html.escape(DASHBOARD_PATH)}">Return to the work dashboard</a></p>
-    <p><a href="{personal_dataset_queue_url}">Return to your personalized dataset queue</a></p>
+    <p><a href="{queue_url}">Return to your queue</a></p>
     <p><a href="{personal_work_url}">Return to your personalized work dashboard</a></p>
   </main>
   <script>

@@ -188,13 +188,21 @@ def _receipt_snapshots(receipt: sqlite3.Row) -> list[dict[str, object]]:
 
 
 def backfill_legacy_apply_receipts(conn: sqlite3.Connection) -> None:
-    """Preserve pre-v7 applying/applied rows before their latest-row slot is reused."""
+    """Preserve pre-v7 applying/applied rows before their latest-row slot is reused.
+
+    Only apply ids without a receipt are read: the INSERT below would ignore the
+    others, and rebuilding their snapshots re-read every payload on each start.
+    """
 
     apply_rows = conn.execute(
         """
-        SELECT DISTINCT apply_id
-        FROM labeling_session_checkpoints
-        WHERE apply_id IS NOT NULL AND state IN ('applying', 'applied');
+        SELECT DISTINCT c.apply_id
+        FROM labeling_session_checkpoints AS c
+        WHERE c.apply_id IS NOT NULL AND c.state IN ('applying', 'applied')
+          AND NOT EXISTS (
+              SELECT 1 FROM labeling_checkpoint_apply_receipts AS r
+              WHERE r.apply_id = c.apply_id
+          );
         """
     ).fetchall()
     for apply_row in apply_rows:
