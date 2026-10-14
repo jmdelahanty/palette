@@ -331,6 +331,9 @@
                 "no_dish_declared",
                 "dish_group_subject",
                 "operator_did_not_select",
+                "operator_declined_pick",
+                "no_registered_fish",
+                "fish_list_unavailable",
                 "dish_lookup_failed",
                 "fish_lookup_transport_failure",
                 "fish_lookup_invalid_body",
@@ -360,9 +363,16 @@
             "string",
             "null"
           ]
+        },
+        "mzb_fish_unit_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Added 2026-10-14 (additive, optional so earlier files stay valid; Citrus writes it in every snapshot from this revision): the picked fish's current_unit_id exactly as MetaZebrobot served it in GET /dishes/{dish_id}/fish at start (for example a well, \"19234_3:C1\"). A string only when status is collected; null when MetaZebrobot served none, and under lookup_failed or not_collected. Never inferred. It is MetaZebrobot's housing record at the sealed fish revision (mzb_fish_revision), not proof of where the fish was during the recording."
         }
       },
-      "description": "mzb_fish_id is a verified MetaZebrobot reference only when status is collected with revision and updated_at present; under lookup_failed it is an operator declaration (PR 52 #6002828990).",
+      "description": "mzb_fish_id is a verified MetaZebrobot reference only when status is collected with revision and updated_at present; under lookup_failed it is an operator declaration (PR 52 #6002828990). Revised 2026-10-14 (additive): not_collected reasons gain no_registered_fish (the dish has no registered fish, so none could be picked) and fish_list_unavailable (no fish was picked and the dish's fish list could not be read); operator_did_not_select now means fish were available and none was picked. schema_version stays 3: every earlier file is still valid. Revised 2026-10-14 again (additive, approved by Jeremy): a start that would record operator_did_not_select (fish registered, none picked) is now refused, unless the operator deliberately ticks \"Record without a fish\" in the GUI start summary, recorded as not_collected reason operator_declined_pick; operator_did_not_select remains valid for earlier files. New optional mzb_fish_unit_id seals the picked fish's MetaZebrobot housing unit as served at start (see its description). schema_version stays 3: every earlier file is still valid.",
       "allOf": [
         {
           "if": {
@@ -386,6 +396,12 @@
               },
               "mzb_fish_updated_at": {
                 "type": "string"
+              },
+              "mzb_fish_unit_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             }
           }
@@ -425,6 +441,9 @@
               },
               "mzb_fish_updated_at": {
                 "type": "null"
+              },
+              "mzb_fish_unit_id": {
+                "type": "null"
               }
             }
           }
@@ -443,7 +462,10 @@
                 "enum": [
                   "no_dish_declared",
                   "dish_group_subject",
-                  "operator_did_not_select"
+                  "operator_did_not_select",
+                  "operator_declined_pick",
+                  "no_registered_fish",
+                  "fish_list_unavailable"
                 ]
               },
               "mzb_fish_id": {
@@ -453,6 +475,9 @@
                 "type": "null"
               },
               "mzb_fish_updated_at": {
+                "type": "null"
+              },
+              "mzb_fish_unit_id": {
                 "type": "null"
               }
             }

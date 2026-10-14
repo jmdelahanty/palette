@@ -181,3 +181,18 @@ def test_age_counts_lab_calendar_days_not_utc(queried, expected):
         {"date_of_fertilization": "20260714", "days_post_fertilization": "7", "queried_at_utc": queried}
     )
     assert subject["dpf_at_acquisition"] == expected
+
+
+def test_a_picked_fish_carries_its_sealed_unit_and_new_reasons_pass_through():
+    picked = dict(CITRUS_V3, fish_reference_status="collected", mzb_fish_id="f1",
+                  mzb_fish_revision=4, mzb_fish_updated_at="2026-08-11 08:00:00",
+                  mzb_fish_unit_id="18867_10_WP1:A1")
+    picked.pop("fish_reference_reason")
+    subject = sf.from_h5_attributes(picked)
+    assert subject["mzb_fish_unit_id"] == "18867_10_WP1:A1"
+    assert subject["fish_reference"] == {"status": "collected", "reason": ""}
+    # Files before the amendment carry no unit and gain no field.
+    assert "mzb_fish_unit_id" not in sf.from_h5_attributes(CITRUS_V3)
+    for reason in ("operator_declined_pick", "no_registered_fish", "fish_list_unavailable"):
+        declined = sf.from_h5_attributes(dict(CITRUS_V3, fish_reference_reason=reason))
+        assert declined["fish_reference"] == {"status": "not_collected", "reason": reason}

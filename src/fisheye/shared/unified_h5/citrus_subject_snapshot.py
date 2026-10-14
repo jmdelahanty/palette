@@ -36,8 +36,10 @@ SNAPSHOT_PATH = "/metadata/zebrobot/snapshot_json"
 PRE_CONTRACT_VERSION = 2
 CONTRACT_VERSION = 3
 SCHEMA_FILE = "citrus_zebrobot_snapshot_v3.schema.json"
-# agent-contracts PR 52 at e16f6251 (contract md sha256 b6c80313...).
-SCHEMA_SHA256 = "6d84dcfd97fca45cdf40363124b208f3547e6333c77bb8ed78fb5c0d2def6f26"
+# agent-contracts PR 52 at e16f6251, amended 2026-10-14 by PR 110 head 407eda8
+# (Citrus PR 43; contract md sha256 6d313826...): three not_collected fish
+# reasons and the optional fish_reference.mzb_fish_unit_id, schema_version 3.
+SCHEMA_SHA256 = "c7eabda360346ea7c9758be36848c819edb3d0444b44d229f8d1ed7553a4c58b"
 # Keys only the never-emitted contract v2 carries: such a v2 document is refused.
 CONTRACT_ONLY_KEYS = frozenset(
     {"api_schema_version", "subject_lookup_status", "fish_reference", "errors"}
@@ -66,6 +68,8 @@ PAIRED_FIELDS = {
     "mzb_fish_id": lambda s: s["fish_reference"]["mzb_fish_id"],
     "mzb_fish_revision": lambda s: s["fish_reference"]["mzb_fish_revision"],
     "mzb_fish_updated_at": lambda s: s["fish_reference"]["mzb_fish_updated_at"],
+    # Optional since the 2026-10-14 amendment: files before it carry no key and no attr.
+    "mzb_fish_unit_id": lambda s: s["fish_reference"].get("mzb_fish_unit_id"),
     # Sealed dish biology; Citrus writes each attr verbatim from the same value.
     "cross_id": lambda s: _dish(s).get("cross_id"),
     "genotype": lambda s: _dish(s).get("genotype"),
