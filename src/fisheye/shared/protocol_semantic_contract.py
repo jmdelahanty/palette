@@ -72,6 +72,43 @@ PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY = "citrus.protocol.semantic.v2"
 PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION = 3
 PROTOCOL_TRIAL_INDEX_ANGLE_V1_NORMALIZATION_POLICY = "citrus.protocol.trial_index.v3"
 
+# Reactive phototaxis v1 (agent-contracts #98 revision 5): a PHOTOTAXIS step
+# whose two-tone split follows the fish's midline declares
+# ``features.fill.type == "heading_split"`` with ``features.fill.style`` and a
+# ``features.reactive`` block, each present exactly when that fill type is.
+# Only unified admission revision 6 admits such a step; every earlier
+# revision refuses it. ``gradient`` is reserved: revision 6 refuses it too.
+HEADING_SPLIT_FILL_TYPE = "heading_split"
+HEADING_SPLIT_STIMULUS_MODE_ID = 18
+HEADING_SPLIT_ADMITTED_FILL_STYLES = frozenset({"two_tone"})
+HEADING_SPLIT_RESERVED_FILL_STYLES = frozenset({"gradient"})
+HEADING_SPLIT_REACTIVE_CONSTANTS = MappingProxyType(
+    {
+        "module": "PhototaxisHeadingSplit",
+        "heading_definition_ref": (
+            "agent-contracts:citrus-palette/heading/heading_convention_v1.json"
+        ),
+        "camera_view_assumed": "dorsal_unmirrored",
+        "side_rule_id": "projected_left_axis_v1",
+        "hysteresis_frame": "camera",
+    }
+)
+HEADING_SPLIT_REACTIVE_KEYS = frozenset(HEADING_SPLIT_REACTIVE_CONSTANTS) | frozenset(
+    {
+        "fill_style",
+        "minimum_keypoint_confidence",
+        "minimum_heading_displacement_degrees",
+        "maximum_held_heading_updates",
+        "unknown_heading_fallback",
+        "left_side",
+    }
+)
+HEADING_SPLIT_FALLBACKS = frozenset({"static_fill", "uniform_side_a", "uniform_side_b"})
+HEADING_SPLIT_LEFT_SIDES = frozenset({"side_a", "side_b"})
+HEADING_SPLIT_FILL_CONSTANTS = MappingProxyType(
+    {"domain": "experimental_area", "outside_area_policy": "side_b_v1"}
+)
+
 PROTOCOL_SNAPSHOT_SCHEMA_ID = "citrus.protocol.snapshot"
 PROTOCOL_SNAPSHOT_SCHEMA_VERSION = 2
 PROTOCOL_SNAPSHOT_POLICY_ID = "citrus.protocol.snapshot.v2"
@@ -337,6 +374,109 @@ class ProtocolSemanticSnapshot:
         }
 
 
+def _validate_heading_split_step(
+    features: Mapping[str, Any],
+    *,
+    step_index: int,
+    stimulus_mode_id: int,
+    trial_schema_version: int,
+    admits_heading_split: bool,
+) -> None:
+    """Refuse or check a reactive heading-split step (agent-contracts #98 r5).
+
+    A step is reactive when ``features.fill.type`` is ``heading_split`` or when it
+    carries either reactive-only field (``features.reactive``,
+    ``features.fill.style``); each must accompany the others, so a static step
+    can never carry half of a reactive declaration unnoticed.
+    """
+
+    name = f"trial step {step_index}"
+    fill = features.get("fill")
+    fill_type = fill.get("type") if isinstance(fill, Mapping) else None
+    has_style = isinstance(fill, Mapping) and "style" in fill
+    has_reactive = "reactive" in features
+    if fill_type != HEADING_SPLIT_FILL_TYPE and not has_style and not has_reactive:
+        return
+    if not admits_heading_split:
+        raise ProtocolSemanticContractError(
+            f"{name} declares a heading_split reactive fill, which no admission "
+            "revision before 6 admits."
+        )
+    if fill_type != HEADING_SPLIT_FILL_TYPE:
+        raise ProtocolSemanticContractError(
+            f"{name}.features.reactive and features.fill.style are allowed only "
+            "when features.fill.type is 'heading_split'."
+        )
+    if not has_style or not has_reactive:
+        raise ProtocolSemanticContractError(
+            f"{name} with fill type heading_split requires features.fill.style "
+            "and features.reactive."
+        )
+    _require_exact(
+        trial_schema_version,
+        PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION,
+        name=f"{name} trial index schema_version for fill type heading_split",
+    )
+    _require_exact(
+        stimulus_mode_id,
+        HEADING_SPLIT_STIMULUS_MODE_ID,
+        name=f"{name}.stimulus_mode_id for fill type heading_split",
+    )
+    style = fill.get("style")
+    if style in HEADING_SPLIT_RESERVED_FILL_STYLES:
+        raise ProtocolSemanticContractError(
+            f"{name}.features.fill.style {style!r} is reserved and not admitted "
+            "by admission revision 6."
+        )
+    if style not in HEADING_SPLIT_ADMITTED_FILL_STYLES:
+        raise ProtocolSemanticContractError(
+            f"{name}.features.fill.style must be one of "
+            f"{sorted(HEADING_SPLIT_ADMITTED_FILL_STYLES)}, got {style!r}."
+        )
+    for key, expected in HEADING_SPLIT_FILL_CONSTANTS.items():
+        _require_exact(fill.get(key), expected, name=f"{name}.features.fill.{key}")
+
+    reactive = features.get("reactive")
+    if not isinstance(reactive, Mapping):
+        raise ProtocolSemanticContractError(
+            f"{name}.features.reactive must be one object."
+        )
+    if set(reactive) != HEADING_SPLIT_REACTIVE_KEYS:
+        raise ProtocolSemanticContractError(
+            f"{name}.features.reactive must have exactly the keys "
+            f"{sorted(HEADING_SPLIT_REACTIVE_KEYS)}."
+        )
+    for key, expected in HEADING_SPLIT_REACTIVE_CONSTANTS.items():
+        _require_exact(reactive[key], expected, name=f"{name}.features.reactive.{key}")
+    _require_exact(
+        reactive["fill_style"], style, name=f"{name}.features.reactive.fill_style"
+    )
+    for key, upper in (
+        ("minimum_keypoint_confidence", 1.0),
+        ("minimum_heading_displacement_degrees", 180.0),
+    ):
+        value = _require_number(reactive[key], name=f"{name}.features.reactive.{key}")
+        if not 0.0 <= value <= upper:
+            raise ProtocolSemanticContractError(
+                f"{name}.features.reactive.{key} must lie in [0, {upper:g}]."
+            )
+    held = reactive["maximum_held_heading_updates"]
+    if held != "never":
+        _require_int(
+            held,
+            name=f"{name}.features.reactive.maximum_held_heading_updates",
+            minimum=1,
+        )
+    for key, allowed in (
+        ("unknown_heading_fallback", HEADING_SPLIT_FALLBACKS),
+        ("left_side", HEADING_SPLIT_LEFT_SIDES),
+    ):
+        if type(reactive[key]) is not str or reactive[key] not in allowed:
+            raise ProtocolSemanticContractError(
+                f"{name}.features.reactive.{key} must be one of {sorted(allowed)}."
+            )
+
+
 def validate_protocol_semantic_snapshot(
     *,
     semantic_hash: str,
@@ -346,6 +486,7 @@ def validate_protocol_semantic_snapshot(
     snapshot_schema_version: int = 1,
     snapshot_policy_id: str = "citrus.protocol.snapshot.legacy_v1",
     stimulus_angle_convention: str = LEGACY_CANVAS_ANGLE,
+    admits_heading_split: bool = False,
 ) -> ProtocolSemanticSnapshot:
     """Validate exact producer bytes and return a typed immutable snapshot.
 
@@ -353,7 +494,9 @@ def validate_protocol_semantic_snapshot(
     binding fixed (never read from the payloads). Under
     ``STIMULUS_ANGLE_CONVENTION`` the snapshot must be v2 with semantic policy
     v2 and trial index v3, each declaring that id; under the legacy default
-    the historical contract applies unchanged.
+    the historical contract applies unchanged. ``admits_heading_split`` is
+    likewise fixed by the admitted binding: only admission revision 6 admits a
+    reactive heading-split step, and no binding sets it yet.
     """
 
     angle_v1 = stimulus_angle_convention == STIMULUS_ANGLE_CONVENTION
@@ -571,6 +714,13 @@ def validate_protocol_semantic_snapshot(
             raise ProtocolSemanticContractError(
                 f"trial step {expected_index}.features must be one object."
             )
+        _validate_heading_split_step(
+            features,
+            step_index=expected_index,
+            stimulus_mode_id=semantic_mode_id,
+            trial_schema_version=trial_schema_version,
+            admits_heading_split=admits_heading_split,
+        )
         if semantic_mode_id == 4:
             parameters = semantic_step.get("parameters")
             if not isinstance(parameters, Mapping):
