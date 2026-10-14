@@ -216,6 +216,90 @@ def _optional_rgba8(features: Mapping[str, Any]) -> tuple[int, int, int, int] | 
     return tuple(rgba)  # type: ignore[return-value]
 
 
+# SOLID_COLOR (mode 22, agent-contracts stimulus vocabulary): a uniform
+# authored colour, opaque, with no brightness. The trial index always records
+# the displayed code and names it only by CitrusColor::SolidColorName. Never
+# "solid_black": the standalone SOLID_BLACK baseline stays mode 4 only.
+SOLID_COLOR_STIMULUS_MODE_ID = 22
+SOLID_COLOR_CUSTOM_COLOR_TYPE_ID = 2
+SOLID_COLOR_BACKGROUND_ELEMENT = MappingProxyType(
+    {
+        "brightness": 1,
+        "derivation": "plain_v1",
+        "quantization": "rgba8_round_half_up_v1",
+        "contrast_profile_digest": None,
+    }
+)
+
+
+def _json_equal(value: object) -> object:
+    """Plain JSON value for exact comparison; bool never equals an integer."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _json_equal(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_equal(item) for item in value]
+    if isinstance(value, bool):
+        return ("bool", value)
+    return value
+
+
+def _solid_color_name(rgba8: tuple[int, int, int, int]) -> str | None:
+    if rgba8 == (0, 0, 0, 255):
+        return "black"
+    if rgba8 == (255, 255, 255, 255):
+        return "white"
+    red, green, blue, alpha = rgba8
+    if red == green == blue and alpha == 255:
+        return "gray"
+    return None
+
+
+def _validate_solid_color_features(
+    features: Mapping[str, Any], *, parameters: object, step_index: int
+) -> None:
+    name = f"trial step {step_index} SOLID_COLOR"
+    rgba8 = _optional_rgba8(features)
+    if rgba8 is None:
+        raise ProtocolSemanticContractError(f"{name} requires features.resolved_color.")
+    # The semantic identity carries the authored colour's recorded form; with
+    # no brightness it is exactly the displayed code.
+    expected_parameters = {
+        "color": {"color_space": "srgb", "rgba8": list(rgba8)},
+        "color_type_id": SOLID_COLOR_CUSTOM_COLOR_TYPE_ID,
+        "type": "ProtocolSolidColorParams",
+    }
+    if not isinstance(parameters, Mapping) or _json_equal(parameters) != expected_parameters:
+        raise ProtocolSemanticContractError(
+            f"semantic step {step_index} SOLID_COLOR parameters must be exactly "
+            f"{expected_parameters!r}."
+        )
+    if rgba8[3] != 255:
+        raise ProtocolSemanticContractError(
+            f"{name} resolved_color must be opaque (alpha 255), got {list(rgba8)}."
+        )
+    _require_exact(
+        features.get("color_name"),
+        _solid_color_name(rgba8),
+        name=f"{name} features.color_name for rgba8 {list(rgba8)}",
+    )
+    appearance = features.get("appearance")
+    if appearance is None:
+        return
+    elements = appearance.get("elements") if isinstance(appearance, Mapping) else None
+    background = elements.get("background") if isinstance(elements, Mapping) else None
+    if not isinstance(background, Mapping) or _optional_rgba8(background) != rgba8:
+        raise ProtocolSemanticContractError(
+            f"{name} features.appearance.elements.background.resolved_color "
+            "must equal features.resolved_color."
+        )
+    for key, expected in SOLID_COLOR_BACKGROUND_ELEMENT.items():
+        if key not in background or background[key] != expected or type(background[key]) is bool:
+            raise ProtocolSemanticContractError(
+                f"{name} features.appearance.elements.background.{key} must be {expected!r}."
+            )
+
+
 def _display_context(
     *,
     stimulus_family: str,
@@ -559,7 +643,9 @@ def validate_protocol_semantic_snapshot(
             expected_mode,
             name=f"trial step {expected_index}.stimulus_mode",
         )
-        expected_family = {4: "solid_color", 12: "chaser"}.get(semantic_mode_id)
+        expected_family = {4: "solid_color", 12: "chaser", 22: "solid_color"}.get(
+            semantic_mode_id
+        )
         if expected_family is not None:
             _require_exact(
                 stimulus_family,
@@ -581,6 +667,12 @@ def validate_protocol_semantic_snapshot(
                 parameters.get("color_type_id"),
                 0,
                 name=f"semantic step {expected_index}.parameters.color_type_id",
+            )
+        if semantic_mode_id == SOLID_COLOR_STIMULUS_MODE_ID:
+            _validate_solid_color_features(
+                features,
+                parameters=semantic_step.get("parameters"),
+                step_index=expected_index,
             )
         display_context = _display_context(
             stimulus_family=stimulus_family,
