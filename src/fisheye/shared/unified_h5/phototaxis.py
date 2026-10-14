@@ -159,7 +159,7 @@ def validate_phototaxis_states(h5, snapshot, execution, *, camera_serial: str) -
     """Validate the states table against its contract; return its row count.
 
     A file without a heading-split step carries no rows. A file with one
-    carries the table and pose observation v2 (its completeness is the pose
+    carries the table and pose observation v2 or v3 (its completeness is the pose
     validator's); every row then satisfies the states contract invariants.
     """
 
@@ -169,7 +169,7 @@ def validate_phototaxis_states(h5, snapshot, execution, *, camera_serial: str) -
         return 0
     require(STATES in h5, "reactive_phototaxis_states_missing")
     require(
-        POSE_GROUP in h5 and pose_contract_version(h5) == 2,
+        POSE_GROUP in h5 and pose_contract_version(h5) in (2, 3),
         "reactive_phototaxis_requires_pose_v2",
     )
     model64, skeleton64 = _pose_identity(h5, camera_serial)

@@ -52,6 +52,7 @@ FRAME_JOINED_STATES = (
     "/components/independent_motion_grid/states",
     "/components/moving_grating/states",
     "/components/phototaxis/states",
+    "/components/video_tracking_overlay/states",
 )
 
 

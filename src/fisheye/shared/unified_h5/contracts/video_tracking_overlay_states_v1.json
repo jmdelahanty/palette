@@ -1,0 +1,398 @@
+{
+  "schema_id": "citrus.experimental_h5.video_overlay_state",
+  "schema_version": 1,
+  "status": "admitted by unified H5 admission revision 7 (video_overlay_v1); proposal citrus-palette/video_tracking_overlay/video_tracking_overlay_v1_2026-10-14.md",
+  "producer": {
+    "repository": "JohnsonLabJanelia/citrus",
+    "definition": "src/logging/experimental_h5_records.def VideoOverlayState",
+    "catalog": "docs/schemas/experimental_h5_core_video_overlay_v1.json",
+    "module": "src/video_encoding/video_tracking_overlay.{h,cpp}"
+  },
+  "path": "/components/video_tracking_overlay/states",
+  "component": "video_tracking_overlay",
+  "key_fields": "stimulus_frame_num",
+  "itemsize": 160,
+  "settings_path": "/components/video_tracking_overlay/settings_json",
+  "settings_schema": {
+    "schema_id": "citrus.video_tracking_overlay",
+    "schema_version": 1,
+    "required_keys": [
+      "schema_id",
+      "schema_version",
+      "enabled",
+      "radius_mm",
+      "radius_px",
+      "pixels_per_mm_projector",
+      "scale_authority",
+      "color_authored_rgba",
+      "color_quantised_rgba",
+      "color_quantiser",
+      "held_policy",
+      "position_rule",
+      "position_frame",
+      "video_flip_rule",
+      "source",
+      "pose_observation_enabled",
+      "heading_arrow",
+      "settings_load_status"
+    ],
+    "heading_arrow_keys": [
+      "enabled",
+      "active",
+      "length_mm",
+      "length_px",
+      "color_authored_rgba",
+      "color_quantised_rgba",
+      "thickness_px",
+      "origin_rule",
+      "direction_rule",
+      "probe_length_camera_px",
+      "heading_gate",
+      "pose_source"
+    ]
+  },
+  "row_rule": "one row per /frames/stimulus row while the video_tracking_overlay component is declared (video logging on and the overlay enabled), every stimulus mode; the decision is made from the arena tracking view of that update before the frame is offered to the encoder; drawn and arrow_drawn record what reached the encoded frame",
+  "missing_values": "typed validity, never NaN or sentinel: a field with a validity_field is meaningful only when that |u1 flag is 1, payload zero otherwise; fields without a validity field are zero when input_used is 0 (box fields) or heading_valid is 0 (heading fields)",
+  "fields": [
+    {
+      "name": "stimulus_frame_num",
+      "dtype": "<u8",
+      "count": 1,
+      "offset": 0,
+      "units": "1",
+      "meaning": "session stimulus frame key; zero valid",
+      "validity_field": "",
+      "boolean": false
+    },
+    {
+      "name": "timestamp_ns_session",
+      "dtype": "<i8",
+      "count": 1,
+      "offset": 8,
+      "units": "ns",
+      "meaning": "Citrus session monotonic software state-output time; not photon timing",
+      "validity_field": "",
+      "boolean": false
+    },
+    {
+      "name": "video_frame_index",
+      "dtype": "<u8",
+      "count": 1,
+      "offset": 16,
+      "units": "1",
+      "meaning": "index of this update's frame in the encoded session video; equals frames/stimulus video_frame_index when that is not -1",
+      "validity_field": "video_frame_index_valid",
+      "boolean": false
+    },
+    {
+      "name": "video_frame_index_valid",
+      "dtype": "|u1",
+      "count": 1,
+      "offset": 24,
+      "units": "1",
+      "meaning": "1 iff the encoder accepted the frame",
+      "validity_field": "",
+      "boolean": true
+    },
+    {
+      "name": "decision_draw",
+      "dtype": "|u1",
+      "count": 1,
+      "offset": 25,
+      "units": "1",
+      "meaning": "1 iff the overlay decided to draw the dot this update",
+      "validity_field": "",
+      "boolean": true
+    },
+    {
+      "name": "drawn",
+      "dtype": "|u1",
+      "count": 1,
+      "offset": 26,
+      "units": "1",
+      "meaning": "1 iff the dot was written into the encoded frame: decision_draw and video_frame_index_valid",
+      "validity_field": "",
+      "boolean": true
+    },
+    {
+      "name": "input_used",
+      "dtype": "<u8",
+      "count": 1,
+      "offset": 27,
+      "units": "1",
+      "meaning": "enum:/definitions/enums/video_overlay_input_used",
+      "validity_field": "",
+      "boolean": false
+    },
+    {
+      "name": "position_arena_local_px",
+      "dtype": "<f4",
+      "count": 2,
+      "offset": 35,
+      "units": "px",
+      "meaning": "dot centre in arena-local pixels before the vertical flip: centre of the integer bounding rectangle of the four box corners projected through the camera-to-canvas homography, minus the arena origin (projected_bbox_rect_center_v1)",
+      "validity_field": "position_valid",
+      "boolean": false
+    },
+    {
+      "name": "position_valid",
+      "dtype": "|u1",
+      "count": 1,
+      "offset": 43,
+      "units": "1",
+      "meaning": "explicit validity; invalid payload zero",
+      "validity_field": "",
+      "boolean": true
+    },
+    {
+      "name": "position_camera_px",
+      "dtype": "<f4",
+      "count": 2,
+      "offset": 44,
+      "units": "px",
+      "meaning": "box rect centre in source camera pixels: x_min + width / 2, y_min + height / 2 in binary32; zero when input_used is 0",
+      "validity_field": "",
+      "boolean": false
+    },
+    {
+      "name": "source_camera_id",
+      "dtype": "<u8",
+      "count": 1,
+      "offset": 52,
+      "units": "1",
+      "meaning": "SHAMAN v2 numeric camera id of the slot that supplied the box",
+      "validity_field": "source_camera_id_valid",
+      "boolean": false
+    },
+    {
+      "name": "source_camera_id_valid",
+      "dtype": "|u1",
+      "count": 1,
+      "offset": 60,
+      "units": "1",
+      "meaning": "explicit validity; invalid payload zero",
+      "validity_field": "",
+      "boolean": true
+    },
+    {
+      "name": "box_sequence_id",
+      "dtype": "<u8",
+      "count": 1,
+      "offset": 61,
+      "units": "1",
+      "meaning": "SHAMAN v2 slot sequence that supplied the box (a held box keeps its own)",
+      "validity_field": "box_sequence_id_valid",
+      "boolean": false
+    },
+    {
+      "name": "box_sequence_id_valid",
+      "dtype": "|u1",
+      "count": 1,
+      "offset": 69,
+      "units": "1",
+      "meaning": "explicit validity; invalid payload zero",
+      "validity_field": "",
+      "boolean": true
+    },
+    {
+      "name": "box_recording_frame_id",
+      "dtype": "<u8",
+      "count": 1,
+      "offset": 70,
+      "units": "1",
+      "meaning": "Orange recording_frame_id (frame identity v1) of the box slot; valid only inside a bound recording",
+      "validity_field": "box_recording_frame_id_valid",
+      "boolean": false
+    },
+    {
+      "name": "box_recording_frame_id_valid",
+      "dtype": "|u1",
+      "count": 1,
+      "offset": 78,
+      "units": "1",
+      "meaning": "explicit validity; invalid payload zero",
+      "validity_field": "",
+      "boolean": true
+    },
+    {
+      "name": "box_index_in_payload",
+      "dtype": "<u8",
+      "count": 1,
+      "offset": 79,
+      "units": "1",
+      "meaning": "the box's object index within its payload; zero when input_used is 0",
+      "validity_field": "",
+      "boolean": false
+    },
+    {
+      "name": "box_payload_timestamp_ns_monotonic",
+      "dtype": "<i8",
+      "count": 1,
+      "offset": 87,
+      "units": "ns",
+      "meaning": "Orange steady-clock publish time of the payload that supplied the box (bounding_boxes payload_timestamp_ns_monotonic), kept through a hold; zero when input_used is 0",
+      "validity_field": "",
+      "boolean": false
+    },
+    {
+      "name": "heading_status",
+      "dtype": "<u8",
+      "count": 1,
+      "offset": 95,
+      "units": "1",
+      "meaning": "enum:/definitions/enums/phototaxis_heading_status",
+      "validity_field": "",
+      "boolean": false
+    },
+    {
+      "name": "heading_camera_angle_degrees",
+      "dtype": "<f4",
+      "count": 1,
+      "offset": 103,
+      "units": "deg",
+      "meaning": "current pose heading, atan2_negative_y_x_degrees in source camera pixels (y down); same dtype and value as the pose object row",
+      "validity_field": "heading_valid",
+      "boolean": false
+    },
+    {
+      "name": "heading_origin_camera_px",
+      "dtype": "<f4",
+      "count": 2,
+      "offset": 107,
+      "units": "px",
+      "meaning": "current pose heading origin in source camera pixels, x then y; same value as the pose object row",
+      "validity_field": "heading_valid",
+      "boolean": false
+    },
+    {
+      "name": "heading_valid",
+      "dtype": "|u1",
+      "count": 1,
+      "offset": 115,
+      "units": "1",
+      "meaning": "1 iff heading_status == 7",
+      "validity_field": "",
+      "boolean": true
+    },
+    {
+      "name": "arrow_origin_arena_local_px",
+      "dtype": "<f4",
+      "count": 2,
+      "offset": 116,
+      "units": "px",
+      "meaning": "arrow origin: the pose heading origin projected through the camera-to-canvas homography (no bounding rectangle) minus the arena origin",
+      "validity_field": "midline_valid",
+      "boolean": false
+    },
+    {
+      "name": "arrow_direction_canvas",
+      "dtype": "<f4",
+      "count": 2,
+      "offset": 124,
+      "units": "1",
+      "meaning": "unit arrow direction in canvas (x right, y down) by the two-probe canvas midline rule (two_probe_canvas_midline_v1)",
+      "validity_field": "midline_valid",
+      "boolean": false
+    },
+    {
+      "name": "midline_valid",
+      "dtype": "|u1",
+      "count": 1,
+      "offset": 132,
+      "units": "1",
+      "meaning": "1 iff a canvas midline was produced; implies heading_valid",
+      "validity_field": "",
+      "boolean": true
+    },
+    {
+      "name": "arrow_drawn",
+      "dtype": "|u1",
+      "count": 1,
+      "offset": 133,
+      "units": "1",
+      "meaning": "1 iff the arrow was written into the encoded frame: drawn and midline_valid and settings heading_arrow.active",
+      "validity_field": "",
+      "boolean": true
+    },
+    {
+      "name": "pose_sequence_id",
+      "dtype": "<u8",
+      "count": 1,
+      "offset": 134,
+      "units": "1",
+      "meaning": "SHAMAN v2 slot sequence of the current pose, the slot the heading came from",
+      "validity_field": "pose_sequence_id_valid",
+      "boolean": false
+    },
+    {
+      "name": "pose_sequence_id_valid",
+      "dtype": "|u1",
+      "count": 1,
+      "offset": 142,
+      "units": "1",
+      "meaning": "explicit validity; invalid payload zero",
+      "validity_field": "",
+      "boolean": true
+    },
+    {
+      "name": "pose_recording_frame_id",
+      "dtype": "<u8",
+      "count": 1,
+      "offset": 143,
+      "units": "1",
+      "meaning": "Orange recording_frame_id of the pose slot; valid only inside a bound recording",
+      "validity_field": "pose_recording_frame_id_valid",
+      "boolean": false
+    },
+    {
+      "name": "pose_recording_frame_id_valid",
+      "dtype": "|u1",
+      "count": 1,
+      "offset": 151,
+      "units": "1",
+      "meaning": "explicit validity; invalid payload zero",
+      "validity_field": "",
+      "boolean": true
+    },
+    {
+      "name": "pose_object_index_in_payload",
+      "dtype": "<u8",
+      "count": 1,
+      "offset": 152,
+      "units": "1",
+      "meaning": "the pose object's index within its payload, equal to box_index_in_payload by construction; zero without a current pose",
+      "validity_field": "",
+      "boolean": false
+    }
+  ],
+  "enums": {
+    "video_overlay_input_used": {
+      "0": "NONE",
+      "1": "CURRENT",
+      "2": "HELD"
+    },
+    "phototaxis_heading_status": "reused from /definitions/enums/phototaxis_heading_status (pose v2/v3 statuses 0-9)"
+  },
+  "arithmetic": {
+    "position_camera_px": "(x_min + width / 2.0f, y_min + height / 2.0f) in binary32 from the bounding_boxes v2 row fields",
+    "position_arena_local_px": "the four box corners (x_min, y_min), (x_min + width, y_min), (x_min + width, y_min + height), (x_min, y_min + height) projected per corner in double through /calibration_snapshot/<camera_serial>/homography_matrix (CV_64F): w = h20*x + h21*y + h22; |w| <= 1e-12 => no position (position_valid 0); x' = (h00*x + h01*y + h02) / w, y' = (h10*x + h11*y + h12) / w (true division); each cast to float; cv::boundingRect of the four float points (OpenCV 4.10.0: xmin = floor(min x), xmax = floor(max x), width = xmax - xmin + 1, same for y); the integer rectangle converted to float, shifted by minus the integer arena_geometry origin_px, centre = rect.x + rect.width / 2.0f, rect.y + rect.height / 2.0f in binary32; checked exactly",
+    "arrow_origin_arena_local_px": "the pose heading origin projected exactly as one corner (double, true division, |w| <= 1e-12 => no midline, float cast), no bounding rectangle, minus the integer origin_px in float",
+    "arrow_direction_canvas": "probes in binary32 camera px: forward = origin + 20.0f * d, left = origin + 20.0f * left_axis (d = the pose row unit direction, left_axis = (d.y, -d.x)), multiply then add, contraction off; each projected as the origin; dx, dy = forward' - origin' in binary32; len = sqrt(double(dx)^2 + double(dy)^2); len <= 1e-6 or any failed projection (left probe included) => midline_valid 0; else (float(double(dx)/len), float(double(dy)/len)); no hypot; unit length within 1e-6"
+  },
+  "invariants": [
+    "video_frame_index_valid equals the /frames/stimulus row's video_frame_index_valid for the same stimulus_frame_num, and when 1 the two video_frame_index values are equal",
+    "drawn == 1 iff decision_draw == 1 and video_frame_index_valid == 1",
+    "decision_draw == 1 implies position_valid == 1 and input_used in {1, 2}; input_used == 2 and settings held_policy == skip implies decision_draw == 0",
+    "input_used == 0 implies position_valid 0, the three box identities invalid and payload zero (position_camera_px, box_index_in_payload, box_payload_timestamp_ns_monotonic included)",
+    "input_used >= 1 implies source_camera_id_valid, box_sequence_id_valid and box_recording_frame_id_valid; source_camera_id equals binding_json shaman_numeric_camera_id",
+    "bounding-box cross-check, every row with input_used >= 1: a /observations/bounding_boxes v2 row must exist with payload_camera_id == source_camera_id, recording_frame_id == box_recording_frame_id and box_index_in_payload equal (absent => refuse); same payload_timestamp_ns_monotonic => position_camera_px equals that row's rect centre exactly; a later bbox timestamp => the overlay used an update the per-frame filter later replaced (accepted, centre not compared); an earlier bbox timestamp => refuse",
+    "box_sequence_id non-decreasing over valid rows; pose_sequence_id non-decreasing over valid rows; stimulus_frame_num strictly increasing",
+    "heading_valid == 1 iff heading_status == 7; midline_valid == 1 implies heading_valid == 1; heading fields payload zero when heading_valid 0, midline fields payload zero when midline_valid 0",
+    "heading_valid == 1 implies the /observations/pose update pose_sequence_id has camera_id == source_camera_id and its object pose_object_index_in_payload is status 7 with heading_angle_degrees and heading_origin_{x,y}_px bit-equal to heading_camera_angle_degrees and heading_origin_camera_px; pose_object_index_in_payload == box_index_in_payload",
+    "input_used == 2 (held box) implies heading_status 0 (the arrow never uses a held heading)",
+    "arrow_drawn == 1 iff drawn == 1 and midline_valid == 1 and settings heading_arrow.active",
+    "pose observation disabled for the session implies heading_status 0 on every row and settings heading_arrow.active false; active implies pose observation v3 present",
+    "settings: enabled true whenever the component exists; radius_px == radius_mm * pixels_per_mm_projector and heading_arrow.length_px == length_mm * pixels_per_mm_projector (the calibration snapshot camera attribute pixels_per_mm_projector); color_quantised_rgba == rgba8_round_half_up_v1(color_authored_rgba) for the dot and the arrow; thickness_px integer >= 1; held_policy in {draw, skip}"
+  ],
+  "witness_notes": "fixtures/video_overlay_v1/: three complete files: identity homography (exact-integer corners, the floor-boundary case; no encoder, drawn 0), the rig homography with a y reflection and perspective terms (general projective arithmetic; encoder acceptance simulated, drawn and arrow_drawn 1 on true values), and a constructed homography whose w = 0 line passes through the heading's left probe (heading_valid 1, midline_valid 0, drawn 1, arrow_drawn 0). check_overlay_arith.py beside this file is Citrus's independent Python replication of the arithmetic; it reports zero differences on all three."
+}

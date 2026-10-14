@@ -1,11 +1,13 @@
-"""Citrus pose observations (``pose_observations``), contracts v1 and v2.
+"""Citrus pose observations (``pose_observations``), contracts v1, v2 and v3.
 
 The component is optional per recording and required once declared
 (agent-contracts ``citrus-pose-observation-v1``, merged 49142e6, and
 ``citrus-pose-observation-v2``, merged 6b63aa2). The file's own
 ``contract_json.schema_version`` selects the pinned contract; any other version
 is refused. v2 changes only the derived heading: Palette's shared convention
-(agent-contracts ``citrus-palette/heading``), NaN when not valid. On a bound v2
+(agent-contracts ``citrus-palette/heading``), NaN when not valid. v3 adds the
+skeleton sidecar verbatim and makes every heading recomputable from its
+keypoints (``pose_v3``). On a bound v2
 session every update carries the bound recording's token (amendment
 2026-10-13); v1 is not checked (the amendment has its readers filter rows by
 token instead). Declared
@@ -31,6 +33,7 @@ from fisheye.shared.heading_convention import heading_degrees, wrap_delta_degree
 
 from .common import parse_json, require
 from .hdf5_types import dataset_bytes
+from .pose_v3 import SIDECARS, check_v3_headings
 
 COMPONENT = "pose_observations"
 GROUP = "/observations/pose"
@@ -67,6 +70,21 @@ _PINNED = {
         "tables": (
             "citrus_pose_observation_tables.v2.json",
             "0737ee7598eaf5cf03af80c9aab4eb8c9c3847418d01de29696c0b0d92696b3f",
+        ),
+    },
+    # agent-contracts citrus-pose-observation-v3 (PR 104 head 18f4148).
+    3: {
+        "contract": (
+            "citrus_pose_observation_contract.v3.schema.json",
+            "0c195af4adf9cf95cd6e5d53a94f466473d2e3054a0b778c09fbe1ea322d6cd6",
+        ),
+        "receipt": (
+            "citrus_pose_observation_receipt.v3.schema.json",
+            "b5ab92b8e034330304a806a6cb225c4c0f7cc3569cee152e35039d454678728e",
+        ),
+        "tables": (
+            "citrus_pose_observation_tables.v3.json",
+            "ad5caf9ad1ed7f1f5d3df96901b068519f0dca68ab81b51c12e2e3f04922e454",
         ),
     },
 }
@@ -258,10 +276,26 @@ def validate_pose_observations(h5, outcomes: dict, receipt_components: set) -> i
         "pose_outcome_count_mismatch",
     )
     _check_row_references(tables["updates"], tables["objects"], tables["keypoints"])
-    if version == 2:
+    if version >= 2:
         _check_v2_heading(tables["objects"])
         _check_v2_bound_token(h5, contract, tables["updates"])
+    if version == 3:
+        check_v3_headings(h5, contract, tables["updates"], tables["objects"], tables["keypoints"])
+    elif SIDECARS in h5:
+        require(False, "pose_sidecars_before_v3")
     return total
 
 
-__all__ = ["COMPONENT", "RECEIPT", "validate_pose_observations"]
+def require_pose_version_for_binding(h5, binding: dict) -> None:
+    """Under video_overlay_v1 (revision 7) a file that carries pose carries v3."""
+
+    if binding.get("admits_video_overlay") and GROUP in h5:
+        require(_contract_version(h5) == 3, "pose_v3_required_by_video_overlay_v1")
+
+
+__all__ = [
+    "COMPONENT",
+    "RECEIPT",
+    "require_pose_version_for_binding",
+    "validate_pose_observations",
+]

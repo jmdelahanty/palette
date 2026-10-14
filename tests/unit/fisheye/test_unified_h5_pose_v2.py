@@ -109,7 +109,7 @@ def test_an_unknown_contract_version_is_refused(tmp_path):
     path = _copy(tmp_path)
     with h5py.File(path, "r+") as h5:
         contract = json.loads(h5[pose.CONTRACT][()])
-        contract["schema_version"] = 3
+        contract["schema_version"] = 4  # v1, v2 and v3 are pinned; 4 is unknown
         del h5[pose.CONTRACT]
         h5.create_dataset(pose.CONTRACT, data=json.dumps(contract), dtype=h5py.string_dtype("utf-8"))
     with pytest.raises(UnifiedH5ContractError, match="pose_contract_version_unknown"):
