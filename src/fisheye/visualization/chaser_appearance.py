@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from fisheye.analysis.chaser_behavior import resolve_configured_chaser_behaviors
+from fisheye.shared.color_quantization import unit_rgb_to_hex, unit_to_u8
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_io import open_zarr_root
 
@@ -103,16 +104,12 @@ def _unit_channel(value: Any, *, field: str) -> float:
     return number
 
 
-def _u8(channel: float) -> int:
-    return int(round(float(channel) * 255.0))
-
-
 def _experimental_color_hex(rgba: Sequence[float]) -> str:
-    return "#{:02x}{:02x}{:02x}".format(*(_u8(value) for value in rgba[:3]))
+    return unit_rgb_to_hex(rgba)
 
 
 def _experimental_color_css(rgba: Sequence[float]) -> str:
-    red, green, blue = (_u8(value) for value in rgba[:3])
+    red, green, blue = (unit_to_u8(value) for value in rgba[:3])
     return f"rgba({red},{green},{blue},{float(rgba[3]):.6g})"
 
 

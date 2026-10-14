@@ -25,6 +25,7 @@ from fisheye.analysis.chaser_distance_io import (
     ChaserDistanceReadSnapshot,
     load_chaser_distance_run,
 )
+from fisheye.shared.color_quantization import unit_rgb_to_hex
 from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.shared.coordinate_transform import load_calibration_transform, projector_to_camera_px
 from fisheye.shared.json_safety import decode_null_terminated_text
@@ -411,8 +412,7 @@ def _unit_color_to_hex(red: object, green: object, blue: object) -> Optional[str
         return None
     if not all(np.isfinite(value) for value in channels):
         return None
-    values = [int(round(max(0.0, min(1.0, value)) * 255.0)) for value in channels]
-    return f"#{values[0]:02x}{values[1]:02x}{values[2]:02x}"
+    return unit_rgb_to_hex(channels)
 
 
 def _chaser_colors_from_protocol_payload(payload: Mapping[str, Any]) -> dict[int, str]:

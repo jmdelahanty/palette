@@ -1,0 +1,397 @@
+{
+  "schema_id": "citrus.stimulus_vocabulary",
+  "schema_version": 1,
+  "title": "Citrus stimulus vocabulary v1: modes, families, colour representation and appearance rules",
+  "producer": {
+    "repository": "JohnsonLabJanelia/citrus",
+    "commit": "c0c0607fb0a69b8bf04524d0cef875ca147e3186",
+    "mode_enum_source": "src/core/stimulus_globals.h",
+    "family_source": "src/protocols/protocol_trial_index.cpp StimulusFamily()",
+    "trial_index_schema_source": "src/schemas/protocol_trial_index_v3.schema.json"
+  },
+  "consumers": [
+    {
+      "repository": "jmdelahanty/palette",
+      "generated_artifact": "fisheye/shared/citrus_enums.py STIMULUS_MODE",
+      "rule": "generated from this document by verify_stimulus_vocabulary.py --emit-python, never hand-copied"
+    }
+  ],
+  "modes": [
+    {
+      "id": -1,
+      "name": "UNDEFINED",
+      "family": "undefined",
+      "status": "live",
+      "protocol_presentation": false
+    },
+    {
+      "id": 2,
+      "name": "COHERENT_DOTS",
+      "family": "coherent_dots",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 3,
+      "name": "MOVING_GRATING",
+      "family": "moving_grating",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 4,
+      "name": "SOLID_BLACK",
+      "family": "solid_color",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 5,
+      "name": "SOLID_WHITE",
+      "family": "solid_color",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 6,
+      "name": "CONCENTRIC_GRATING",
+      "family": "concentric_grating",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 7,
+      "name": "LOOMING_DOT",
+      "family": "looming_dot",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 8,
+      "name": "STATIC_IMAGE",
+      "family": "static_image",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 9,
+      "name": "CALIBRATION_GRID",
+      "family": "calibration_grid",
+      "status": "live",
+      "protocol_presentation": false
+    },
+    {
+      "id": 10,
+      "name": "ARENA_DEFINITION_SQUARE",
+      "family": "arena_definition",
+      "status": "live",
+      "protocol_presentation": false
+    },
+    {
+      "id": 11,
+      "name": "SPOTLIGHT",
+      "family": "spotlight",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 12,
+      "name": "CHASER",
+      "family": "chaser",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 13,
+      "name": "CALIBRATION_TEST_SHAPE",
+      "family": "calibration_test_shape",
+      "status": "live",
+      "protocol_presentation": false
+    },
+    {
+      "id": 14,
+      "name": "SCROLLING_GRID",
+      "family": "scrolling_grid",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 15,
+      "name": "INDEPENDENT_MOTION_GRID",
+      "family": "independent_motion_grid",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 16,
+      "name": "MOVING_DOTS",
+      "family": "moving_dots",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 17,
+      "name": "STATIC_GRID",
+      "family": "static_grid",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 18,
+      "name": "PHOTOTAXIS",
+      "family": "phototaxis",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 19,
+      "name": "DARK_FLASH",
+      "family": "flash",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 20,
+      "name": "BRIGHT_FLASH",
+      "family": "flash",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 21,
+      "name": "CONCENTRIC_DOTS",
+      "family": "concentric_dots",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 22,
+      "name": "SOLID_COLOR",
+      "family": "solid_color",
+      "status": "live",
+      "protocol_presentation": true
+    },
+    {
+      "id": 99,
+      "name": "NONE",
+      "family": "none",
+      "status": "live",
+      "protocol_presentation": false
+    }
+  ],
+  "color": {
+    "color_space": {
+      "enum": [
+        "srgb"
+      ],
+      "meaning": "Display-referred drive values as written to the stimulus framebuffer. Not linear light, not measured luminance."
+    },
+    "authored": "RGBA floats in [0, 1] (Citrus ImVec4 / colour-module value).",
+    "recorded_form": {
+      "shape": {
+        "color_space": "srgb",
+        "rgba8": "[r, g, b, a] integers 0-255"
+      },
+      "optional": {
+        "color_name": "lowercase ASCII string; present only when the producer asserts a name"
+      }
+    },
+    "quantization": {
+      "field": "quantization",
+      "default_when_absent": "rgba8_round_half_up_v1",
+      "ids": {
+        "rgba8_round_half_up_v1": {
+          "rule": "x is the authored channel as Citrus holds it, IEEE binary32 (ImVec4, colour picker, CUDA kernels), promoted exactly to double; v = x * 255 evaluated as an IEEE double; u8 = clamp(round_half_away_from_zero(v), 0, 255) per channel (C lround semantics: exact .5 rounds away from zero, never to even); non-finite x -> 0. With binary32 inputs the only exact .5 tie is x = 0.5 (127.5 -> 128); every other one- or two-decimal value lands just above or below the tie on the binary32 side, which is why 0.3 -> 77 but 0.7 -> 178.",
+          "not_this": "Quantising the decimal as a double is NOT this rule: double 0.7 * 255 is exactly 178.5 and gives 179, while the binary32 nearest 0.7 (0.699999988) gives 178.499997 -> 178, which is what Citrus displays and records. Python round() (half to even) on the double 0.3 gives 76; floor(v + 0.5) differs from lround for v just below .5 (0.49999999999999994 -> 1 instead of 0).",
+          "citrus": "CitrusColor::QuantizeChannelRoundHalfUpV1 (src/color/color.h): std::lround(double(float x) * 255.0) clamped; used by protocol_trial_index.cpp Color() and the SOLID_COLOR fill. Device: object_appearance_contrast.cuh QuantizeCodeValueToU8V1 = floor(double(x) * 255.0 + 0.5) clamped, which is exactly lround for binary32 x (the product and the sum are exact in double); before citrus #28 it was float32 (x * 255.0f + 0.5f) and gave 179 for 0.7f and 230 for 0.9f. tests/test_object_appearance_contrast_device.cu replays the decimal rows on the GPU against the host rule.",
+          "palette": "src/fisheye/shared/color_quantization.py: unit_to_u8 / unit_rgba_to_rgba8, QUANTIZATION_ID = rgba8_round_half_up_v1 (replaces the four half-to-even sites; replays fixtures/resolved_color_examples.json; Palette commit 5fea6a36, pins this document at agent-contracts 880a5ed); MUST convert the authored decimal to binary32 (struct.pack('f') / numpy.float32) before multiplying, see verify_stimulus_vocabulary.py binary32()",
+          "examples": [
+            {
+              "x": 0.0,
+              "u8": 0
+            },
+            {
+              "x": 1.0,
+              "u8": 255
+            },
+            {
+              "x": 0.75,
+              "u8": 191
+            },
+            {
+              "x": 0.5,
+              "u8": 128
+            },
+            {
+              "x": 0.001,
+              "u8": 0
+            },
+            {
+              "x": 0.002,
+              "u8": 1
+            },
+            {
+              "x": 0.3,
+              "u8": 77
+            },
+            {
+              "x": 0.7,
+              "u8": 178
+            },
+            {
+              "x": 0.1,
+              "u8": 26
+            },
+            {
+              "x": 0.9,
+              "u8": 229
+            }
+          ]
+        },
+        "rgba8_trunc_legacy": {
+          "rule": "x is the authored binary32 channel promoted to double; u8 = clamp(trunc(x * 255), 0, 255) per channel",
+          "citrus": "MovingGratingStimulus.cu and ScrollingGridStimulus.cu kernels before the colour-module migration",
+          "consumer_rule": "Palette never recomputes a displayed code from authored floats for elements quantised this way; a backfill records the displayed code as absent rather than guess. Pre-citrus-#29 recordings (before 2026-10-13) displayed truncated / float-lround codes that were never recorded; never recompute a pre-#29 displayed code from authored floats. The v2 trial-index fields (line_color, bg_color, flash colours, chasers[k].color) are authored, pre-brightness codes and remain valid as authored values."
+        }
+      }
+    },
+    "modifier_rule": "Brightness and alpha are authoring inputs folded in before quantisation. The recorded rgba8 is the code written to the framebuffer. No field named luminance, intensity or brightness ever holds a code value.",
+    "physical_claim": "rgba8 is a display drive value, not measured luminance. Measured light, once a photodiode exists, is a separate rig-calibration record keyed by (rig, rgba8); it never rewrites these fields.",
+    "solid_invariants": [
+      "color_name == \"black\" if and only if rgba8 == [0, 0, 0, 255] on a solid_color step",
+      "color_name == \"white\" if and only if rgba8 == [255, 255, 255, 255] on a solid_color step",
+      "SOLID_BLACK (4) requires color_type_id 0 and rgba8 [0, 0, 0, 255]; SOLID_WHITE (5) requires color_type_id 1 and rgba8 [255, 255, 255, 255]",
+      "SOLID_COLOR (22): color_name is \"gray\" when r == g == b and the code is neither black nor white; otherwise color_name is omitted; never \"black\" or \"white\" unless the code is exactly that"
+    ],
+    "h5_per_frame_columns": {
+      "columns": {
+        "/components/visual_appearance/states": "reference_rgba, realized_rgba: float32[4] = displayed code / 255 (every producer). code = V1(stored) recovers all 256 codes; float32(k/255) * 255 is a non-integer in double for 254 of the 256 codes, so never truncate and never use the raw product.",
+        "/components/moving_grating/states": "line_color_rgba, background_color_rgba: float32[4] = authored RGB * brightness (RGB) and authored alpha, before quantisation; brightness: float32."
+      },
+      "reading_rule": "code = V1(stored float) = clamp(lround(double(stored) * 255), 0, 255) per channel. For the moving_grating columns this equals the displayed code only for files whose trial index is v3 with features.appearance.elements (citrus >= 9ba1744, #29); for every other file the grating columns are authored values whose displayed code was rgba8_trunc_legacy (and the first frame ignored brightness) and is never recomputed.",
+      "keyed_on": "the file itself: /protocol/authored trial index schema_version == 3 and steps[*].features.appearance.elements present; not on producer history or dates. Option 2 (a /metadata/session display_color_quantization attribute) was considered and not taken.",
+      "fact": "No rig file was written with trial index v3 between citrus #27 (576481f, 2026-10-12) and #29 (883a639, 2026-10-13): pancake0's GUI binary stayed at cf7a60b (pre-#27) because the rebuild was held. Therefore 'trial index v3 with elements' identifies producers at or after #29, and the first GUI rebuild must ship at least c52ac4e + #29 + #30 (element derivation), never #27 alone.",
+      "never": "Never recompute a pre-#29 displayed grating code from the stored floats; never recompute any displayed code from a decimal without rounding to binary32 first."
+    }
+  },
+  "trial_index": {
+    "schema_id": "citrus.protocol.trial_index",
+    "live_version": 3,
+    "consumer_accepts": [
+      1,
+      2,
+      3
+    ],
+    "live_schema_file_sha256": "61f6c573be70e1ded5c4268f1e521dfb12dfe6105438662c52554df75cff171d",
+    "color_fields_v2": {
+      "solid_color": {
+        "features.color_name": "black|white for modes 4 and 5; for mode 22 optional: black, white or gray (r == g == b, neither black nor white) when the displayed code is exactly that, else absent",
+        "features.resolved_color": "recorded_form, exact displayed code (mode 22: rgba8_round_half_up_v1 of the authored colour)"
+      },
+      "moving_grating": {
+        "features.line_color": "rgba8 of the AUTHORED floats, pre-brightness",
+        "features.bg_color": "rgba8 of the AUTHORED floats, pre-brightness",
+        "features.brightness": "float multiplier; displayed code was truncated (rgba8_trunc_legacy)"
+      },
+      "flash": {
+        "features.baseline_color": "recorded_form",
+        "features.flash_color": "recorded_form"
+      },
+      "chaser": {
+        "features.chasers[k].color": "recorded_form of the authored colour",
+        "features.bg_color": "recorded_form",
+        "features.appearance": "object_appearance_profile digest and policy ids when a profile is set"
+      },
+      "independent_motion_grid": {
+        "features.brightness": "float only; no colour"
+      },
+      "concentric_dots|spotlight|static_grid|phototaxis|scrolling_grid|coherent_dots|moving_dots|looming_dot|static_image|concentric_grating": {
+        "features": "index_status minimal; no colour fields"
+      }
+    },
+    "planned_version": null,
+    "v3_rules": [
+      "LIVE IN CITRUS since citrus 576481f (#27, 2026-10-12): top-level stimulus_angle_convention = atan2_negative_y_x_degrees and normalization_policy citrus.protocol.trial_index.v3. Since citrus 9ba1744 (colour step 2, 2026-10-13) every presentation mode carries features.appearance.elements, and a minimal step may carry features.appearance alone (schema digest f23c20a7... since citrus 2f3a482, which adds the required element derivation). consumer_accepts stays [1, 2] until Palette's v3 PR merges: until then Citrus main writes what Palette rejects, and no rig recording may be admitted on v3. Since citrus 8525697 (static phototaxis redesign) mode 18 is detailed with features.region / fill / brightness (schema digest 33659c8d...).",
+      "features.appearance.elements.<element> = {authored_color {color_space: srgb, rgba: binary32 floats}, brightness, derivation, quantization, resolved_color, contrast_profile_digest|null} for every presentation mode. resolved_color is the code the stimulus writes to the framebuffer; derivation (appearance.element_derivations) names the rule that produces it from authored_color and brightness, so a consumer recomputes and checks every element without a prose table.",
+      "Element names: solid_color: background (== features.resolved_color); moving_grating / concentric_grating: line, background (grating brightness folded in; the v2 line_color/bg_color stay pre-brightness); flash: baseline, flash (opaque: RGB clamped to [0,1], alpha 255); coherent_dots / concentric_dots / moving_dots / looming_dot: dot, background (coherent: brightness on the dot only; concentric: background premultiplied by its alpha, displayed opaque); phototaxis: side_a (inside the region) and side_b (elsewhere) for fill two_tone, or gradient_from and gradient_to (the endpoint codes, not the colour of every pixel) for fill gradient; features.fill carries type, domain, outside_area_policy (side_b_v1 | masked_black_v1) and, for gradient, formula_id linear_srgb_gradient_v1, axis, start_fraction, end_fraction; features.region and features.brightness are recorded; since citrus's phototaxis static fill redesign (2026-10-13) the mode is detailed and its semantic identity includes colours, brightness and fill; spotlight: spot, background (opaque); static_image / scrolling_grid / static_grid / independent_motion_grid: background, plus border when a grid shows borders (image texels are not authored colours); chaser: chaser_<k> (k = chaser_index; contrast_profile_digest = the appearance profile digest when set), background, background_edge_minimum (when the edge falloff is on: the background code times minimum_brightness, +0.5 truncated; brightness = minimum_brightness), proximity and danger_zone when enabled.",
+      "Solid steps (modes 4, 5, 22) keep features.color_name and features.resolved_color through at least one transition version, and features.appearance.elements.background.resolved_color == features.resolved_color (alias rule). Palette switches its solid-black classifier to the elements path before Citrus may drop the old fields.",
+      "Spatially varying fills are recorded as the elements that bound them plus the existing per-mode feature that describes the profile: the chaser background edge falloff is elements background (plain_v1) and background_edge_minimum (edge_minimum_floor_half_v1) plus features.background_edge_falloff (profile, minimum_brightness, falloff_width_fraction); the endpoints are not the displayed colour of every pixel between them. There is no fill field in the element. appearance.fill_formula_ids stays reserved (planned) for a future gradient stimulus.",
+      "Per-frame H5 colour fields (grating line/background, appearance reference/realized) move to the recorded form with an admission bump agreed with Palette; that is separate from the trial-index bump.",
+      "Gate: no rig recording is ADMITTED on trial index v3 until Palette lands v3 support and bumps consumer_accepts; Citrus main writes v3 now (the gap the verifier prints).",
+      "SOLID_COLOR 22 LIVE (this revision, 2026-10-14, at Jeremy's direction: the importer must accept the mode, no substitution by SOLID_BLACK/SOLID_WHITE): protocol parameters color_type Custom + color {color_space: srgb, rgba}; trial index features.resolved_color (recorded_form of the displayed code), features.color_name only when the code is exactly black, white or gray, and features.appearance.elements.background (brightness 1, plain_v1, rgba8_round_half_up_v1, no contrast profile) with elements.background.resolved_color == features.resolved_color. Citrus has written this since b470de2 (#28). Effective for admission once Palette regenerates its mirror from this revision, merges and re-pins live intake.",
+      "Trial index v3 schema digest 61f6c573... (Citrus PR 2 of the reactive phototaxis track, 2026-10-14): mode 18 fill.type gains heading_split with fill.style and features.reactive, present exactly when fill.type is heading_split (agent-contracts citrus-palette/reactive_phototaxis revision 5). Static two-tone and gradient steps are unchanged.",
+      "consumer_accepts moved to [1, 2, 3] in the 2026-10-14 revision: Palette's live intake (f31ea0e8, admission revision 5) accepts trial index v3 under the angle_v1 binding; Palette does not vendor this file, the field records the consumer state."
+    ],
+    "phototaxis_geometry": {
+      "frame": "stimulus-canvas raster pixels: origin top-left, x to the right, y DOWN. TOP is the smaller y. The experimental area centre (cx, cy) and the circle radius r are canvas pixels (PHOTOTAXIS_START event details: experimental_center_x_px/y_px, circle_radius_px).",
+      "pixel_convention": "A raster pixel (i, j) is drawn with its centre (i + 0.5, j + 0.5), for the region test, the experimental-area test and the gradient axis position alike. Arithmetic is binary32.",
+      "region_rule": {
+        "half": {
+          "LEFT": "x <= cx",
+          "RIGHT": "x >= cx",
+          "TOP": "y <= cy",
+          "BOTTOM": "y >= cy"
+        },
+        "quarter": {
+          "TOP_LEFT": "x <= cx && y <= cy",
+          "TOP_RIGHT": "x >= cx && y <= cy",
+          "BOTTOM_LEFT": "x <= cx && y >= cy",
+          "BOTTOM_RIGHT": "x >= cx && y >= cy"
+        },
+        "circle": "(x - cx)^2 + (y - cy)^2 <= r^2",
+        "note": "inclusive at the dividing lines: a point exactly on the centre line belongs to the region whichever side is named, and the centre point belongs to every quarter. side_a is drawn where the rule holds inside the experimental area; side_b elsewhere (outside_area_policy side_b_v1)."
+      },
+      "gradient_axis_rule": "axis x runs left to right and axis y runs top to bottom (increasing canvas y); start_fraction < end_fraction measure along that direction over the experimental area's extent (axis_min = centre - extent/2; a circular area spans 2 r).",
+      "consumer_rule": "Classify a fish (or any camera-frame position) by mapping it through the camera-to-canvas homography into canvas pixels and applying region_rule; never by camera-image side or camera-image top/bottom. On a reflected rig (negative homography determinant, e.g. omnifin0) canvas TOP is camera BOTTOM and camera-image halves would invert side_a without error.",
+      "cross_reference": "citrus-palette/angles plane rule (only map through the homography; the orientation agent's unit-circle convention is the angle counterpart of this position rule).",
+      "citrus": "src/stimuli/phototaxis_region.cuh InsideRegion / PixelCentre (used by the kernel and replayed by tests/test_protocol_trial_index.cpp PhototaxisRegionRule)."
+    }
+  },
+  "appearance": {
+    "brightness": "One scalar multiplier per element, authored in [0, 1], recorded beside the authored colour; resolved_color is post-brightness.",
+    "contrast_profile": {
+      "schema_id": "citrus.object_appearance_profile",
+      "schema_version": 1,
+      "formula_ids": [
+        "compact_object_signed_weber_code_luminance_v1"
+      ],
+      "quantization_id": "rgba8_round_half_up_v1",
+      "scope_rule": "scope_id identifies the element the profile applies to (today: chaser objects; generalised to any figure-over-ground element by widening the scope enum, which is an admission note, not a table-shape change). The H5 table /components/visual_appearance/states is keyed by (stimulus_frame_num, scope_id)."
+    },
+    "fill_formula_ids": {
+      "linear_srgb_gradient_v1": {
+        "status": "live",
+        "meaning": "per-pixel linear interpolation of two authored colours along an axis in the srgb drive domain, brightness folded in, quantised per pixel. Used by PHOTOTAXIS fill gradient (citrus >= the commit in producer.commit).",
+        "rule": "Endpoints folded as plain_v1: fb_c = binary32(from_c * brightness), tb_c = binary32(to_c * brightness) for RGB, fb_a = from_a, tb_a = to_a. Pixel position p = pixel index + 0.5 along the axis (x or y, raster pixels); u = (p - axis_min) / axis_extent where axis_min/axis_extent are the experimental area's minimum edge and extent along the axis (a circular area spans 2 r); t = clamp((u - start_fraction) / (end_fraction - start_fraction), 0, 1). c_c = fb_c + (tb_c - fb_c) * t; code_c = clamp(floor(c_c * 255 + 0.5), 0, 255), literally floor of (c * 255 + 0.5) on the computed double c: NOT lround (they differ only at c * 255 = 0.49999999999999994, which floor-half maps to 1; implement floor-half literally, do not simplify). All of u, t, c and the final scale are IEEE double operations on the binary32 inputs promoted exactly, each operation rounded individually (no FMA; the Citrus device path uses the _rn intrinsics). At t = 0 the code is V1(fb) and at t = 1 it is V1(tb) exactly, so the recorded elements gradient_from / gradient_to are the true endpoint codes. Outside the experimental area the pixel is masked black [0,0,0,255].",
+        "citrus": "src/color/linear_srgb_gradient.cuh (GradientT, GradientCodeV1), PhototaxisStimulus.cu kernel; tests/test_color.cpp and the GPU harness (phototaxis_gradient_matches_formula) replay every pixel against the host formula."
+      }
+    },
+    "element_derivations": {
+      "field": "derivation",
+      "precision": "Authored channels and brightness are binary32; every product of two binary32 values is rounded back to binary32 before the next step (as Citrus computes it in float); V1 = rgba8_round_half_up_v1 (binary32 promoted to double, times 255, lround, clamp); the edge-minimum scale is computed in double, where an 8-bit code times a binary32 and the +0.5 are exact (no float32 re-rounding, no FMA).",
+      "ids": {
+        "plain_v1": {
+          "rule": "rgb_c = V1(binary32(c * brightness)); a = V1(a)",
+          "elements": "every element not listed under another id"
+        },
+        "opaque_alpha_v1": {
+          "rule": "rgb as plain_v1; a = 255 (the stimulus displays the colour opaque and ignores the authored alpha)",
+          "elements": "flash: baseline, flash (RGB clamped to [0,1] by the stimulus before display; authored_color records the clamped value); spotlight: spot, background"
+        },
+        "premultiplied_background_v1": {
+          "rule": "rgb_c = V1(binary32(binary32(c * a) * brightness)); a = 255 (the background is composited over black by its own authored alpha before quantisation and displayed opaque)",
+          "elements": "concentric_dots: background"
+        },
+        "edge_minimum_floor_half_v1": {
+          "rule": "code = V1(c) with no brightness; rgb_c = floor(double(code_c) * double(brightness) + 0.5), clamped to [0,255]; a = code_a. brightness is the falloff's minimum_brightness; pixels between this ring and the plain background follow features.background_edge_falloff (smoothstep of the same scale)",
+          "elements": "chaser: background_edge_minimum"
+        }
+      }
+    }
+  },
+  "compatibility": {
+    "adding_a_mode": "Append to modes with status planned; Citrus may then define it (the verifier accepts a planned mode present in the Citrus enum, and refuses any id the document does not list); Palette pins the new document and its generated mirror; status becomes live only after the Palette intake pin passes the commit that reads it. Ids are never reused or renumbered.",
+    "changing_a_family_or_name": "A new schema_version of this document; consumers fail closed on an unknown version.",
+    "changing_quantization": "A new quantization id, carried per element in the trial index; never a silent change of an existing id's rule."
+  }
+}

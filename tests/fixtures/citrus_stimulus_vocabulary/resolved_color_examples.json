@@ -1,0 +1,698 @@
+{
+  "description": "Worked examples of the recorded colour form. authored = RGBA floats before any modifier, held as binary32 (the precision Citrus authors in; a consumer converts the decimal to float32 first); brightness folded in before quantisation; quantization rgba8_round_half_up_v1 unless stated; derivation plain_v1 unless stated (appearance.element_derivations).",
+  "examples": [
+    {
+      "name": "solid black (mode 4)",
+      "authored": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "brightness": 1.0,
+      "recorded": {
+        "color_space": "srgb",
+        "rgba8": [
+          0,
+          0,
+          0,
+          255
+        ]
+      },
+      "color_name": "black"
+    },
+    {
+      "name": "solid white (mode 5)",
+      "authored": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "brightness": 1.0,
+      "recorded": {
+        "color_space": "srgb",
+        "rgba8": [
+          255,
+          255,
+          255,
+          255
+        ]
+      },
+      "color_name": "white"
+    },
+    {
+      "name": "solid gray 0.75 (planned mode 22)",
+      "authored": [
+        0.75,
+        0.75,
+        0.75,
+        1.0
+      ],
+      "brightness": 1.0,
+      "recorded": {
+        "color_space": "srgb",
+        "rgba8": [
+          191,
+          191,
+          191,
+          255
+        ]
+      },
+      "color_name": "gray"
+    },
+    {
+      "name": "grating line, brightness 0.5, round-half-up",
+      "authored": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "brightness": 0.5,
+      "recorded": {
+        "color_space": "srgb",
+        "rgba8": [
+          128,
+          128,
+          128,
+          255
+        ]
+      },
+      "quantization": "rgba8_round_half_up_v1"
+    },
+    {
+      "name": "grating line, brightness 0.5, legacy truncation",
+      "authored": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "brightness": 0.5,
+      "recorded": {
+        "color_space": "srgb",
+        "rgba8": [
+          127,
+          127,
+          127,
+          255
+        ]
+      },
+      "quantization": "rgba8_trunc_legacy",
+      "note": "What the pre-migration grating kernel displayed; Palette does not recompute this from floats."
+    },
+    {
+      "name": "chaser colour with alpha",
+      "authored": [
+        0.2,
+        0.4,
+        0.6,
+        0.5
+      ],
+      "brightness": 1.0,
+      "recorded": {
+        "color_space": "srgb",
+        "rgba8": [
+          51,
+          102,
+          153,
+          128
+        ]
+      }
+    },
+    {
+      "name": "decimal-vs-binary32 trap: 0.3 and 0.7",
+      "authored": [
+        0.3,
+        0.7,
+        0.3,
+        1.0
+      ],
+      "brightness": 1.0,
+      "recorded": {
+        "color_space": "srgb",
+        "rgba8": [
+          77,
+          178,
+          77,
+          255
+        ]
+      },
+      "note": "binary32 nearest 0.3 is 0.300000012 (76.500003 -> 77); binary32 nearest 0.7 is 0.699999988 (178.499997 -> 178). Quantising the doubles gives 77 and 179 (lround) or 76 and 178 (Python round); both fail this fixture."
+    },
+    {
+      "name": "binary32 nearest 0.9 rounds down",
+      "authored": [
+        0.9,
+        0.9,
+        0.9,
+        1.0
+      ],
+      "brightness": 1.0,
+      "recorded": {
+        "color_space": "srgb",
+        "rgba8": [
+          229,
+          229,
+          229,
+          255
+        ]
+      },
+      "color_name": "gray",
+      "note": "0.9 as binary32 is 0.899999976; 229.499994 -> 230 under a float32 multiply-add (the pre-#28 device kernel), 229 under the rule. A double 0.9 would also give 230."
+    },
+    {
+      "name": "device path (chaser appearance realized colour) uses the same rule",
+      "authored": [
+        0.7,
+        0.9,
+        0.3,
+        1.0
+      ],
+      "brightness": 1.0,
+      "recorded": {
+        "color_space": "srgb",
+        "rgba8": [
+          178,
+          229,
+          77,
+          255
+        ]
+      },
+      "note": "object_appearance_contrast.cuh QuantizeCodeValueToU8V1 as of citrus #28 (b470de2); its float32 predecessor gave [179, 230, 77, 255]. Citrus replays this row on the GPU in tests/test_object_appearance_contrast_device.cu; Palette replays it with its host quantiser."
+    },
+    {
+      "name": "plain_v1: grating line at brightness 0.5",
+      "authored": [
+        1.0,
+        0.5,
+        0.7,
+        1.0
+      ],
+      "brightness": 0.5,
+      "derivation": "plain_v1",
+      "recorded": {
+        "color_space": "srgb",
+        "rgba8": [
+          128,
+          64,
+          89,
+          255
+        ]
+      },
+      "note": "binary32(0.7 * 0.5) = 0.349999994 -> 89.2499985 -> 89; alpha is not scaled by brightness."
+    },
+    {
+      "name": "opaque_alpha_v1: spotlight spot",
+      "authored": [
+        1.0,
+        1.0,
+        0.0,
+        0.5
+      ],
+      "brightness": 1.0,
+      "derivation": "opaque_alpha_v1",
+      "recorded": {
+        "color_space": "srgb",
+        "rgba8": [
+          255,
+          255,
+          0,
+          255
+        ]
+      },
+      "note": "flash and spotlight display opaque; the authored alpha is recorded but not displayed."
+    },
+    {
+      "name": "premultiplied_background_v1: concentric-dots background",
+      "authored": [
+        0.4,
+        0.2,
+        0.0,
+        0.25
+      ],
+      "brightness": 1.0,
+      "derivation": "premultiplied_background_v1",
+      "recorded": {
+        "color_space": "srgb",
+        "rgba8": [
+          26,
+          13,
+          0,
+          255
+        ]
+      },
+      "note": "binary32(0.4 * 0.25) = 0.100000001 -> 25.5000004 -> 26; binary32(0.2 * 0.25) = 0.0500000007 -> 12.75 -> 13; alpha 255. The pre-#29 kernel truncated the code (25, 12)."
+    },
+    {
+      "name": "edge_minimum_floor_half_v1: chaser background 0.5 at minimum_brightness 0.25",
+      "authored": [
+        0.5,
+        0.5,
+        0.5,
+        1.0
+      ],
+      "brightness": 0.25,
+      "derivation": "edge_minimum_floor_half_v1",
+      "recorded": {
+        "color_space": "srgb",
+        "rgba8": [
+          32,
+          32,
+          32,
+          255
+        ]
+      },
+      "note": "code = V1(0.5) = 128; floor(128 * 0.25 + 0.5) = 32 (exact in double); alpha keeps the code 255."
+    },
+    {
+      "name": "edge_minimum_floor_half_v1: white background at minimum_brightness 0.25",
+      "authored": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "brightness": 0.25,
+      "derivation": "edge_minimum_floor_half_v1",
+      "recorded": {
+        "color_space": "srgb",
+        "rgba8": [
+          64,
+          64,
+          64,
+          255
+        ]
+      },
+      "note": "floor(255 * 0.25 + 0.5) = floor(64.25) = 64."
+    }
+  ],
+  "h5_per_frame_column_examples": [
+    {
+      "name": "visual_appearance stored float32(k/255) -> k",
+      "stored_codes": [
+        1,
+        127,
+        128,
+        254
+      ],
+      "recovered": [
+        1,
+        127,
+        128,
+        254
+      ],
+      "note": "stored = float32(k/255); V1(stored) = k for every k in 0..255; float32(k/255)*255 is not an integer in double for 254 of them (only 0 and 255)."
+    },
+    {
+      "name": "moving_grating stored line float -> displayed code (v3-with-elements files only)",
+      "authored": [
+        1.0,
+        0.5,
+        0.7,
+        1.0
+      ],
+      "brightness": 0.5,
+      "stored": "float32(float32(c) * float32(brightness)) for RGB, float32(a) for alpha",
+      "recovered": [
+        128,
+        64,
+        89,
+        255
+      ],
+      "note": "equals elements.line.resolved_color (plain_v1). For a pre-#29 file the same columns were displayed through rgba8_trunc_legacy and the code is not recomputed."
+    }
+  ],
+  "fill_formula_examples": [
+    {
+      "formula_id": "linear_srgb_gradient_v1",
+      "name": "endpoints equal plain_v1",
+      "from": [
+        0.3,
+        0.7,
+        0.3,
+        1.0
+      ],
+      "to": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "brightness": 1.0,
+      "t": 0.0,
+      "code": [
+        77,
+        178,
+        77,
+        255
+      ]
+    },
+    {
+      "formula_id": "linear_srgb_gradient_v1",
+      "name": "t = 1 is the to colour",
+      "from": [
+        0.3,
+        0.7,
+        0.3,
+        1.0
+      ],
+      "to": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "brightness": 1.0,
+      "t": 1.0,
+      "code": [
+        255,
+        255,
+        255,
+        255
+      ]
+    },
+    {
+      "formula_id": "linear_srgb_gradient_v1",
+      "name": "midpoint black to white: 127.5 + 0.5 -> 128",
+      "from": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "to": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "brightness": 1.0,
+      "t": 0.5,
+      "code": [
+        128,
+        128,
+        128,
+        255
+      ]
+    },
+    {
+      "formula_id": "linear_srgb_gradient_v1",
+      "name": "quarter black to white: 63.75 + 0.5 -> 64",
+      "from": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "to": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "brightness": 1.0,
+      "t": 0.25,
+      "code": [
+        64,
+        64,
+        64,
+        255
+      ]
+    },
+    {
+      "formula_id": "linear_srgb_gradient_v1",
+      "name": "quarter white to black: 191.25 + 0.5 -> 191",
+      "from": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "to": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "brightness": 1.0,
+      "t": 0.25,
+      "code": [
+        191,
+        191,
+        191,
+        255
+      ]
+    },
+    {
+      "formula_id": "linear_srgb_gradient_v1",
+      "name": "brightness 0.8 folds into both endpoints before interpolation",
+      "from": [
+        1.0,
+        0.2,
+        0.0,
+        0.5
+      ],
+      "to": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "brightness": 0.8,
+      "t": 0.0,
+      "code": [
+        204,
+        41,
+        0,
+        128
+      ]
+    },
+    {
+      "formula_id": "linear_srgb_gradient_v1",
+      "name": "pixel centres: first and last column of a 256 px extent, start 0, end 1",
+      "from": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "to": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "brightness": 1.0,
+      "pixels": [
+        {
+          "p": 0.5,
+          "axis_min": 0.0,
+          "axis_extent": 256.0,
+          "start_fraction": 0.0,
+          "end_fraction": 1.0,
+          "code": [
+            0,
+            0,
+            0,
+            255
+          ]
+        },
+        {
+          "p": 255.5,
+          "axis_min": 0.0,
+          "axis_extent": 256.0,
+          "start_fraction": 0.0,
+          "end_fraction": 1.0,
+          "code": [
+            255,
+            255,
+            255,
+            255
+          ]
+        },
+        {
+          "p": 50.0,
+          "axis_min": 0.0,
+          "axis_extent": 100.0,
+          "start_fraction": 0.25,
+          "end_fraction": 0.75,
+          "code": [
+            128,
+            128,
+            128,
+            255
+          ]
+        }
+      ]
+    }
+  ],
+  "phototaxis_region_examples": {
+    "centre": [
+      128.0,
+      64.0
+    ],
+    "circle_radius": 32.0,
+    "rows": [
+      {
+        "region": "half",
+        "half_side": "LEFT",
+        "point": [
+          100.0,
+          10.0
+        ],
+        "in_side_a": true
+      },
+      {
+        "region": "half",
+        "half_side": "LEFT",
+        "point": [
+          128.0,
+          10.0
+        ],
+        "in_side_a": true,
+        "note": "on the centre line: inclusive"
+      },
+      {
+        "region": "half",
+        "half_side": "LEFT",
+        "point": [
+          128.5,
+          10.0
+        ],
+        "in_side_a": false
+      },
+      {
+        "region": "half",
+        "half_side": "RIGHT",
+        "point": [
+          128.0,
+          10.0
+        ],
+        "in_side_a": true,
+        "note": "on the centre line: inclusive for RIGHT too"
+      },
+      {
+        "region": "half",
+        "half_side": "TOP",
+        "point": [
+          10.0,
+          20.0
+        ],
+        "in_side_a": true,
+        "note": "TOP is the smaller canvas y"
+      },
+      {
+        "region": "half",
+        "half_side": "TOP",
+        "point": [
+          10.0,
+          100.0
+        ],
+        "in_side_a": false
+      },
+      {
+        "region": "half",
+        "half_side": "BOTTOM",
+        "point": [
+          10.0,
+          100.0
+        ],
+        "in_side_a": true
+      },
+      {
+        "region": "quarter",
+        "quarter": "TOP_LEFT",
+        "point": [
+          100.0,
+          20.0
+        ],
+        "in_side_a": true
+      },
+      {
+        "region": "quarter",
+        "quarter": "TOP_RIGHT",
+        "point": [
+          100.0,
+          20.0
+        ],
+        "in_side_a": false
+      },
+      {
+        "region": "quarter",
+        "quarter": "TOP_RIGHT",
+        "point": [
+          200.0,
+          20.0
+        ],
+        "in_side_a": true
+      },
+      {
+        "region": "quarter",
+        "quarter": "BOTTOM_LEFT",
+        "point": [
+          100.0,
+          100.0
+        ],
+        "in_side_a": true
+      },
+      {
+        "region": "quarter",
+        "quarter": "BOTTOM_RIGHT",
+        "point": [
+          128.0,
+          64.0
+        ],
+        "in_side_a": true,
+        "note": "the centre point is in every quarter"
+      },
+      {
+        "region": "circle",
+        "point": [
+          160.0,
+          64.0
+        ],
+        "in_side_a": true,
+        "note": "on the radius: inclusive"
+      },
+      {
+        "region": "circle",
+        "point": [
+          160.5,
+          64.0
+        ],
+        "in_side_a": false
+      },
+      {
+        "region": "circle",
+        "point": [
+          150.0,
+          87.0
+        ],
+        "in_side_a": true,
+        "note": "22^2 + 23^2 = 1013 <= 1024"
+      },
+      {
+        "region": "circle",
+        "point": [
+          151.0,
+          87.0
+        ],
+        "in_side_a": false,
+        "note": "23^2 + 23^2 = 1058 > 1024"
+      },
+      {
+        "pixel": [
+          127,
+          63
+        ],
+        "drawn_at": [
+          127.5,
+          63.5
+        ],
+        "note": "pixel (i, j) is tested at its centre"
+      }
+    ]
+  }
+}

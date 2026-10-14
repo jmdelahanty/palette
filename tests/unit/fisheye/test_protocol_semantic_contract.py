@@ -42,6 +42,7 @@ def _documents(
 ) -> tuple[str, str, str]:
     mode_ids = {
         "SOLID_BLACK": 4,
+        "SOLID_WHITE": 5,
         "CHASER": 12,
         "STATIC_GRID": 17,
         "PHOTOTAXIS": 18,
@@ -51,6 +52,7 @@ def _documents(
     }
     families = {
         "SOLID_BLACK": "solid_color",
+        "SOLID_WHITE": "solid_color",
         "CHASER": "chaser",
         "STATIC_GRID": "static_grid",
         "PHOTOTAXIS": "phototaxis",
@@ -63,18 +65,20 @@ def _documents(
     trial_steps = []
     for index, mode in enumerate(modes):
         duration_s = durations[mode]
-        parameters = {"color_type_id": 0} if mode == "SOLID_BLACK" else {}
-        features = (
-            {
-                "color_name": "black",
+        solid = {"SOLID_BLACK": (0, "black", 0), "SOLID_WHITE": (1, "white", 255)}
+        if mode in solid:
+            color_type_id, color_name, code = solid[mode]
+            parameters = {"color_type_id": color_type_id}
+            features = {
+                "color_name": color_name,
                 "resolved_color": {
                     "color_space": "srgb",
-                    "rgba8": [0, 0, 0, 255],
+                    "rgba8": [code, code, code, 255],
                 },
             }
-            if mode == "SOLID_BLACK"
-            else {}
-        )
+        else:
+            parameters = {}
+            features = {}
         semantic_steps.append(
             {
                 "duration": {
@@ -407,6 +411,64 @@ def test_contradictory_or_malformed_black_evidence_fails_closed(rgba8) -> None:
             semantic_json=semantic_json,
             trial_index_json=_json(trial),
         )
+
+
+def test_solid_white_matches_real_snow_recording_evidence() -> None:
+    # Shape of the 2026-10-09 snow_1h recordings: mode 5, color_type_id 1,
+    # color_name "white", srgb rgba8 [255, 255, 255, 255].
+    snapshot = _snapshot_v2(("SOLID_WHITE",))
+
+    assert snapshot.steps[0].stimulus_family == "solid_color"
+    assert snapshot.steps[0].display_context == "other"
+    assert snapshot.steps[0].resolved_color_rgba8 == (255, 255, 255, 255)
+
+
+def _white_mutation(mutate) -> None:
+    semantic_hash, semantic_json, trial_json = _documents(("SOLID_WHITE",))
+    semantic = json.loads(semantic_json)
+    trial = json.loads(trial_json)
+    mutate(semantic["identity"]["steps"][0], trial["steps"][0])
+    semantic_json = _json(semantic)
+    semantic_hash = "sha256:" + sha256(semantic_json.encode("utf-8")).hexdigest()
+    trial["protocol_semantic_hash"] = semantic_hash
+    validate_protocol_semantic_snapshot(
+        semantic_hash=semantic_hash,
+        semantic_json=semantic_json,
+        trial_index_json=_json(trial),
+    )
+
+
+def _set_rgba8(rgba8):
+    def mutate(_semantic_step, trial_step):
+        trial_step["features"]["resolved_color"]["rgba8"] = rgba8
+
+    return mutate
+
+
+def _set_color_type(_semantic_step, _trial_step):
+    _semantic_step["parameters"]["color_type_id"] = 0
+
+
+def _drop_resolved(_semantic_step, trial_step):
+    del trial_step["features"]["resolved_color"]
+
+
+def _name_gray(_semantic_step, trial_step):
+    trial_step["features"]["color_name"] = "gray"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    (
+        (_set_rgba8([191, 191, 191, 255]), "white name contradicts"),
+        (_set_color_type, "color_type_id"),
+        (_drop_resolved, "white evidence"),
+        (_name_gray, "resolved white contradicts color_name"),
+    ),
+)
+def test_contradictory_or_missing_white_evidence_fails_closed(mutate, match) -> None:
+    with pytest.raises(ProtocolSemanticContractError, match=match):
+        _white_mutation(mutate)
 
 
 def test_snapshot_payloads_are_deeply_immutable() -> None:

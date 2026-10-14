@@ -41,6 +41,7 @@ from fisheye.analysis.chaser_profiles import (
     load_chaser_protocol_profile,
     resolve_protocol_payload_path,
 )
+from fisheye.shared.color_quantization import unit_to_u8
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.shared.plot_artifacts import write_interactive_plot_spec_artifact, write_png_visualization_artifact
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
@@ -177,7 +178,7 @@ def _unit_to_u8(value: Any) -> int:
         number = float(value)
     except (TypeError, ValueError):
         number = 0.0
-    return int(round(max(0.0, min(1.0, number)) * 255.0))
+    return unit_to_u8(max(0.0, min(1.0, number)))
 
 
 def _rgba_to_hex(rgba: tuple[float, float, float, float]) -> str:

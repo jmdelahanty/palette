@@ -40,6 +40,7 @@ from fisheye.shared.heading_convention import (
     LEGACY_CANVAS_ANGLE,
     STIMULUS_ANGLE_CONVENTION,
 )
+from fisheye.shared.stimulus_vocabulary import STIMULUS_FAMILY
 
 
 PROTOCOL_SEMANTIC_HASH_H5_PATH = "/protocol_snapshot/protocol_semantic_hash"
@@ -390,6 +391,14 @@ def _display_context(
     if color_name not in (None, "black") and rgba8 == (0, 0, 0, 255):
         raise ProtocolSemanticContractError(
             "protocol trial-index resolved black contradicts color_name."
+        )
+    if color_name == "white" and rgba8 is not None and rgba8 != (255, 255, 255, 255):
+        raise ProtocolSemanticContractError(
+            "protocol trial-index white name contradicts resolved_color.rgba8."
+        )
+    if color_name not in (None, "white") and rgba8 == (255, 255, 255, 255):
+        raise ProtocolSemanticContractError(
+            "protocol trial-index resolved white contradicts color_name."
         )
     if (
         stimulus_family == "solid_color"
@@ -872,8 +881,10 @@ def validate_protocol_semantic_snapshot(
             expected_mode,
             name=f"trial step {expected_index}.stimulus_mode",
         )
-        expected_family = {4: "solid_color", 12: "chaser", 22: "solid_color"}.get(
-            semantic_mode_id
+        expected_family = (
+            STIMULUS_FAMILY[semantic_mode_id]
+            if semantic_mode_id in (4, 5, 12, 22)
+            else None
         )
         if expected_family is not None:
             _require_exact(
@@ -894,7 +905,7 @@ def validate_protocol_semantic_snapshot(
             admits_heading_split=admits_heading_split,
             semantic_parameters=semantic_step.get("parameters"),
         )
-        if semantic_mode_id == 4:
+        if semantic_mode_id in (4, 5):
             parameters = semantic_step.get("parameters")
             if not isinstance(parameters, Mapping):
                 raise ProtocolSemanticContractError(
@@ -902,7 +913,7 @@ def validate_protocol_semantic_snapshot(
                 )
             _require_exact(
                 parameters.get("color_type_id"),
-                0,
+                0 if semantic_mode_id == 4 else 1,
                 name=f"semantic step {expected_index}.parameters.color_type_id",
             )
         if semantic_mode_id == SOLID_COLOR_STIMULUS_MODE_ID:
@@ -919,6 +930,10 @@ def validate_protocol_semantic_snapshot(
         if semantic_mode_id == 4 and display_context != "solid_black":
             raise ProtocolSemanticContractError(
                 f"semantic step {expected_index} lacks consistent sRGB black evidence."
+            )
+        if semantic_mode_id == 5 and _optional_rgba8(features) != (255, 255, 255, 255):
+            raise ProtocolSemanticContractError(
+                f"semantic step {expected_index} lacks consistent sRGB white evidence."
             )
         steps.append(
             ProtocolStepIdentity(

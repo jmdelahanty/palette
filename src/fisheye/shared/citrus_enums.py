@@ -25,6 +25,8 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+from fisheye.shared.stimulus_vocabulary import STIMULUS_MODE as _VOCABULARY_STIMULUS_MODE
+
 # ---------------------------------------------------------------------------
 # Event types (modern Citrus encoding)
 # ---------------------------------------------------------------------------
@@ -78,34 +80,12 @@ EVENT_LOOM_AUTO_REPEAT_ID = EVENT_NAME_TO_ID[EVENT_LOOM_AUTO_REPEAT]
 EVENT_LOOM_MANUAL_START_ID = EVENT_NAME_TO_ID[EVENT_LOOM_MANUAL_START]
 
 # ---------------------------------------------------------------------------
-# Stimulus modes (from Citrus C++ StimulusMode::Type)
+# Stimulus modes (agent-contracts citrus.stimulus_vocabulary v1)
 # ---------------------------------------------------------------------------
 
-STIMULUS_MODE: Dict[int, str] = {
-    -1: "UNDEFINED",
-    2: "COHERENT_DOTS",
-    3: "MOVING_GRATING",
-    4: "SOLID_BLACK",
-    5: "SOLID_WHITE",
-    6: "CONCENTRIC_GRATING",
-    7: "LOOMING_DOT",
-    8: "STATIC_IMAGE",
-    9: "CALIBRATION_GRID",
-    10: "ARENA_DEFINITION_SQUARE",
-    11: "SPOTLIGHT",
-    12: "CHASER",
-    13: "CALIBRATION_TEST_SHAPE",
-    14: "SCROLLING_GRID",
-    15: "INDEPENDENT_MOTION_GRID",
-    16: "MOVING_DOTS",
-    17: "STATIC_GRID",
-    18: "PHOTOTAXIS",
-    19: "DARK_FLASH",
-    20: "BRIGHT_FLASH",
-    21: "CONCENTRIC_DOTS",
-    22: "SOLID_COLOR",
-    99: "NONE",
-}
+# Generated from the pinned agent-contracts stimulus vocabulary (live modes
+# only); never hand-copy ids here. See fisheye.shared.stimulus_vocabulary.
+STIMULUS_MODE: Dict[int, str] = dict(_VOCABULARY_STIMULUS_MODE)
 
 STIMULUS_MODE_NAME_TO_ID: Dict[str, int] = {
     name: idx for idx, name in STIMULUS_MODE.items()

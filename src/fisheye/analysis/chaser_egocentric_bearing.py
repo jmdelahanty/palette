@@ -37,6 +37,7 @@ from fisheye.analysis.chaser_component_writer import (
     sealed_chaser_component_writer,
 )
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
+from fisheye.shared.color_quantization import unit_rgb_to_hex
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
 from fisheye.shared.run_lineage_fingerprint import (
@@ -167,8 +168,7 @@ def _unit_color_to_hex(red: object, green: object, blue: object) -> Optional[str
         return None
     if not all(np.isfinite(value) for value in channels):
         return None
-    values = [int(round(max(0.0, min(1.0, value)) * 255.0)) for value in channels]
-    return f"#{values[0]:02x}{values[1]:02x}{values[2]:02x}"
+    return unit_rgb_to_hex(channels)
 
 
 def _chaser_colors_from_protocol_payload(payload: Mapping[str, Any]) -> dict[int, str]:
