@@ -88,7 +88,11 @@ tens more before v4), and back up with `scripts/backup_palette_registry.sh`.
 
 - Phase B: Citrus v4 admission (needs the agent-contracts v4 contract, owed by
   Citrus, and MZB's history table and idempotent POST). v4 admission should
-  refuse an individual whose `subject_id != mzb_fish_id`.
+  refuse an individual whose `subject_id != mzb_fish_id`. For any
+  registration status other than `registered`, the recording is linked to an
+  MZB fish only after intake or reconcile confirms the fish exists
+  (`create_fish_id_conflict` means the id names a different MZB record).
+  Palette's review of the v4 contract: agent-contracts PR 103.
 - Phase C: experiment usage records in MZB (open; Jeremy leans to Palette
   confirming at intake).
 - Group fish ids: see `group_fish_ids_open_question.md`.
