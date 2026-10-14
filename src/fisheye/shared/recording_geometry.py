@@ -25,6 +25,8 @@ from typing import Any, Mapping, Sequence
 import h5py
 import numpy as np
 
+from fisheye.shared.unified_h5.geometry import NAMESPACE, NAMESPACE_BINDINGS, NAMESPACE_RECORD
+
 
 RECORDING_GEOMETRY_CONTRACT_SCHEMA_ID = "orange.recording.geometry_contract"
 RECORDING_GEOMETRY_ASSETS_SCHEMA_ID = "orange.recording.geometry_assets"
@@ -44,7 +46,10 @@ RIM_OBSERVATION_SCHEMA_VERSIONS = frozenset(
     versions["rim_observation"] for versions in GEOMETRY_CONTRACT_VERSIONS.values()
 )
 H5_SCOPE_SCHEMA_ID = "citrus.session.orange_recording_geometry_contract_scope"
-H5_SCOPE_SCHEMA_VERSION = 1
+# Scope version -> the source contract versions it may reference. v2 (Citrus
+# #35) changes only version fields: it may reference a v2 geometry contract.
+H5_SCOPE_SOURCE_CONTRACT_VERSIONS = {1: frozenset({1}), 2: frozenset({1, 2})}
+H5_SCOPE_SCHEMA_VERSION = 1  # the first version; kept for callers
 DAILY_REGISTRATION_SCHEMA_ID = "citrus.calibration.daily_registration"
 DAILY_REGISTRATION_SCHEMA_VERSION = 1
 
@@ -956,6 +961,36 @@ def _verified_h5_json_dataset(
     return _strict_json_loads(payload, label=label), payload, actual
 
 
+def _runtime_geometry_group(h5: h5py.File) -> h5py.Group:
+    """Resolve the captured ``/runtime_geometry_contract`` reference.
+
+    Unified H5s keep the original reference spelling and declare where it lives
+    in the geometry source-namespace record; Palette admits only the exact
+    pinned record. Legacy H5s without the record carry the group verbatim.
+    """
+
+    reference = "/runtime_geometry_contract"
+    if NAMESPACE not in h5:
+        if reference not in h5:
+            raise RecordingGeometryError("H5 lacks /runtime_geometry_contract.")
+        return h5[reference]
+    namespace_group, _, namespace_name = NAMESPACE.rpartition("/")
+    record, _bytes, _sha = _verified_h5_json_dataset(
+        h5[namespace_group], namespace_name, label="geometry source namespaces"
+    )
+    if record != NAMESPACE_RECORD:
+        raise RecordingGeometryError("H5 geometry source namespaces are not the pinned record.")
+    if reference in h5:
+        raise RecordingGeometryError(
+            "H5 carries both a geometry source-namespace record and a literal "
+            "/runtime_geometry_contract."
+        )
+    target = NAMESPACE_BINDINGS[reference]
+    if target not in h5 or not isinstance(h5[target], h5py.Group):
+        raise RecordingGeometryError(f"H5 lacks {target}, the bound /runtime_geometry_contract.")
+    return h5[target]
+
+
 def _h5_runtime_status(
     *,
     runtime: Mapping[str, Any],
@@ -1075,15 +1110,29 @@ def load_registered_dish_masks_from_citrus_h5(
                 "h5_scope_json",
                 label="recording geometry h5_scope_json",
             )
-            _require_schema(
-                scope,
-                schema_id=H5_SCOPE_SCHEMA_ID,
-                schema_version=H5_SCOPE_SCHEMA_VERSION,
-                label="recording geometry H5 scope",
-            )
+            scope_version = scope.get("schema_version")
+            if (
+                scope.get("schema_id") != H5_SCOPE_SCHEMA_ID
+                or scope_version not in H5_SCOPE_SOURCE_CONTRACT_VERSIONS
+            ):
+                raise RecordingGeometryError(
+                    f"recording geometry H5 scope must be {H5_SCOPE_SCHEMA_ID!r} "
+                    f"version {' or '.join(str(v) for v in sorted(H5_SCOPE_SOURCE_CONTRACT_VERSIONS))}."
+                )
             if scope.get("scope_status") != "resolved":
                 raise RecordingGeometryError("H5 recording geometry scope is unresolved.")
             source_contract = _required_mapping(scope.get("source_contract"), label="scope.source_contract")
+            source_version = source_contract.get("schema_version")
+            if source_version not in H5_SCOPE_SOURCE_CONTRACT_VERSIONS[scope_version]:
+                raise RecordingGeometryError(
+                    f"H5 scope version {scope_version} cannot reference geometry "
+                    f"contract version {source_version!r}."
+                )
+            if source_version != group_version:
+                raise RecordingGeometryError(
+                    "H5 scope source_contract declares another version than "
+                    "/recording_geometry_contract."
+                )
             if _normalized_sha256(source_contract.get("sha256"), label="scope source contract sha256") != contract_sha:
                 raise RecordingGeometryError("H5 scope source-contract checksum mismatch.")
             attr_source_sha = recording_group["h5_scope_json"].attrs.get("source_contract_sha256")
@@ -1102,9 +1151,7 @@ def load_registered_dish_masks_from_citrus_h5(
             if not isinstance(associated, Sequence) or isinstance(associated, (str, bytes)) or not associated:
                 raise RecordingGeometryError("H5 scope has no associated camera IDs.")
 
-            if "runtime_geometry_contract" not in h5:
-                raise RecordingGeometryError("H5 lacks /runtime_geometry_contract.")
-            runtime_group = h5["runtime_geometry_contract"]
+            runtime_group = _runtime_geometry_group(h5)
             runtime, _runtime_bytes, runtime_sha = _verified_h5_json_dataset(
                 runtime_group,
                 "daily_registration_json",
