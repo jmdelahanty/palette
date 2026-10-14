@@ -25,6 +25,8 @@ from typing import Any, Mapping, Sequence
 import h5py
 import numpy as np
 
+from fisheye.shared.unified_h5.geometry import NAMESPACE, NAMESPACE_BINDINGS, NAMESPACE_RECORD
+
 
 RECORDING_GEOMETRY_CONTRACT_SCHEMA_ID = "orange.recording.geometry_contract"
 RECORDING_GEOMETRY_ASSETS_SCHEMA_ID = "orange.recording.geometry_assets"
@@ -959,6 +961,36 @@ def _verified_h5_json_dataset(
     return _strict_json_loads(payload, label=label), payload, actual
 
 
+def _runtime_geometry_group(h5: h5py.File) -> h5py.Group:
+    """Resolve the captured ``/runtime_geometry_contract`` reference.
+
+    Unified H5s keep the original reference spelling and declare where it lives
+    in the geometry source-namespace record; Palette admits only the exact
+    pinned record. Legacy H5s without the record carry the group verbatim.
+    """
+
+    reference = "/runtime_geometry_contract"
+    if NAMESPACE not in h5:
+        if reference not in h5:
+            raise RecordingGeometryError("H5 lacks /runtime_geometry_contract.")
+        return h5[reference]
+    namespace_group, _, namespace_name = NAMESPACE.rpartition("/")
+    record, _bytes, _sha = _verified_h5_json_dataset(
+        h5[namespace_group], namespace_name, label="geometry source namespaces"
+    )
+    if record != NAMESPACE_RECORD:
+        raise RecordingGeometryError("H5 geometry source namespaces are not the pinned record.")
+    if reference in h5:
+        raise RecordingGeometryError(
+            "H5 carries both a geometry source-namespace record and a literal "
+            "/runtime_geometry_contract."
+        )
+    target = NAMESPACE_BINDINGS[reference]
+    if target not in h5 or not isinstance(h5[target], h5py.Group):
+        raise RecordingGeometryError(f"H5 lacks {target}, the bound /runtime_geometry_contract.")
+    return h5[target]
+
+
 def _h5_runtime_status(
     *,
     runtime: Mapping[str, Any],
@@ -1119,9 +1151,7 @@ def load_registered_dish_masks_from_citrus_h5(
             if not isinstance(associated, Sequence) or isinstance(associated, (str, bytes)) or not associated:
                 raise RecordingGeometryError("H5 scope has no associated camera IDs.")
 
-            if "runtime_geometry_contract" not in h5:
-                raise RecordingGeometryError("H5 lacks /runtime_geometry_contract.")
-            runtime_group = h5["runtime_geometry_contract"]
+            runtime_group = _runtime_geometry_group(h5)
             runtime, _runtime_bytes, runtime_sha = _verified_h5_json_dataset(
                 runtime_group,
                 "daily_registration_json",

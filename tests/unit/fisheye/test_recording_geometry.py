@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import h5py
 import pytest
 
+from fisheye.shared.unified_h5.geometry import NAMESPACE, NAMESPACE_RECORD
+
 from fisheye.shared.recording_geometry import (
     CitrusRegistrationStatus,
     GeometryLoadPolicy,
@@ -526,6 +528,7 @@ def _write_h5(
     contract_version: int = 1,
     scope_version: int = 1,
     source_version: int | None = None,
+    unified: bool = False,
 ) -> None:
     contract = {
         "schema_id": "orange.recording.geometry_contract",
@@ -602,7 +605,14 @@ def _write_h5(
         scope_dataset.attrs["checksum_sha256"] = _sha(scope_bytes)
         scope_dataset.attrs["source_contract_sha256"] = _sha(contract_bytes)
 
-        runtime_group = h5.create_group("runtime_geometry_contract")
+        if unified:
+            # Unified H5: the runtime contract lives at its namespace binding.
+            namespace = _json_bytes(NAMESPACE_RECORD)
+            dataset = h5.create_dataset(NAMESPACE, data=namespace)
+            dataset.attrs["checksum_sha256"] = _sha(namespace)
+        runtime_group = h5.create_group(
+            "geometry/runtime" if unified else "runtime_geometry_contract"
+        )
         runtime_dataset = runtime_group.create_dataset(
             "daily_registration_json",
             data=runtime_bytes,
@@ -670,6 +680,55 @@ def test_h5_loader_classifies_unreferenced_geometry_as_legacy(tmp_path: Path) ->
 
     assert result.mask_geometry_status is MaskGeometryStatus.LEGACY_MISSING
     assert result.issues[0].code == "legacy_missing_recording_bound_mask"
+
+
+def test_h5_loader_resolves_runtime_contract_through_namespace(tmp_path: Path) -> None:
+    legacy, unified = tmp_path / "legacy.h5", tmp_path / "unified.h5"
+    _write_h5(legacy)
+    _write_h5(unified, unified=True)
+
+    old, new = (load_registered_dish_masks_from_citrus_h5(p) for p in (legacy, unified))
+
+    assert new.mask_geometry_status is MaskGeometryStatus.VALID
+    assert new.issues == ()
+    (a,), (b,) = old.masks.values(), new.masks.values()
+    assert b.citrus_registration_status is CitrusRegistrationStatus.EXACT_MATCH_APPLIED
+    assert (a.physical_inner_rim, a.valid_detection_gate) == (b.physical_inner_rim, b.valid_detection_gate)
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        ("other_binding", "not the pinned record"),
+        ("checksum", "checksum mismatch"),
+        ("literal_too", "both a geometry source-namespace record and a literal"),
+        ("unbound", "lacks /geometry/runtime"),
+    ],
+)
+def test_h5_loader_refuses_ambiguous_runtime_namespace(
+    tmp_path: Path, damage: str, message: str
+) -> None:
+    path = tmp_path / "unified.h5"
+    _write_h5(path, unified=True)
+    with h5py.File(path, "a") as h5:
+        if damage == "other_binding":
+            record = json.loads(json.dumps(NAMESPACE_RECORD))
+            record["bindings"]["/runtime_geometry_contract"] = "/geometry/elsewhere"
+            del h5[NAMESPACE]
+            payload = _json_bytes(record)
+            h5.create_dataset(NAMESPACE, data=payload).attrs["checksum_sha256"] = _sha(payload)
+        elif damage == "checksum":
+            h5[NAMESPACE].attrs["checksum_sha256"] = "sha256:" + "0" * 64
+        elif damage == "literal_too":
+            h5.copy("geometry/runtime", "runtime_geometry_contract")
+        else:
+            h5.move("geometry/runtime", "geometry/runtime_moved")
+
+    result = load_registered_dish_masks_from_citrus_h5(path)
+
+    assert result.mask_geometry_status is MaskGeometryStatus.INVALID
+    assert result.masks == {}
+    assert message in result.issues[0].message
 
 
 @pytest.mark.parametrize(
