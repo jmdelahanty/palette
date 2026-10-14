@@ -273,6 +273,16 @@ def test_dashboard_page_describes_browser_only_assigned_work(tmp_path):
         _assert_browser_response_security_headers(identity_headers)
         _assert_browser_response_security_headers(identity_api_headers)
         assert expected_datasets_page_status == 200
+        for retired_page_html in (
+            html,
+            labeling_html,
+            me_html,
+            datasets_page_html,
+            expected_datasets_page_html,
+            my_datasets_html,
+        ):
+            assert "<h1>Your queue</h1>" in retired_page_html
+            assert "Datasets waiting for completion" not in retired_page_html
         assert me_status == 200
         assert identity_status == 200
         assert identity_api_status == 200
@@ -401,16 +411,9 @@ def test_dashboard_page_describes_browser_only_assigned_work(tmp_path):
         assert "Copy identity details" in identity_html
         assert "copyIdentitySupport" in identity_html
         assert "resolved_user" in identity_html
-        assert "Datasets waiting for completion" in html
-        assert "Datasets waiting for completion" in labeling_html
-        assert "Datasets waiting for completion" in me_html
-        assert "Open full work dashboard" in html
-        assert "/api/me/datasets" in html
         assert "Work waiting for completion" in work_html
         assert "Work waiting for completion" in expected_html
         assert "Work waiting for completion" in my_work_html
-        assert "Datasets waiting for completion" in datasets_page_html
-        assert "Datasets waiting for completion" in my_datasets_html
         assert "operatorValidationGateSupportLines" in work_html
         assert "OPERATOR_VALIDATION_GATE_FIELD_SUFFIXES" in work_html
         assert "operator_validation_gate_status_values" in work_html
@@ -445,181 +448,6 @@ def test_dashboard_page_describes_browser_only_assigned_work(tmp_path):
         assert "browser_smoke" in work_html
         assert "missing_evidence" in work_html
         assert "${prefix}_${suffix}" in work_html
-        assert "Datasets waiting for completion" in expected_datasets_page_html
-        assert "Open landing page" in datasets_page_html
-        assert 'id="landing-link"' in datasets_page_html
-        assert "Copy start link" in datasets_page_html
-        assert "copyLandingLink" in datasets_page_html
-        assert "expected_user_labeler_landing_url" in datasets_page_html
-        assert "Open full work dashboard" in datasets_page_html
-        assert "Open identity check" in datasets_page_html
-        assert 'id="identity-link"' in datasets_page_html
-        assert "expected_user_identity_probe_url" in datasets_page_html
-        assert "setGuardedEntryLinks" in datasets_page_html
-        assert "expectedUserText" in datasets_page_html
-        assert "task-row" in datasets_page_html
-        assert "task.expected_user_work_url" in datasets_page_html
-        assert "task.notes" in datasets_page_html
-        assert "taskIdText" in datasets_page_html
-        assert "supportDetailsText" in datasets_page_html
-        assert "task.operator_support" in datasets_page_html
-        assert "dataset.operator_support" in datasets_page_html
-        assert "recording.operator_support" in datasets_page_html
-        assert "Copy dataset support" in datasets_page_html
-        assert "Copy recording support" in datasets_page_html
-        assert "Copy task support details" in datasets_page_html
-        assert "data-support-details" in datasets_page_html
-        assert "progress.complete_task_count" in datasets_page_html
-        assert "blocked/no-open recordings" in datasets_page_html
-        assert 'id="queue-state"' in datasets_page_html
-        assert "Queue state:" in datasets_page_html
-        assert "Labeler start" in datasets_page_html
-        assert "Assigned datasets waiting for browser labeling" in datasets_page_html
-        assert "All assigned work complete" in datasets_page_html
-        assert "Assigned work is blocked" in datasets_page_html
-        assert "server-side assigned task/training-Zarr writers" in datasets_page_html
-        assert "CSV, HTML, JSON, handoff, and roster files are metadata only" in datasets_page_html
-        assert "queue_state_blocks_labeler_start" in datasets_page_html
-        assert "Do not start new labeling from this queue until the operator resolves this state" in datasets_page_html
-        assert "blocked-recordings" in datasets_page_html
-        assert "blocked_recordings_by_reason" in datasets_page_html
-        assert "blockedSupport" in datasets_page_html
-        assert "Copy blocked details" in datasets_page_html
-        assert "backup-policy" in datasets_page_html
-        assert "zarr_backup_policy" in datasets_page_html
-        assert "Copy backup policy" in datasets_page_html
-        assert "labelers_do_not_receive_backup_paths" in datasets_page_html
-        assert "audit-policy" in datasets_page_html
-        assert "mutation_audit_policy" in datasets_page_html
-        assert "Copy audit policy" in datasets_page_html
-        assert "labeling_task_events" in datasets_page_html
-        assert "session-guard-policy" in datasets_page_html
-        assert "session_guard_policy" in datasets_page_html
-        assert "Copy session guard policy" in datasets_page_html
-        assert "stale_tab_save_rejected" in datasets_page_html
-        assert "/api/me/datasets" in datasets_page_html
-        assert "expectedUserGuardParam" in datasets_page_html
-        assert "expected_user: expectedUserGuardParam || \"\"" in datasets_page_html
-        assert "dataset_queue_load_failed" in datasets_page_html
-        assert "Check your identity before opening work" in datasets_page_html
-        assert "No local Palette or Crimson installation is needed" in datasets_page_html
-        assert "assigned task/training Zarr writers" in datasets_page_html
-        assert "CSV, HTML, JSON, and handoff files are metadata only" in datasets_page_html
-        assert "Each recording has one active assigned owner" in datasets_page_html
-        assert "single_owner_policy_browser_mutation_target_resolved_server_side" in datasets_page_html
-        assert "single_owner_policy_labelers_mutate_assigned_training_zarrs" in datasets_page_html
-        assert "single_owner_policy_labelers_mutate_intermediate_csvs" in datasets_page_html
-        assert (
-            "assignment_ownership_contract_store_single_owner_assignment_contract_present"
-            in datasets_page_html
-        )
-        assert (
-            "assignment_ownership_contract_store_single_owner_assignment_contract_met"
-            in datasets_page_html
-        )
-        assert "labeler_route_authorization_single_owner_store_contract_required" in datasets_page_html
-        assert "labeler_route_authorization_single_owner_store_proof_ready" in datasets_page_html
-        assert "labeler_route_authorization_assignment_ownership_integrity_ok" in datasets_page_html
-        assert "labeler_route_authorization_duplicate_active_owner_count" in datasets_page_html
-        assert "labeler_route_authorization_browser_mutation_target_resolved_server_side" in datasets_page_html
-        assert "labeler_route_authorization_labelers_mutate_assigned_training_zarrs" in datasets_page_html
-        assert "labeler_route_authorization_labelers_mutate_intermediate_csvs" in datasets_page_html
-        assert "What to send the operator" in datasets_page_html
-        assert "Copy support details" in datasets_page_html
-        assert "task_open_authorization_contract_schema" in datasets_page_html
-        assert "task_open_authorization_contract_ready" in datasets_page_html
-        assert "task_open_authorization_contract_not_ready_reason" in datasets_page_html
-        assert "authorization_return_personal_dataset_queue_url" in datasets_page_html
-        assert "authorization_return_personal_dataset_queue_expected_user_guarded" in datasets_page_html
-        assert "authorization_return_personal_work_url" in datasets_page_html
-        assert "authorization_return_personal_work_expected_user_guarded" in datasets_page_html
-        assert "task_open_expected_user_guard_checked_server_side" in datasets_page_html
-        assert "task_open_session_created_server_side" in datasets_page_html
-        assert "task_open_server_authorizes_open" in datasets_page_html
-        assert "task_open_operator_validation_start_gate_required" in datasets_page_html
-        assert "task_open_operator_validation_start_gate_ready" in datasets_page_html
-        assert "task_open_operator_validation_start_gate_blocks_task_open" in datasets_page_html
-        assert "task_open_operator_validation_start_gate_not_ready_reason" in datasets_page_html
-        assert "task_open_operator_validation_pending_gate_ids" in datasets_page_html
-        assert "operator_validation_mutation_gate_required" in datasets_page_html
-        assert "operator_validation_mutation_gate_ready" in datasets_page_html
-        assert "operator_validation_mutation_gate_blocks_browser_mutation" in datasets_page_html
-        assert "operator_validation_mutation_gate_not_ready_reason" in datasets_page_html
-        assert "operator_validation_mutation_gate_pending_gate_ids" in datasets_page_html
-        assert "operator_validation_mutation_gate_required_missing_evidence_gate_ids" in datasets_page_html
-        assert "runtime_operator_validation_gate_cli_policy_preferred_require_flag" in datasets_page_html
-        assert "runtime_operator_validation_gate_cli_policy_protects_browser_mutations" in datasets_page_html
-        assert "runtime_operator_validation_gate_cli_policy_blocks_before_zarr_write" in datasets_page_html
-        assert "task_open_browser_label_write_target" in datasets_page_html
-        assert "task_open_browser_writes_csv_or_handoff_files" in datasets_page_html
-        assert "task_open_browser_has_direct_zarr_write_authority" in datasets_page_html
-        assert "single_owner_policy_assignment_scope" in datasets_page_html
-        assert "single_owner_policy_browser_mutation_requires_current_assignment_owner" in datasets_page_html
-        assert "labeler_work_completion_status" in datasets_page_html
-        assert "labeler_work_completion_completed" in datasets_page_html
-        assert "labeler_work_completion_has_waiting_work" in datasets_page_html
-        assert "labeler_work_completion_ready_for_more_labeling" in datasets_page_html
-        assert "labeler_work_completion_operator_action_required" in datasets_page_html
-        assert "direct_start_policy_post_body_expected_user_required" in datasets_page_html
-        assert "direct_start_policy_post_body_expected_user_field" in datasets_page_html
-        assert "direct_start_policy_denied_start_returns_task_open_authorization_contract" in datasets_page_html
-        assert "direct_start_policy_denied_start_support_preserves_task_open_authorization_contract" in datasets_page_html
-        assert "direct_start_policy_denied_start_support_includes_authorization_context" in datasets_page_html
-        assert "direct_start_policy_denied_start_contract_reports_no_session_created" in datasets_page_html
-        assert "direct_start_policy_denied_start_contract_reports_server_authorizes_open_false" in datasets_page_html
-        assert "identity_personal_queue_evidence_status" in datasets_page_html
-        assert "operator_validation_identity_personal_queue_evidence_status_values" in datasets_page_html
-        assert "operatorValidationGateSupportLines" in datasets_page_html
-        assert "OPERATOR_VALIDATION_GATE_FIELD_SUFFIXES" in datasets_page_html
-        assert "operator_validation_gate_status_values" in datasets_page_html
-        assert "operator_validation_gate_ids" in datasets_page_html
-        assert "operator_validation_gate_flat_field_suffixes" in datasets_page_html
-        assert "operator_validation_external_evidence_required" in datasets_page_html
-        assert "operator_validation_external_evidence_required_gate_ids" in datasets_page_html
-        assert "operator_validation_external_evidence_template_paths_by_gate_id" in datasets_page_html
-        assert "operator_validation_checklist_only_required_gate_ids" in datasets_page_html
-        assert "operator_validation_command_template_template_backed_gate_ids" in datasets_page_html
-        assert "operator_validation_command_template_apply_required_gate_ids" in datasets_page_html
-        assert "operator_validation_command_template_evidence_template_fields_by_gate_id" in datasets_page_html
-        assert "operator_validation_command_template_evidence_template_paths_by_gate_id" in datasets_page_html
-        assert "safe_share_external_launch_evidence_gap_gate_ids" in datasets_page_html
-        assert "safe_share_external_launch_evidence_gap_summary" in datasets_page_html
-        assert "safe_share_external_launch_evidence_gap_todos" in datasets_page_html
-        assert "safe_share_external_launch_evidence_gap_todo_fields" in datasets_page_html
-        assert "safe_share_external_launch_evidence_gap_record_command_ids_by_gate_id" in datasets_page_html
-        assert "personalizedLaunchReadinessSupportLines" in datasets_page_html
-        assert "personalized_launch_readiness_schema" in datasets_page_html
-        assert "personalized_launch_readiness_personalized_labeler_entry_url" in datasets_page_html
-        assert "personalized_launch_readiness_external_launch_evidence_gap_todos" in datasets_page_html
-        assert "personalized_launch_readiness_browser_label_write_target" in datasets_page_html
-        assert "personalized_launch_readiness_browser_writes_csv_or_handoff_files" in datasets_page_html
-        assert "personalized_launch_readiness_browser_has_direct_zarr_write_authority" in datasets_page_html
-        assert "operator_support_expected_user_personal_dataset_queue_url" in datasets_page_html
-        assert "operator_support_personalized_labeler_entry_url" in datasets_page_html
-        assert "operator_support_browser_label_write_target" in datasets_page_html
-        assert "operator_support_browser_writes_csv_or_handoff_files" in datasets_page_html
-        assert "operator_support_browser_has_direct_zarr_write_authority" in datasets_page_html
-        assert "operator_support_csv_handoff_artifact_role" in datasets_page_html
-        assert "mutable_zarr_backup_confirmation" in datasets_page_html
-        assert "browser_response_security_headers" in datasets_page_html
-        assert "identity_probe_verification" in datasets_page_html
-        assert "browser_smoke" in datasets_page_html
-        assert "disposable_zarr_mutation_smoke" in datasets_page_html
-        assert "operator_recovery_contract" in datasets_page_html
-        assert "${prefix}_${suffix}" in datasets_page_html
-        assert "status" in datasets_page_html
-        assert "pending" in datasets_page_html
-        assert "missing_evidence" in datasets_page_html
-        assert "needs_review" in datasets_page_html
-        assert "passed" in datasets_page_html
-        assert "All assigned dataset work is complete" in datasets_page_html
-        assert "Assigned recordings need operator action before more labeling" in datasets_page_html
-        assert "Copy queue state" in datasets_page_html
-        assert "queue_state_code" in datasets_page_html
-        assert "empty_state_code" in datasets_page_html
-        assert "blocked_recordings_by_reason" in datasets_page_html
-        assert "copyDatasetSupport" in datasets_page_html
-        assert "Work waiting for completion" not in datasets_page_html
         assert "Datasets waiting for completion" in work_html
         assert "datasets waiting" in work_html
         assert "Loading personalized dataset queue" in work_html
@@ -3134,12 +2962,12 @@ def test_browser_session_route_errors_are_human_readable(tmp_path):
         assert "Copy support details" in html
         assert "error=session_user_mismatch" in html
         assert "return_expected_user=alice" in html
-        assert "return_personal_dataset_queue_url=/my-datasets?expected_user=alice" in html
+        assert "return_queue_url=/queue?expected_user=alice" in html
         assert "return_personal_dataset_queue_expected_user_guarded=True" in html
         assert "return_personal_work_url=/my-work?expected_user=alice" in html
         assert "return_personal_work_expected_user_guarded=True" in html
-        assert "Return to your personalized dataset queue" in html
-        assert 'href="/my-datasets?expected_user=alice"' in html
+        assert "Return to your queue" in html
+        assert 'href="/queue?expected_user=alice"' in html
         assert "Return to your personalized work dashboard" in html
         assert 'href="/my-work?expected_user=alice"' in html
     finally:
@@ -3233,7 +3061,7 @@ def test_signed_link_browser_errors_are_human_readable(tmp_path, monkeypatch):
         assert "Copy support details" in html
         assert "error=not_assigned" in html
         assert "return_expected_user=alice" in html
-        assert "return_personal_dataset_queue_url=/my-datasets?expected_user=alice" in html
+        assert "return_queue_url=/queue?expected_user=alice" in html
         assert "return_personal_dataset_queue_expected_user_guarded=True" in html
         assert "return_personal_work_url=/my-work?expected_user=alice" in html
         assert "return_personal_work_expected_user_guarded=True" in html
@@ -3242,8 +3070,8 @@ def test_signed_link_browser_errors_are_human_readable(tmp_path, monkeypatch):
         assert "task_open_authorization_contract" in html
         assert "&quot;not_ready_reason&quot;: &quot;not_assigned&quot;" in html
         assert "&quot;server_authorizes_open&quot;: false" in html
-        assert "Return to your personalized dataset queue" in html
-        assert 'href="/my-datasets?expected_user=alice"' in html
+        assert "Return to your queue" in html
+        assert 'href="/queue?expected_user=alice"' in html
         assert "Return to your personalized work dashboard" in html
         assert 'href="/my-work?expected_user=alice"' in html
         assert bound_status == 403
@@ -3251,7 +3079,7 @@ def test_signed_link_browser_errors_are_human_readable(tmp_path, monkeypatch):
         assert "signed_link_user_mismatch" in bound_html
         assert "error=signed_link_user_mismatch" in bound_html
         assert "return_expected_user=alice" in bound_html
-        assert "return_personal_dataset_queue_url=/my-datasets?expected_user=alice" in bound_html
+        assert "return_queue_url=/queue?expected_user=alice" in bound_html
         assert "return_personal_dataset_queue_expected_user_guarded=True" in bound_html
         assert "return_personal_work_url=/my-work?expected_user=alice" in bound_html
         assert "return_personal_work_expected_user_guarded=True" in bound_html
@@ -3264,7 +3092,7 @@ def test_signed_link_browser_errors_are_human_readable(tmp_path, monkeypatch):
         assert "&quot;browser_label_write_target&quot;: &quot;training_zarr&quot;" in bound_html
         assert "&quot;browser_writes_csv_or_handoff_files&quot;: false" in bound_html
         assert "&quot;browser_has_direct_zarr_write_authority&quot;: false" in bound_html
-        assert 'href="/my-datasets?expected_user=alice"' in bound_html
+        assert 'href="/queue?expected_user=alice"' in bound_html
         assert 'href="/my-work?expected_user=alice"' in bound_html
         assert complete_status == 409
         assert "Palette labeling access problem" in complete_html
@@ -3276,11 +3104,11 @@ def test_signed_link_browser_errors_are_human_readable(tmp_path, monkeypatch):
         assert "&quot;server_authorizes_open&quot;: false" in complete_html
         assert "&quot;task_state&quot;: &quot;complete&quot;" in complete_html
         assert "return_expected_user=alice" in complete_html
-        assert "return_personal_dataset_queue_url=/my-datasets?expected_user=alice" in complete_html
+        assert "return_queue_url=/queue?expected_user=alice" in complete_html
         assert "return_personal_dataset_queue_expected_user_guarded=True" in complete_html
         assert "return_personal_work_url=/my-work?expected_user=alice" in complete_html
         assert "return_personal_work_expected_user_guarded=True" in complete_html
-        assert 'href="/my-datasets?expected_user=alice"' in complete_html
+        assert 'href="/queue?expected_user=alice"' in complete_html
         assert 'href="/my-work?expected_user=alice"' in complete_html
         assert invalid_status == 400
         assert "Palette labeling access problem" in invalid_html
@@ -4475,9 +4303,8 @@ def test_keypoint_state_route_uses_cached_runtime_without_real_zarr(tmp_path, mo
         assert "return_personal_work_expected_user_guarded=" in page_html
         assert "window.location.href = nextUrl" in page_html
         assert "Copy support details" in page_html
-        assert "Personalized dataset queue" in page_html
-        assert 'href="/my-datasets?expected_user=alice"' in page_html
-        assert 'data-session-return="dataset-queue"' in page_html
+        assert 'href="/queue?expected_user=alice" class="meta" data-session-return="queue"' in page_html
+        assert 'data-session-return="dataset-queue"' not in page_html
         assert "Personalized work dashboard" in page_html
         assert 'href="/my-work?expected_user=alice"' in page_html
         assert 'data-session-return="work-dashboard"' in page_html

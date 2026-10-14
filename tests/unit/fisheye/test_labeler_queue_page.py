@@ -86,6 +86,33 @@ def test_queue_page_keeps_the_personal_page_identity_guards(tmp_path):
         store.close()
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+@pytest.mark.parametrize("path", ["/", "/me", "/labeling", "/datasets", "/my-datasets"])
+def test_retired_dataset_queue_paths_redirect_to_queue(tmp_path, path):
+    store = _store(tmp_path)
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with _running_server(store, user="alice") as base_url:
+            for query, location in (("?expected_user=alice", "/queue?expected_user=alice"), ("", "/queue")):
+                try:
+                    opener.open(f"{base_url}{path}{query}", timeout=5)
+                    raise AssertionError(f"{path} did not redirect")
+                except urllib.error.HTTPError as exc:
+                    assert exc.code == 302
+                    assert exc.headers["Location"] == location
+                    _assert_browser_response_security_headers(dict(exc.headers))
+            # Following the redirect keeps the /queue identity guard.
+            mismatch, _, mismatch_body = _get(base_url, f"{path}?expected_user=bob")
+        assert mismatch == 403
+        assert "dashboard_user_mismatch" in mismatch_body
+    finally:
+        store.close()
+
+
 def test_page_modules_parse_and_import_only_relative_paths(tmp_path):
     node = _node()
     for name in ("queue_page.js", "queue_model.js"):
