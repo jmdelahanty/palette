@@ -51,6 +51,7 @@ PREFLIGHT = "/metadata/admission/capacity_preflight_json"
 FRAME_JOINED_STATES = (
     "/components/independent_motion_grid/states",
     "/components/moving_grating/states",
+    "/components/phototaxis/states",
 )
 
 

@@ -294,8 +294,8 @@ def test_another_bindings_policy_is_refused(tmp_path):
 
 def test_an_unknown_preflight_version_is_refused(tmp_path):
     copy = _copy(tmp_path)
-    # Preflight v3 selects admission revision 5 (angle_v1); 4 is unknown.
-    _rewrite_preflight(copy, schema_version=4)
+    # Preflight v3 selects revision 5 (angle_v1) and v4 revision 6 (phototaxis_v1); 5 is unknown.
+    _rewrite_preflight(copy, schema_version=5)
     with h5py.File(copy, "r") as h5, pytest.raises(
         UnifiedH5ContractError, match="capacity_preflight_unknown_schema_version"
     ):

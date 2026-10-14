@@ -31,6 +31,11 @@ They are not Palette scientific-acceptance or activation schemas.
 | `unified_h5_producer_policy_9af921ca.json` (agent-contracts `citrus-palette/producer_policies/unified_h5_admission_9af921ca.json`, renamed; bound to `angle_v1`) | agent-contracts PR 92 head `aa337ec6`, merged `7a2e5d25` | `9af921cab2aedae8af66a00600f5eee6b076c5d8218b6f0e928f93b4df3fbedd` |
 | `experimental_h5_core_angle_v1.json` (core catalog `angle_v1`: moving_grating 2 -> 3, independent_motion_grid 1 -> 2, angles counter-clockwise) | Citrus PR 27 `c9d52be6dddf07da8f13607f31ae3bcf2aca9d93` `docs/schemas/` (unchanged), merged `576481f3c58140dcc0fc6bc6fadbf1456341db48` | `0c054c7d5d3c1a4f7b39f800b63e272bb43bac30b5b640993a94974e2be24f07` |
 | `experimental_h5_capacity_preflight_v3.schema.json` (`catalog_id` const `angle_v1`, policy const `9af921ca…`) | Citrus PR 27 `c9d52be6` `docs/schemas/`, merged `576481f3` | `00b201da455c8f1fc021506ceaf291092f0d61b1d2d5a2689f3ba386be5c60ea` |
+| `unified_h5_admission_v6.json` (admission revision 6: catalog `phototaxis_v1`, reactive heading-split states) | agent-contracts PR 101 head `1364a81` (JSON as `b069be2`), not yet merged | `3936d67ef4e9b34a9d38a73fa8dfb9f67a701086e9b3813b0d4e7a3ed3c6a491` |
+| `unified_h5_producer_policy_012cd25f.json` (agent-contracts `citrus-palette/producer_policies/unified_h5_admission_012cd25f.json`, renamed; bound to `phototaxis_v1`) | agent-contracts PR 101 head `1364a81` | `012cd25f4cb1344f8be8da0f1c48423e0972b0854c7dd17a6ceb522de14532c7` |
+| `experimental_h5_core_phototaxis_v1.json` (core catalog `phototaxis_v1`: angle_v1 plus `/components/phototaxis/states` v1) | Citrus PR 41 commit C `d6754a3e6c620d3acc4c473b47db29bfcfc5a0e8` `docs/schemas/` (unchanged since `bb1bce18`), not yet merged | `cb6b86fe16f46a7aef64b051a388dc9d4b3e6bc4fbf0c6cc9791f76b755d33ed` |
+| `experimental_h5_capacity_preflight_v4.schema.json` (`catalog_id` const `phototaxis_v1`, policy const `012cd25f…`) | Citrus PR 41 `d6754a3e` `docs/schemas/` | `5892090691243097abbd952f72655c45bcc7d8998fce74a86a1e4b71d87eeb9e` |
+| `reactive_phototaxis_states_v1.json` (states contract, admitted form of #98) | agent-contracts PR 101 `citrus-palette/reactive_phototaxis/` | `4270da37b8cacc2722494eef99a0652576902955e35de07904fd23ee9c77408c` |
 
 The geometry and presentation adapters follow that producer's
 `src/logging/experimental_h5_geometry.cpp`, `stimulus_geometry_contract.cpp`, and
@@ -92,3 +97,15 @@ all declare `atan2_negative_y_x_degrees` (`stimulus_angle_convention_mismatch`);
 under a legacy binding none may declare it (`stimulus_angle_convention_unexpected`).
 The angle_v1 witness H5s are under `tests/fixtures/citrus_unified_h5_angle_v1`
 (agent-contracts PR 92 `citrus-palette/fixtures/angle_v1/`, README verbatim).
+
+Admission revision 6 (agent-contracts PR 101, Citrus PR 41; not yet merged,
+digests to be re-checked byte-for-byte against the merges) sits next to
+revision 5: preflight v4 files (`catalog_id phototaxis_v1`) are selected the
+same way. Only a catalog pin with `phototaxis_semantics` (`phototaxis_v1`)
+sets `admitted_binding(...)["admits_heading_split"]`, the only route by which
+`protocol_semantic_contract` admits a reactive heading-split trial-index step.
+`unified_h5.phototaxis.validate_phototaxis_states` enforces the states
+contract's invariants against the trial index, the execution index and the
+pose observations; a reactive file must carry pose observation v2. The
+phototaxis_v1 witness H5s are under `tests/fixtures/citrus_unified_h5_phototaxis_v1`
+(agent-contracts PR 101 `citrus-palette/fixtures/phototaxis_v1/`, README verbatim).

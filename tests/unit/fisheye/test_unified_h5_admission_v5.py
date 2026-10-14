@@ -118,6 +118,7 @@ def test_preflight_versions_select_revisions_3_4_5():
         1: "unified_h5_admission_v3.json",
         2: "unified_h5_admission_v4.json",
         3: "unified_h5_admission_v5.json",
+        4: "unified_h5_admission_v6.json",
     }
 
 

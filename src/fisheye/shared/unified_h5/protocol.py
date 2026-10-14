@@ -12,7 +12,11 @@ from .hdf5_types import dataset_bytes
 from .schema import read_json
 
 
-def validate_protocol(h5, stimulus_angle_convention: str | None = None):
+def validate_protocol(
+    h5,
+    stimulus_angle_convention: str | None = None,
+    admits_heading_split: bool | None = None,
+):
     """Validate the native protocol snapshot and execution index.
 
     ``stimulus_angle_convention`` is the admitted binding's
@@ -20,10 +24,17 @@ def validate_protocol(h5, stimulus_angle_convention: str | None = None):
     selects the protocol contract (semantic v2 / trial index v3 for
     ``atan2_negative_y_x_degrees``). When omitted it is resolved from the
     file's capacity preflight binding, and a file without one is legacy
-    (its admission revision predates capacity preflights).
+    (its admission revision predates capacity preflights). Likewise
+    ``admits_heading_split`` is the binding's (revision 6, phototaxis_v1);
+    a caller that passes the convention without it admits no reactive step.
     """
     if stimulus_angle_convention is None:
-        stimulus_angle_convention = _binding_convention(h5)
+        binding = _binding(h5)
+        stimulus_angle_convention = binding["stimulus_angle_convention"]
+        if admits_heading_split is None:
+            admits_heading_split = binding["admits_heading_split"]
+    elif admits_heading_split is None:
+        admits_heading_split = False
     authored, executed = h5["/protocol/authored"], h5["/protocol/executed"]
     for group in (authored, executed):
         version = group.attrs.get_id("schema_version")
@@ -56,6 +67,7 @@ def validate_protocol(h5, stimulus_angle_convention: str | None = None):
         snapshot_schema_version=int(authored.attrs["schema_version"]),
         snapshot_policy_id=text(authored.attrs["policy_id"], "protocol_policy_id"),
         stimulus_angle_convention=stimulus_angle_convention,
+        admits_heading_split=admits_heading_split,
     )
     execution = validate_protocol_execution_index(
         execution_json=value(executed, "execution_index_json"),
@@ -73,12 +85,12 @@ def validate_protocol(h5, stimulus_angle_convention: str | None = None):
     return snapshot, execution
 
 
-def _binding_convention(h5) -> str:
+def _binding(h5) -> dict:
     # Imported here: correspondence imports this package's schema helpers.
     from fisheye.shared.heading_convention import LEGACY_CANVAS_ANGLE
 
     from .correspondence import PREFLIGHT, validate_capacity_preflight
 
     if PREFLIGHT not in h5:
-        return LEGACY_CANVAS_ANGLE
-    return validate_capacity_preflight(h5)["stimulus_angle_convention"]
+        return {"stimulus_angle_convention": LEGACY_CANVAS_ANGLE, "admits_heading_split": False}
+    return validate_capacity_preflight(h5)

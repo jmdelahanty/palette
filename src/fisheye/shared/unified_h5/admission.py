@@ -19,6 +19,7 @@ from .integrity import (
     validate_external_receipt,
     validate_internal_integrity,
 )
+from .phototaxis import validate_phototaxis_states
 from .pose import COMPONENT as POSE_COMPONENT
 from .protocol import validate_protocol
 from .rows import validate_table_relations
@@ -30,6 +31,7 @@ TABLE_COMPONENTS = {
     "visual_appearance": APPEARANCE,
     "independent_motion_grid": "/components/independent_motion_grid/states",
     "moving_grating": "/components/moving_grating/states",
+    "phototaxis": "/components/phototaxis/states",
     "bounding_boxes": "/observations/bounding_boxes",
     "events": "/events/records",
     "runtime_trials": "/trials/trial_index",
@@ -129,7 +131,12 @@ def validate_artifact(
     binding = validate_capacity_preflight(h5)
     validate_table_relations(h5, integrity.table_descriptors)
     correspondence = validate_component_correspondence(h5)
-    snapshot, execution = validate_protocol(h5, binding["stimulus_angle_convention"])
+    snapshot, execution = validate_protocol(
+        h5, binding["stimulus_angle_convention"], binding["admits_heading_split"]
+    )
+    validate_phototaxis_states(
+        h5, snapshot, execution, camera_serial=correspondence.camera_serial
+    )
     geometry = validate_geometry(
         h5, read_json(h5, BINDING, canonical=True), integrity.table_descriptors
     )

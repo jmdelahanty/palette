@@ -1,0 +1,846 @@
+{
+  "schema_id": "citrus.experimental_h5.phototaxis_state",
+  "schema_version": 1,
+  "status": "admitted by unified H5 admission revision 6 (phototaxis_v1); supersedes reactive_phototaxis_states_v1.proposed.json in the field list: validity flags with payload zero replace NaN, counters and enum ids are <u8, and the SHAMAN slot identities carry validity",
+  "producer": {
+    "repository": "JohnsonLabJanelia/citrus",
+    "definition": "src/logging/experimental_h5_records.def PhototaxisState",
+    "catalog": "docs/schemas/experimental_h5_core_phototaxis_v1.json"
+  },
+  "path": "/components/phototaxis/states",
+  "component": "phototaxis",
+  "key_fields": "stimulus_frame_num",
+  "itemsize": 184,
+  "row_rule": "one row per stimulus update while a PHOTOTAXIS step with fill_type heading_split is active (the same cadence and key as /components/moving_grating/states); stimulus_frame_num joins /correspondence/frames/sources as the admission component_current_source_join describes; one H5 per arena, source_camera_id is a cross-check against the file metadata",
+  "missing_values": "typed validity, never NaN or sentinel: a field with a validity_field is meaningful only when that |u1 flag is 1 and holds payload zero otherwise",
+  "fields": [
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<u8",
+      "meaning": "session stimulus frame key; zero valid",
+      "name": "stimulus_frame_num",
+      "offset": 0,
+      "units": "1",
+      "validity_field": ""
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<i8",
+      "meaning": "Citrus session monotonic software state-output time; not photon timing",
+      "name": "timestamp_ns_session",
+      "offset": 8,
+      "units": "ns",
+      "validity_field": ""
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<u8",
+      "meaning": "authored protocol step active for this update; the trial-index step carrying features.reactive",
+      "name": "protocol_step_index",
+      "offset": 16,
+      "units": "1",
+      "validity_field": ""
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<u8",
+      "meaning": "SHAMAN v2 numeric camera id of the slot read this update; cross-check against this arena's metadata",
+      "name": "source_camera_id",
+      "offset": 24,
+      "units": "1",
+      "validity_field": "source_camera_id_valid"
+    },
+    {
+      "boolean": true,
+      "count": 1,
+      "dtype": "|u1",
+      "meaning": "explicit validity; invalid payload zero",
+      "name": "source_camera_id_valid",
+      "offset": 32,
+      "units": "1",
+      "validity_field": ""
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<u8",
+      "meaning": "SHAMAN v2 slot sequence whose object supplied the raw heading this update",
+      "name": "pose_sequence_id",
+      "offset": 33,
+      "units": "1",
+      "validity_field": "pose_sequence_id_valid"
+    },
+    {
+      "boolean": true,
+      "count": 1,
+      "dtype": "|u1",
+      "meaning": "explicit validity; invalid payload zero",
+      "name": "pose_sequence_id_valid",
+      "offset": 41,
+      "units": "1",
+      "validity_field": ""
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<u8",
+      "meaning": "SHAMAN v2 slot sequence that supplied the target box (pose lags the box by one update)",
+      "name": "box_sequence_id",
+      "offset": 42,
+      "units": "1",
+      "validity_field": "box_sequence_id_valid"
+    },
+    {
+      "boolean": true,
+      "count": 1,
+      "dtype": "|u1",
+      "meaning": "explicit validity; invalid payload zero",
+      "name": "box_sequence_id_valid",
+      "offset": 50,
+      "units": "1",
+      "validity_field": ""
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<u8",
+      "meaning": "Orange recording_frame_id (frame identity v1) of the pose slot; valid only inside a bound recording",
+      "name": "pose_recording_frame_id",
+      "offset": 51,
+      "units": "1",
+      "validity_field": "pose_recording_frame_id_valid"
+    },
+    {
+      "boolean": true,
+      "count": 1,
+      "dtype": "|u1",
+      "meaning": "explicit validity; invalid payload zero",
+      "name": "pose_recording_frame_id_valid",
+      "offset": 59,
+      "units": "1",
+      "validity_field": ""
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<u8",
+      "meaning": "enum:/definitions/enums/phototaxis_heading_status; pose observation v2 heading status of the raw heading this update (7 = valid)",
+      "name": "heading_status",
+      "offset": 60,
+      "units": "1",
+      "validity_field": ""
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<f4",
+      "meaning": "raw camera heading, atan2_negative_y_x_degrees in source camera pixels (y down)",
+      "name": "heading_camera_angle_degrees",
+      "offset": 68,
+      "units": "deg",
+      "validity_field": "heading_valid"
+    },
+    {
+      "boolean": false,
+      "count": 2,
+      "dtype": "<f4",
+      "meaning": "raw heading origin (eye midpoint) in source camera pixels, x then y",
+      "name": "heading_origin_camera_px",
+      "offset": 72,
+      "units": "px",
+      "validity_field": "heading_valid"
+    },
+    {
+      "boolean": true,
+      "count": 1,
+      "dtype": "|u1",
+      "meaning": "1 iff heading_status == 7",
+      "name": "heading_valid",
+      "offset": 80,
+      "units": "1",
+      "validity_field": ""
+    },
+    {
+      "boolean": false,
+      "count": 2,
+      "dtype": "<f4",
+      "meaning": "raw midline origin in canvas pixels (x right, y down), the heading origin through the camera-to-canvas homography",
+      "name": "midline_origin_canvas_px",
+      "offset": 81,
+      "units": "px",
+      "validity_field": "midline_valid"
+    },
+    {
+      "boolean": false,
+      "count": 2,
+      "dtype": "<f4",
+      "meaning": "raw midline unit direction in canvas, image of the camera forward probe",
+      "name": "midline_direction_canvas",
+      "offset": 89,
+      "units": "1",
+      "validity_field": "midline_valid"
+    },
+    {
+      "boolean": false,
+      "count": 2,
+      "dtype": "<f4",
+      "meaning": "raw unit left axis in canvas, image of the camera left probe (projected_left_axis_v1)",
+      "name": "midline_left_canvas",
+      "offset": 97,
+      "units": "1",
+      "validity_field": "midline_valid"
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<f4",
+      "meaning": "canvas angle of the raw direction; zero right; positive counter-clockwise (+90 = up); convention /metadata/session stimulus_angle_convention",
+      "name": "midline_angle_degrees_canvas",
+      "offset": 105,
+      "units": "deg",
+      "validity_field": "midline_valid"
+    },
+    {
+      "boolean": true,
+      "count": 1,
+      "dtype": "|u1",
+      "meaning": "1 iff the raw heading projected to a canvas midline",
+      "name": "midline_valid",
+      "offset": 109,
+      "units": "1",
+      "validity_field": ""
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<f4",
+      "meaning": "camera angle of the held heading, the hysteresis reference",
+      "name": "held_camera_angle_degrees",
+      "offset": 110,
+      "units": "deg",
+      "validity_field": "held_valid"
+    },
+    {
+      "boolean": false,
+      "count": 2,
+      "dtype": "<f4",
+      "meaning": "origin of the midline that drove this update's drawing, canvas pixels",
+      "name": "held_origin_canvas_px",
+      "offset": 114,
+      "units": "px",
+      "validity_field": "held_valid"
+    },
+    {
+      "boolean": false,
+      "count": 2,
+      "dtype": "<f4",
+      "meaning": "unit direction of the held midline in canvas",
+      "name": "held_direction_canvas",
+      "offset": 122,
+      "units": "1",
+      "validity_field": "held_valid"
+    },
+    {
+      "boolean": false,
+      "count": 2,
+      "dtype": "<f4",
+      "meaning": "unit left axis of the held midline in canvas; pixel side s = dot(P - origin, left), s >= 0 is the fish's left",
+      "name": "held_left_canvas",
+      "offset": 130,
+      "units": "1",
+      "validity_field": "held_valid"
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<f4",
+      "meaning": "canvas angle of the held direction; convention as midline_angle_degrees_canvas",
+      "name": "held_angle_degrees_canvas",
+      "offset": 138,
+      "units": "deg",
+      "validity_field": "held_valid"
+    },
+    {
+      "boolean": true,
+      "count": 1,
+      "dtype": "|u1",
+      "meaning": "1 iff a held midline drove the drawing (input_used 1 or 2)",
+      "name": "held_valid",
+      "offset": 142,
+      "units": "1",
+      "validity_field": ""
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<u8",
+      "meaning": "stimulus updates since the last usable raw heading; zero on a pose update",
+      "name": "held_age_updates",
+      "offset": 143,
+      "units": "1",
+      "validity_field": ""
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<u8",
+      "meaning": "enum:/definitions/enums/phototaxis_input_used; 1 pose, 2 held, 3 fallback",
+      "name": "input_used",
+      "offset": 151,
+      "units": "1",
+      "validity_field": ""
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<u8",
+      "meaning": "enum:/definitions/enums/phototaxis_fallbacks; 0 none (a midline was drawn), 1 static_fill, 2 uniform_side_a, 3 uniform_side_b",
+      "name": "fallback_id",
+      "offset": 159,
+      "units": "1",
+      "validity_field": ""
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<u8",
+      "meaning": "ipc_model_id_hash of the pose slot: most significant 64 bits of the engine sha256 (CitrusPose::Prefix64)",
+      "name": "pose_model_hash64",
+      "offset": 167,
+      "units": "1",
+      "validity_field": "pose_identity_valid"
+    },
+    {
+      "boolean": false,
+      "count": 1,
+      "dtype": "<u8",
+      "meaning": "ipc_skeleton_id_hash of the pose slot: most significant 64 bits of the sidecar sha256",
+      "name": "pose_skeleton_hash64",
+      "offset": 175,
+      "units": "1",
+      "validity_field": "pose_identity_valid"
+    },
+    {
+      "boolean": true,
+      "count": 1,
+      "dtype": "|u1",
+      "meaning": "explicit validity; invalid payload zero",
+      "name": "pose_identity_valid",
+      "offset": 183,
+      "units": "1",
+      "validity_field": ""
+    }
+  ],
+  "enums": {
+    "phototaxis_input_used": {
+      "0": "NONE (never recorded)",
+      "1": "POSE",
+      "2": "HELD",
+      "3": "FALLBACK"
+    },
+    "phototaxis_fallbacks": {
+      "0": "NONE (a midline was drawn)",
+      "1": "STATIC_FILL",
+      "2": "UNIFORM_SIDE_A",
+      "3": "UNIFORM_SIDE_B"
+    },
+    "phototaxis_heading_status": {
+      "0": "NO_POSE",
+      "1": "UNRESOLVED_METADATA",
+      "2": "IDENTITY_MISMATCH",
+      "3": "MISSING_POINT",
+      "4": "INVALID_POINT",
+      "5": "LOW_CONFIDENCE",
+      "6": "DEGENERATE",
+      "7": "VALID",
+      "8": "POLICY_DISABLED",
+      "9": "LEFT_RIGHT_UNRESOLVED"
+    }
+  },
+  "hash64_rule": "pose_model_hash64 / pose_skeleton_hash64 are the most significant 64 bits of the engine / sidecar sha256 (CitrusPose::Prefix64), equal to the ipc_*_id_hash values Orange publishes and to /observations/pose/contract_json.metadata_cameras.<serial>.{engine_sha256,sidecar_sha256} prefixes",
+  "wrap_delta": {
+    "formula": "((d + 180) mod 360) - 180 with floored modulo",
+    "range": "[-180, 180)",
+    "at_plus_180": -180,
+    "at_minus_180": -180,
+    "hysteresis_test": "abs(wrap_delta(raw_camera_angle - held_camera_angle)) >= minimum_heading_displacement_degrees, in camera degrees"
+  },
+  "invariants": [
+    "heading_valid == 1 iff heading_status == 7; heading_camera_angle_degrees and heading_origin_camera_px are meaningful only then (payload zero otherwise)",
+    "midline_valid == 1 implies heading_valid == 1 (a midline is the projection of a valid heading)",
+    "input_used == 1 (pose) implies held_valid == 1, held_age_updates == 0, held_camera_angle_degrees == heading_camera_angle_degrees and held_* == midline_* (origin, direction, left, angle)",
+    "input_used == 2 (held) with heading_valid == 1 and midline_valid == 1 is a hysteresis hold: held_origin_canvas_px == midline_origin_canvas_px (the origin follows the fish) and abs(wrap_delta(heading_camera_angle_degrees - held_camera_angle_degrees)) < the step minimum_heading_displacement_degrees; input_used == 2 with heading_valid == 0 is a lost-pose hold with held_age_updates >= 1",
+    "input_used == 3 (fallback) iff held_valid == 0 iff fallback_id != 0; fallback_id then equals the step unknown_heading_fallback (1 static_fill, 2 uniform_side_a, 3 uniform_side_b)",
+    "held_valid == 1 iff input_used in (1, 2)",
+    "pose_identity_valid == 1 implies pose_model_hash64 == prefix64(contract engine_sha256) and pose_skeleton_hash64 == prefix64(contract sidecar_sha256) for the file camera, on every row",
+    "input_used == 1 implies /observations/pose (v2) has a status-7 object row for pose_sequence_id with the same heading_angle_degrees and heading_origin_{x,y}_px",
+    "box_sequence_id_valid == 1 and pose_sequence_id_valid == 1 normally give box_sequence_id == pose_sequence_id + 1 while pose lags the box by one update",
+    "protocol_step_index equals the step active for stimulus_frame_num in /protocol_execution, and that trial-index step has features.fill.type == heading_split with features.reactive.module == PhototaxisHeadingSplit",
+    "step constants (colours, brightness, left_side, minimum_keypoint_confidence, minimum_heading_displacement_degrees, maximum_held_heading_updates, unknown_heading_fallback, fill_style) are not repeated in the row; a reader takes them from the trial-index step"
+  ],
+  "phototaxis_heading_split_examples": {
+    "rule": "projected_left_axis_v1; arithmetic as reactive_phototaxis_v1_2026-10-13.md section 3 (binary32 probes, double homography rounded to binary32, binary32 deltas over a double sqrt, binary32 s with no fused multiply-add); pixel (i, j) is tested at its centre (i + 0.5, j + 0.5); s > 0 left, s < 0 right, s == 0 left; a pixel outside the experimental area is side_b_v1 regardless of s",
+    "probe_length_px": 20,
+    "rows": [
+      {
+        "case": "identity_forward_x",
+        "homography": [
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            0,
+            0,
+            1
+          ]
+        ],
+        "camera": {
+          "origin_px": [
+            20.5,
+            10.5
+          ],
+          "forward": [
+            1.0,
+            0.0
+          ],
+          "left_axis": [
+            0.0,
+            -1.0
+          ]
+        },
+        "canvas": {
+          "origin_px": [
+            20.5,
+            10.5
+          ],
+          "direction": [
+            1.0,
+            0.0
+          ],
+          "left": [
+            0.0,
+            -1.0
+          ],
+          "angle_degrees": 0.0
+        },
+        "pixels": [
+          {
+            "pixel": [
+              20,
+              4
+            ],
+            "s": 6.0,
+            "side": "left"
+          },
+          {
+            "pixel": [
+              20,
+              14
+            ],
+            "s": -4.0,
+            "side": "right"
+          },
+          {
+            "pixel": [
+              30,
+              10
+            ],
+            "s": 0.0,
+            "side": "left",
+            "note": "pixel centre on the midline is assigned to the left"
+          }
+        ]
+      },
+      {
+        "case": "identity_oblique",
+        "homography": [
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            0,
+            0,
+            1
+          ]
+        ],
+        "camera": {
+          "origin_px": [
+            20.5,
+            10.5
+          ],
+          "forward": [
+            0.6,
+            0.8
+          ],
+          "left_axis": [
+            0.8,
+            -0.6
+          ]
+        },
+        "canvas": {
+          "origin_px": [
+            20.5,
+            10.5
+          ],
+          "direction": [
+            0.6000000238418579,
+            0.800000011920929
+          ],
+          "left": [
+            0.800000011920929,
+            -0.6000000238418579
+          ],
+          "angle_degrees": -53.13010025024414
+        },
+        "pixels": [
+          {
+            "pixel": [
+              30,
+              10
+            ],
+            "s": 8.0,
+            "side": "left"
+          },
+          {
+            "pixel": [
+              10,
+              10
+            ],
+            "s": -8.0,
+            "side": "right"
+          }
+        ],
+        "note": "forward and left_axis are binary32(0.6) and binary32(0.8); the unit normalisation reproduces them exactly under the stated arithmetic"
+      },
+      {
+        "case": "reflected_forward_image_down",
+        "homography": [
+          [
+            2,
+            0,
+            100
+          ],
+          [
+            0,
+            -2,
+            500
+          ],
+          [
+            0,
+            0,
+            1
+          ]
+        ],
+        "note": "omnifin0 parity: negative determinant (y reflection). Camera heading image-down (-90) becomes canvas up (+90); the camera left axis (1, 0) projects to canvas (1, 0). The naive canvas formula (direction_y, -direction_x) = (-1, 0) would name the fish's right.",
+        "camera": {
+          "origin_px": [
+            20.5,
+            10.5
+          ],
+          "forward": [
+            0.0,
+            1.0
+          ],
+          "left_axis": [
+            1.0,
+            0.0
+          ],
+          "angle_degrees": -90.0
+        },
+        "canvas": {
+          "origin_px": [
+            141.0,
+            479.0
+          ],
+          "direction": [
+            0.0,
+            -1.0
+          ],
+          "left": [
+            1.0,
+            0.0
+          ],
+          "angle_degrees": 90.0
+        },
+        "pixels": [
+          {
+            "pixel": [
+              150,
+              478
+            ],
+            "s": 9.5,
+            "side": "left",
+            "note": "camera point (25.5, 10.5), physically on the fish's left, projects to (151, 479)"
+          },
+          {
+            "pixel": [
+              130,
+              478
+            ],
+            "s": -10.5,
+            "side": "right"
+          }
+        ]
+      },
+      {
+        "case": "reflected_midline_pixel",
+        "homography": [
+          [
+            2,
+            0,
+            100
+          ],
+          [
+            0,
+            -2,
+            500
+          ],
+          [
+            0,
+            0,
+            1
+          ]
+        ],
+        "camera": {
+          "origin_px": [
+            20.25,
+            10.5
+          ],
+          "forward": [
+            0.0,
+            1.0
+          ],
+          "left_axis": [
+            1.0,
+            0.0
+          ]
+        },
+        "canvas": {
+          "origin_px": [
+            140.5,
+            479.0
+          ],
+          "direction": [
+            0.0,
+            -1.0
+          ],
+          "left": [
+            1.0,
+            0.0
+          ],
+          "angle_degrees": 90.0
+        },
+        "pixels": [
+          {
+            "pixel": [
+              140,
+              300
+            ],
+            "s": 0.0,
+            "side": "left",
+            "note": "s == 0 on a pixel centre under the reflected homography"
+          },
+          {
+            "pixel": [
+              141,
+              300
+            ],
+            "s": 1.0,
+            "side": "left"
+          },
+          {
+            "pixel": [
+              139,
+              300
+            ],
+            "s": -1.0,
+            "side": "right"
+          }
+        ]
+      },
+      {
+        "case": "outside_experimental_area",
+        "homography": [
+          [
+            2,
+            0,
+            100
+          ],
+          [
+            0,
+            -2,
+            500
+          ],
+          [
+            0,
+            0,
+            1
+          ]
+        ],
+        "experimental_area": {
+          "shape": "RECTANGLE",
+          "center_px": [
+            140.5,
+            479.0
+          ],
+          "width_px": 100,
+          "height_px": 100
+        },
+        "camera": {
+          "origin_px": [
+            20.25,
+            10.5
+          ],
+          "forward": [
+            0.0,
+            1.0
+          ],
+          "left_axis": [
+            1.0,
+            0.0
+          ]
+        },
+        "canvas": {
+          "origin_px": [
+            140.5,
+            479.0
+          ],
+          "direction": [
+            0.0,
+            -1.0
+          ],
+          "left": [
+            1.0,
+            0.0
+          ],
+          "angle_degrees": 90.0
+        },
+        "pixels": [
+          {
+            "pixel": [
+              10,
+              10
+            ],
+            "s": -130.0,
+            "side": "side_b",
+            "note": "outside the experimental area: side_b_v1, the side value is not consulted"
+          },
+          {
+            "pixel": [
+              150,
+              470
+            ],
+            "s": 10.0,
+            "side": "left",
+            "note": "inside the area"
+          }
+        ]
+      },
+      {
+        "case": "projective_oblique_omnifin0_like",
+        "homography": [
+          [
+            0.0795,
+            -0.0003,
+            77.13
+          ],
+          [
+            -0.0003,
+            -0.0801,
+            510.54
+          ],
+          [
+            -1e-06,
+            2e-06,
+            1.0
+          ]
+        ],
+        "note": "Palette's ask: nonzero h20/h21, a non-dyadic origin and an oblique heading, so that a double-precision or FMA implementation differs in the binary32 vectors. forward is binary32(cos(-37.3 deg)), binary32(-sin(-37.3 deg)); camera angle -37.29999923706055.",
+        "camera": {
+          "origin_px": [
+            312.37,
+            215.81
+          ],
+          "forward": [
+            0.7954734563827515,
+            0.6059883832931519
+          ],
+          "left_axis": [
+            0.6059883832931519,
+            -0.7954734563827515
+          ],
+          "angle_degrees": -37.29999923706055
+        },
+        "canvas": {
+          "origin_px": [
+            101.88652038574219,
+            493.1011047363281
+          ],
+          "direction": [
+            0.7895261645317078,
+            -0.6137169003486633
+          ],
+          "left": [
+            0.6013756990432739,
+            0.7989664077758789
+          ],
+          "angle_degrees": 37.85874557495117
+        },
+        "pixels": [
+          {
+            "pixel": [
+              100,
+              490
+            ],
+            "s": -2.912014961242676,
+            "side": "right"
+          },
+          {
+            "pixel": [
+              110,
+              500
+            ],
+            "s": 11.091405868530273,
+            "side": "left"
+          },
+          {
+            "pixel": [
+              90,
+              500
+            ],
+            "s": -0.9361076354980469,
+            "side": "right"
+          },
+          {
+            "pixel": [
+              101,
+              493
+            ],
+            "s": 0.08625994622707367,
+            "side": "left"
+          }
+        ]
+      }
+    ],
+    "citrus_replay": "JohnsonLabJanelia/citrus tests/fixtures/phototaxis_heading_split_examples.json (a copy of this block) is replayed bit for bit by citrus_tests TrackingTarget.HeadingSplitFixtureReplay: canvas origin, direction, left and every s compared with exact binary32 equality; the canvas angle with a 1e-3 degree tolerance (float atan2 is diagnostic only)."
+  },
+  "citrus_replay": "tests/test_tracking_target_view.cpp HeadingSplitFixtureReplay replays every fixture row bit for bit; tests/gpu_harness phototaxis_heading_split_matches_host_side_rule proves every rendered pixel equals the host side rule"
+}
