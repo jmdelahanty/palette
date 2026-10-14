@@ -116,6 +116,7 @@ from .web_static import register_static_routes
 from .web_subject_mask_edit_operations import validated_edit_operations
 from .upgrade_mask_run_metrics import ensure_full_metrics_for_tasks, metric_upgrade_warnings
 from .web_admin_inspect import register_admin_inspect_routes
+from .web_peer_review import register_peer_review_routes
 from .web_admin_api import register_admin_api_routes
 from .web_admin_pages import _admin_page_response_payload, register_admin_page_routes
 from .web_admin_renderers import (
@@ -1159,6 +1160,7 @@ def _make_handler(state: ServerState):
     register_personal_page_routes(flask_app, state, _personal_page_response_payload)
     register_static_routes(flask_app)
     register_admin_inspect_routes(flask_app, state)
+    register_peer_review_routes(flask_app, state)
 
     class LabelingWorkHandler(BaseHTTPRequestHandler):
         server_version = "PaletteLabelingWork/0.1"

@@ -25,7 +25,7 @@ DATASET_KEYS = {"dataset_id", "label", "open_task_count", "task_count", "recordi
                 "workflow_counts", "work_url", "recordings"}
 RECORDING_KEYS = {"recording_id", "open_task_count", "task_count", "blocked_reason", "work_url", "tasks"}
 TASK_KEYS = {"task_id", "title", "workflow_kind", "component_name", "state", "priority",
-             "notes", "work_url", "start", "progress"}
+             "notes", "work_url", "start", "progress", "open_flag_count"}
 START_KEYS = {"ready", "endpoint", "method", "not_ready_reason", "operator_action"}
 PROGRESS_KEYS = {"row_total", "saved_row_count", "applied_row_count", "unapplied_row_count",
                  "carried_row_count"}
