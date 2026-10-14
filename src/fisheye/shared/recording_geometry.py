@@ -52,6 +52,8 @@ H5_SCOPE_SOURCE_CONTRACT_VERSIONS = {1: frozenset({1}), 2: frozenset({1, 2})}
 H5_SCOPE_SCHEMA_VERSION = 1  # the first version; kept for callers
 DAILY_REGISTRATION_SCHEMA_ID = "citrus.calibration.daily_registration"
 DAILY_REGISTRATION_SCHEMA_VERSION = 1
+RUNTIME_GEOMETRY_CONTRACT_SCHEMA_ID = "citrus.session.runtime_geometry_contract"
+RUNTIME_GEOMETRY_CONTRACT_SCHEMA_VERSION = 1
 
 RECORDING_SNAPSHOT_NAME = "recording_snapshot.json"
 RECORDING_GEOMETRY_CONTRACT_NAME = "recording_geometry_contract.json"
@@ -961,6 +963,69 @@ def _verified_h5_json_dataset(
     return _strict_json_loads(payload, label=label), payload, actual
 
 
+def _citrus_daily_registration(runtime_group: h5py.Group) -> Mapping[str, Any] | None:
+    """Citrus's own record of the daily registration it selected and applied.
+
+    ``contract_json.daily_registration`` of the runtime geometry contract is the
+    only place Citrus declares whether it applied a registration; Orange's
+    camera entry in the H5 scope is a verbatim copy and carries no such claim.
+    Returns None when the runtime contract is absent.
+    """
+
+    if "contract_json" not in runtime_group:
+        return None
+    contract, _bytes, _sha = _verified_h5_json_dataset(
+        runtime_group, "contract_json", label="runtime geometry contract_json"
+    )
+    _require_schema(
+        contract,
+        schema_id=RUNTIME_GEOMETRY_CONTRACT_SCHEMA_ID,
+        schema_version=RUNTIME_GEOMETRY_CONTRACT_SCHEMA_VERSION,
+        label="runtime geometry contract_json",
+    )
+    return _required_mapping(
+        contract.get("daily_registration"), label="runtime contract daily_registration"
+    )
+
+
+def _citrus_applied_status(
+    daily: Mapping[str, Any] | None,
+    *,
+    registration_id: str,
+    camera_serial: str,
+    arena_id: str,
+) -> tuple[CitrusRegistrationStatus, bool | None]:
+    """Exact match only when Citrus declares this registration selected, valid and applied.
+
+    Every term is required; none is inferred from the others. registration_id and
+    registration_checksum_valid are schema-optional (always written since Citrus
+    9b839ab), so their absence is non-exact, not a violation.
+    """
+
+    if daily is None:
+        return CitrusRegistrationStatus.MISSING, None
+    applied_value = daily.get("applied")
+    applied = applied_value if isinstance(applied_value, bool) else None
+    status = daily.get("status")
+    if status in ("not_performed", "available_not_selected"):
+        return CitrusRegistrationStatus.MISSING, applied
+    if status != "selected_valid" or applied is not True:
+        return CitrusRegistrationStatus.INVALID, applied
+    if "registration_id" not in daily or "registration_checksum_valid" not in daily:
+        return CitrusRegistrationStatus.MISSING, applied
+    if daily.get("registration_id") != registration_id:
+        return CitrusRegistrationStatus.REGISTRATION_ID_MISMATCH, applied
+    target = daily.get("target")
+    if not isinstance(target, Mapping) or (
+        str(target.get("camera_id")),
+        target.get("arena_id"),
+    ) != (camera_serial, arena_id):
+        return CitrusRegistrationStatus.CAMERA_ARENA_TARGET_MISSING, applied
+    if daily.get("registration_checksum_valid") is not True:
+        return CitrusRegistrationStatus.CHECKSUM_MISMATCH, applied
+    return CitrusRegistrationStatus.EXACT_MATCH_APPLIED, applied
+
+
 def _runtime_geometry_group(h5: h5py.File) -> h5py.Group:
     """Resolve the captured ``/runtime_geometry_contract`` reference.
 
@@ -1158,6 +1223,7 @@ def load_registered_dish_masks_from_citrus_h5(
                 label="runtime daily_registration_json",
             )
             runtime_dataset = runtime_group["daily_registration_json"]
+            citrus_daily = _citrus_daily_registration(runtime_group)
             cameras = _required_mapping(scope.get("cameras"), label="scope.cameras")
             masks: dict[RegisteredDishMaskKey, RegisteredDishMask] = {}
             issues: list[GeometryLoadIssue] = []
@@ -1197,14 +1263,14 @@ def load_registered_dish_masks_from_citrus_h5(
                         rim_source_sha256=_normalized_sha256(source_for_status.get("sha256"), label="rim source sha256"),
                     )
                 entry = _required_mapping(daily.get("recording_snapshot_entry"), label="recording_snapshot_entry")
-                applied_value = daily.get("selected_daily_registration_applied_by_citrus")
-                applied = applied_value if isinstance(applied_value, bool) else None
-                if applied is not True:
-                    citrus_status = (
-                        CitrusRegistrationStatus.INVALID
-                        if applied is False
-                        else CitrusRegistrationStatus.MISSING
-                    )
+                applied_status, applied = _citrus_applied_status(
+                    citrus_daily,
+                    registration_id=registration_id,
+                    camera_serial=camera_serial,
+                    arena_id=arena_id,
+                )
+                if citrus_status is CitrusRegistrationStatus.EXACT_MATCH_APPLIED:
+                    citrus_status = applied_status
                 key = RegisteredDishMaskKey(rig_id, canvas_name, arena_id, camera_serial)
                 mask = _mask_from_entry(
                     entry,

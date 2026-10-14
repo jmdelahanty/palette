@@ -529,7 +529,12 @@ def _write_h5(
     scope_version: int = 1,
     source_version: int | None = None,
     unified: bool = False,
+    citrus_daily: dict[str, object] | None | object = None,
 ) -> None:
+    if citrus_daily is None:
+        citrus_daily = _citrus_daily()
+    elif citrus_daily is _ABSENT:
+        citrus_daily = None
     contract = {
         "schema_id": "orange.recording.geometry_contract",
         "schema_version": contract_version,
@@ -586,7 +591,6 @@ def _write_h5(
                         "valid_until_utc": "2026-07-23T04:00:00Z",
                     },
                     "recording_snapshot_entry": entry,
-                    "selected_daily_registration_applied_by_citrus": True,
                 },
             }
         },
@@ -620,6 +624,38 @@ def _write_h5(
         runtime_dataset.attrs["checksum_sha256"] = _sha(runtime_bytes)
         runtime_dataset.attrs["load_status"] = "loaded"
         runtime_dataset.attrs["source_path"] = "/citrus/immutable/registration.json"
+        if citrus_daily is not None:
+            runtime_contract = _json_bytes(
+                {
+                    "schema_id": "citrus.session.runtime_geometry_contract",
+                    "schema_version": 1,
+                    "daily_registration": citrus_daily,
+                }
+            )
+            dataset = runtime_group.create_dataset("contract_json", data=runtime_contract)
+            dataset.attrs["checksum_sha256"] = _sha(runtime_contract)
+
+
+def _citrus_daily(**changes: object) -> dict[str, object]:
+    """Citrus's runtime daily_registration block for the selected registration."""
+
+    daily: dict[str, object] = {
+        "mode": "selected_daily_registration",
+        "status": "selected_valid",
+        "applied": True,
+        "registration_id": "dailyreg-1",
+        "registration_checksum_valid": True,
+        "target": {"arena_id": "arena_1", "camera_id": "2010093"},
+    }
+    for key, value in changes.items():
+        if value is _ABSENT:
+            del daily[key]
+        else:
+            daily[key] = value
+    return daily
+
+
+_ABSENT = object()
 
 
 def test_h5_loader_hashes_exact_payload_and_reconciles_runtime(tmp_path: Path) -> None:
@@ -635,6 +671,69 @@ def test_h5_loader_hashes_exact_payload_and_reconciles_runtime(tmp_path: Path) -
     assert mask.selected_daily_registration_applied_by_citrus is True
     assert mask.source_contract_sha256 == result.source_contract_sha256
     assert mask.h5_scope_sha256 == result.h5_scope_sha256
+
+
+@pytest.mark.parametrize(
+    ("changes", "status", "applied"),
+    [
+        ({"status": "selected_invalid", "applied": False}, CitrusRegistrationStatus.INVALID, False),
+        ({"applied": False}, CitrusRegistrationStatus.INVALID, False),
+        ({"status": "selected_invalid"}, CitrusRegistrationStatus.INVALID, True),
+        ({"applied": _ABSENT}, CitrusRegistrationStatus.INVALID, None),
+        ({"status": "available_not_selected", "applied": False}, CitrusRegistrationStatus.MISSING, False),
+        ({"status": "not_performed", "applied": False}, CitrusRegistrationStatus.MISSING, False),
+        ({"registration_id": _ABSENT}, CitrusRegistrationStatus.MISSING, True),
+        ({"registration_checksum_valid": _ABSENT}, CitrusRegistrationStatus.MISSING, True),
+        ({"registration_id": "dailyreg-other"}, CitrusRegistrationStatus.REGISTRATION_ID_MISMATCH, True),
+        ({"target": {"arena_id": "arena_2", "camera_id": "2010093"}}, CitrusRegistrationStatus.CAMERA_ARENA_TARGET_MISSING, True),
+        ({"target": {"arena_id": "arena_1", "camera_id": "2010094"}}, CitrusRegistrationStatus.CAMERA_ARENA_TARGET_MISSING, True),
+        ({"registration_checksum_valid": False}, CitrusRegistrationStatus.CHECKSUM_MISMATCH, True),
+    ],
+)
+def test_h5_loader_takes_applied_only_from_citrus_runtime_contract(
+    tmp_path: Path,
+    changes: dict[str, object],
+    status: CitrusRegistrationStatus,
+    applied: bool | None,
+) -> None:
+    # Citrus declares selection and application in /geometry/runtime
+    # contract_json.daily_registration; every term must hold, none is inferred.
+    path = tmp_path / "experiment.h5"
+    _write_h5(path, unified=True, citrus_daily=_citrus_daily(**changes))
+
+    result = load_registered_dish_masks_from_citrus_h5(path)
+
+    (mask,) = result.masks.values()
+    assert mask.citrus_registration_status is status
+    assert mask.selected_daily_registration_applied_by_citrus is applied
+    assert result.issues[0].code == status.value
+    with pytest.raises(RecordingGeometryError, match="did not exactly match"):
+        load_registered_dish_masks_from_citrus_h5(path, policy=GeometryLoadPolicy.REQUIRED)
+
+
+def test_h5_loader_without_runtime_contract_is_not_applied(tmp_path: Path) -> None:
+    path = tmp_path / "experiment.h5"
+    _write_h5(path, citrus_daily=_ABSENT)
+
+    (mask,) = load_registered_dish_masks_from_citrus_h5(path).masks.values()
+
+    assert mask.citrus_registration_status is CitrusRegistrationStatus.MISSING
+    assert mask.selected_daily_registration_applied_by_citrus is None
+
+
+def test_h5_loader_refuses_unpinned_runtime_contract(tmp_path: Path) -> None:
+    path = tmp_path / "experiment.h5"
+    _write_h5(path)
+    with h5py.File(path, "a") as h5:
+        group = h5["runtime_geometry_contract"]
+        payload = _json_bytes({"schema_id": "citrus.session.runtime_geometry_contract", "schema_version": 2, "daily_registration": _citrus_daily()})
+        del group["contract_json"]
+        group.create_dataset("contract_json", data=payload).attrs["checksum_sha256"] = _sha(payload)
+
+    result = load_registered_dish_masks_from_citrus_h5(path)
+
+    assert result.mask_geometry_status is MaskGeometryStatus.INVALID
+    assert "runtime geometry contract_json must be" in result.issues[0].message
 
 
 def test_h5_loader_reports_registration_identity_mismatch(tmp_path: Path) -> None:
