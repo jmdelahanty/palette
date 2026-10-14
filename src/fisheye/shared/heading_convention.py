@@ -157,6 +157,74 @@ def stimulus_angle_vector(
     return np.cos(theta), sign * np.sin(theta)
 
 
+def homography_jacobian(homography, point_xy) -> np.ndarray:
+    """Local 2x2 Jacobian of a 3x3 homography at a source point.
+
+    agent-contracts ``citrus-palette/angles`` ``plane.jacobian``: with
+    ``w = h20 x + h21 y + h22`` and ``(u, v)`` the mapped point,
+    ``J = [[(h00 - u h20)/w, (h01 - u h21)/w], [(h10 - v h20)/w, (h11 - v h21)/w]]``.
+    """
+
+    h = np.asarray(homography, dtype=np.float64)
+    if h.shape != (3, 3) or not np.isfinite(h).all():
+        raise ValueError("homography must be one finite 3x3 matrix")
+    x, y = (float(value) for value in point_xy)
+    w = h[2, 0] * x + h[2, 1] * y + h[2, 2]
+    if not np.isfinite(w) or w == 0.0:
+        raise ValueError("homography maps the point to infinity")
+    u = (h[0, 0] * x + h[0, 1] * y + h[0, 2]) / w
+    v = (h[1, 0] * x + h[1, 1] * y + h[1, 2]) / w
+    return np.array(
+        [
+            [(h[0, 0] - u * h[2, 0]) / w, (h[0, 1] - u * h[2, 1]) / w],
+            [(h[1, 0] - v * h[2, 0]) / w, (h[1, 1] - v * h[2, 1]) / w],
+        ],
+        dtype=np.float64,
+    )
+
+
+def map_stimulus_direction(angle_deg, jacobian) -> tuple[float, int]:
+    """Map a ``STIMULUS_ANGLE_CONVENTION`` direction into another y-down raster.
+
+    The angle names a vector in the source raster; the vector (never the
+    number) goes through the local Jacobian, and the result is the angle of
+    the mapped vector in the destination raster. Returns ``(angle_deg,
+    det_sign)``; ``det_sign == -1`` is a reflected rig (rotation sense
+    reverses), as on omnifin0.
+    """
+
+    j = np.asarray(jacobian, dtype=np.float64)
+    if j.shape != (2, 2) or not np.isfinite(j).all():
+        raise ValueError("jacobian must be one finite 2x2 matrix")
+    det = float(np.linalg.det(j))
+    if det == 0.0:
+        raise ValueError("jacobian is singular; the direction has no image")
+    vx, vy = stimulus_angle_vector(angle_deg)
+    mapped = j @ np.array([float(vx), float(vy)], dtype=np.float64)
+    return float(heading_degrees(mapped[0], mapped[1])), (1 if det > 0.0 else -1)
+
+
+def finite_difference_jacobian(point_map, point_xy, *, step_px: float = 0.5) -> np.ndarray:
+    """Central-difference Jacobian of a point map ``(N, 2) -> (N, 2)``.
+
+    The two-point form of ``homography_jacobian`` for a map known only as a
+    point transform (for example a bound transform chain). Exact for affine
+    maps; for a projective map the error is second order in ``step_px``.
+    """
+
+    x, y = (float(value) for value in point_xy)
+    h = float(step_px)
+    probes = np.array(
+        [[x - h, y], [x + h, y], [x, y - h], [x, y + h]], dtype=np.float64
+    )
+    mapped = np.asarray(point_map(probes), dtype=np.float64)
+    if mapped.shape != (4, 2) or not np.isfinite(mapped).all():
+        raise ValueError("point map returned non-finite or misshapen points")
+    return np.column_stack(
+        [(mapped[1] - mapped[0]) / (2.0 * h), (mapped[3] - mapped[2]) / (2.0 * h)]
+    )
+
+
 def megabouts_head_yaw_radians(head_to_tail_base_x, head_to_tail_base_y) -> np.ndarray:
     """``MEGABOUTS_HEAD_YAW`` of ``v = tail_base - head`` (float64 radians)."""
 
@@ -179,10 +247,13 @@ __all__ = [
     "MEGABOUTS_HEAD_YAW",
     "STIMULUS_ANGLE_CONVENTION",
     "chaser_centred_bearing_degrees",
+    "finite_difference_jacobian",
     "heading_degrees",
+    "homography_jacobian",
     "image_angle_degrees",
     "left_axis",
     "legacy_canvas_angle_to_degrees",
+    "map_stimulus_direction",
     "megabouts_head_yaw_radians",
     "stimulus_angle_vector",
     "wrap_delta_degrees",
