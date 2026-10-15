@@ -50,7 +50,8 @@ def test_every_pinned_intake_schema_is_checked() -> None:
         "transfer envelope",
         "frame identity proof v2",
         "frame identity proof v3",
-        "citrus subject snapshot",
+        "citrus subject snapshot v3",
+        "citrus subject snapshot v4",
     } <= labels
     assert any(label.startswith("orange recording_output") for label in labels)
     assert any(label.startswith("orange subject reference") for label in labels)

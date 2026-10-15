@@ -82,10 +82,13 @@ Names are chosen from what consumers already read, to keep churn low. All are op
 | `dish_revision` | int | the revision **at recording** |
 | `dish_updated_at` | str | verbatim server string |
 | `source_dish_population_count` | int | fish in the source dish; **not** the subject count |
-| `mzb_fish_id`, `mzb_fish_revision`, `mzb_fish_updated_at` | str, int, str | verified only when `fish_reference.status == collected` |
-| `mzb_fish_unit_id` | str | the picked fish's MetaZebrobot `current_unit_id` as served at start (Citrus subject identity v3 amendment, 2026-10-14); only when `fish_reference.status == collected`; a housing record at `mzb_fish_revision`, not where the fish was during the recording |
+| `mzb_fish_id`, `mzb_fish_revision`, `mzb_fish_updated_at` | str, int, str | verified only when `fish_reference.status == collected` (v3) or `mzb_registration.status == registered` (v4, where `mzb_fish_id` equals the subject id) |
+| `mzb_fish_unit_id` | str | the picked fish's MetaZebrobot `current_unit_id` as served at start (Citrus subject identity v3 amendment, 2026-10-14); only when `fish_reference.status == collected` (v3) or `mzb_registration.status == registered` (v4); a housing record at `mzb_fish_revision`, not where the fish was during the recording |
+| `mzb_dish_listed_fish_count_at_start` | int ≥ 0 | v4, minted fish only: how many living fish MetaZebrobot listed in the dish at Start; > 0 is the operator's "New fish anyway" override |
 | `subject_lookup` | {`status`, `reason`} | `collected` \| `not_collected` \| `lookup_failed` |
 | `fish_reference` | {`status`, `reason`} | same vocabulary |
+| `mzb_registration` | {`mode`, `status`, `reason`} | Citrus snapshot v4 only (replaces `fish_reference`): mode `existing` \| `created_at_start` \| `outbox`; status `registered` \| `unverified` \| `queued` \| `failed`. The fish is confirmed only when `registered`. |
+| `mzb_fish_subject_label` | str | v4, display only (e.g. `Z5`); never an identifier |
 | `zebrobot_service` | {`service_commit`, `service_commit_dirty`, `consumer_schema_sha256`, `matches_pin`} | the build that served the dish, when sealed |
 | `intake_observations` | {`dish_revision_at_intake`, `dish_changed_since_recording`, `dish_fish_changed_since_recording`, `cross_fields_resolved_at`} | what Palette saw at intake; never mixed into the facts above |
 

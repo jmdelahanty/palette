@@ -27,6 +27,9 @@ SUBJECT_TYPES = ("individual", "dish_group")
 # are UTC without an offset; *_utc fields carry an explicit Z.
 LAB_TIMEZONE = ZoneInfo("America/New_York")
 LOOKUP_STATUSES = ("collected", "not_collected", "lookup_failed")
+# Citrus subject identity v4 registration record (agent-contracts PR 103, final d329774).
+REGISTRATION_MODES = ("existing", "created_at_start", "outbox")
+REGISTRATION_STATUSES = ("registered", "unverified", "queued", "failed")
 # The manual CLI's "group" means a dish group (decided 2026-10-06).
 _SUBJECT_TYPE_ALIASES = {"individual": "individual", "dish_group": "dish_group", "group": "dish_group"}
 _PARENT_WITH_SEX = re.compile(r"^(?P<identifier>.*?)\s*\[(?P<sex>[^\]]*)\]$")
@@ -157,6 +160,15 @@ class _Builder:
             return
         self.fields[name] = {"status": status, "reason": _text(reason) or ""}
 
+    def registration(self, mode: Any, status: Any, reason: Any) -> None:
+        mode, status = _text(mode), _text(status)
+        if mode is None and status is None:
+            return
+        if mode not in REGISTRATION_MODES or status not in REGISTRATION_STATUSES:
+            self.unresolved["mzb_registration"] = f"unknown registration: {mode!r}/{status!r}"
+            return
+        self.fields["mzb_registration"] = {"mode": mode, "status": status, "reason": _text(reason) or ""}
+
     def subject_type(self, value: Any) -> None:
         text = _text(value)
         if text is None:
@@ -203,7 +215,8 @@ def from_h5_attributes(attrs: Mapping[str, Any], subject_ids: Sequence[str] = ()
         out.text(name, attrs.get(name))
     out.text("cross_id", attrs.get("cross_id"), attrs.get("source_cross_id"))
     out.text("dish_id", attrs.get("dish_id"), attrs.get("source_dish_id"))
-    for name in ("subject_count", "dish_revision", "mzb_fish_revision"):
+    for name in ("subject_count", "dish_revision", "mzb_fish_revision",
+                 "mzb_dish_listed_fish_count_at_start"):
         out.integer(name, attrs.get(name))
     out.integer("source_dish_population_count",
                 attrs.get("source_dish_population_count"), attrs.get("fish_count"))
@@ -214,6 +227,10 @@ def from_h5_attributes(attrs: Mapping[str, Any], subject_ids: Sequence[str] = ()
             attrs.get("dpf_at_acquisition"), attrs.get("days_post_fertilization"))
     out.status("subject_lookup", attrs.get("subject_lookup_status"), attrs.get("subject_lookup_reason"))
     out.status("fish_reference", attrs.get("fish_reference_status"), attrs.get("fish_reference_reason"))
+    # v4: the registration record replaces fish_reference; the label is display only.
+    out.registration(attrs.get("mzb_registration_mode"), attrs.get("mzb_registration_status"),
+                     attrs.get("mzb_registration_reason"))
+    out.text("mzb_fish_subject_label", attrs.get("mzb_fish_subject_label"))
     return out.finish(subject_ids)
 
 
@@ -316,6 +333,8 @@ def canonical_subject_fields(metadata: Mapping[str, Any], subject_ids: Sequence[
 
 __all__ = [
     "LOOKUP_STATUSES",
+    "REGISTRATION_MODES",
+    "REGISTRATION_STATUSES",
     "SUBJECT_TYPES",
     "TRANSLATORS",
     "canonical_subject_fields",

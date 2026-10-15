@@ -155,7 +155,7 @@ def test_never_emitted_contract_v2_is_refused_not_downgraded():
         admit_subject_snapshot(contract_v2, ATTRS)
 
 
-@pytest.mark.parametrize("version", [1, 4, "3", None])
+@pytest.mark.parametrize("version", [1, 5, "3", "4", None])
 def test_other_versions_are_refused(version):
     with pytest.raises(UnifiedH5ContractError, match="schema_version_unsupported"):
         admit_subject_snapshot({**V3, "schema_version": version}, ATTRS)
