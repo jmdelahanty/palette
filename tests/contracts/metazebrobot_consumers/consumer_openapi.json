@@ -1158,6 +1158,17 @@
             "title": "Arena Id",
             "type": "string"
           },
+          "delivered_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivered By"
+          },
           "dish_id": {
             "title": "Dish Id",
             "type": "string"
@@ -2152,7 +2163,7 @@
         "summary": "List Usage Links"
       },
       "post": {
-        "description": "Record that an arena recording used a dish (and fish), at Start.\n\nIdempotent on ``recording_ref``: an identical replay is 200, a\ndifferent body 409. An existing ref is answered before any dish or\nfish check. No server-filled fields in the request.",
+        "description": "Record that an arena recording used a dish (and fish), at Start.\n\nIdempotent on ``recording_ref``: an identical replay is 200, a\ndifferent body 409. An existing ref is answered before any dish or\nfish check. No server-filled fields in the request. An optional\n``X-Delivered-By`` header (e.g. ``citrus``, ``palette``) is recorded on\nfirst creation as ``delivered_by`` and isn't compared on replays.",
         "operationId": "create_usage_link_usage_links_post",
         "requestBody": {
           "content": {

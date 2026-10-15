@@ -67,18 +67,21 @@ SCHEMA_FILES = {
 # docs/zebrobot_snapshot.md; Palette's reliance: agent-contracts PR 54.
 MZB_PIN = {
     "repo": "jmdelahanty/metazebrobot",
-    "commit": "c93b2530030bd80e65a008299a26442b1f5fb3ce",
-    "consumer_openapi_sha256": "a8cb88841430739f16958777062e1c6ed1e01c98583e6a2b0bc14e9864752d03",
-    # agent-contracts metazebrobot-consumers/consumers.json (#113 fish endings; main 5d9b1727).
-    "consumers_json_sha256": "511a0aae1c931c50329ccb894cce604c94118115699d8424f2ef6ee5334d7d02",
+    "commit": "b2f4b20751fd4206ce5cc85fe996444a95043fe9",
+    "consumer_openapi_sha256": "d80e79a68c65a04c5ec3b519648b9cf82985bde987abdce378e7a7d07e92710f",
+    # agent-contracts metazebrobot-consumers/consumers.json (main ae52c9bd).
+    "consumers_json_sha256": "6d2baa4f8776eba8f9c65a0d72c2b986f316c2334e249949687e3963390c7e05",
 }
 # Consumer slices a recording's serving build may report and still match: the
-# pin, plus earlier slices the pin only adds to. None qualify at c93b2530:
-# GET /dishes/{dish_id}/fish, which Palette relies on, changed meaning twice
-# since 509a3eb8 ("registered to the dish" -> "in the dish now" at ed39b042,
-# then ended fish hidden at c93b2530), so a list sealed by an earlier build
-# means something else. Add a slice here only when the pin strictly extends it.
-COMPATIBLE_CONSUMER_OPENAPI_SHA256 = frozenset({MZB_PIN["consumer_openapi_sha256"]})
+# pin, plus earlier slices the pin only adds to for everything Palette relies
+# on. c93b2530 qualifies (b2f4b20 adds only X-Delivered-By on usage links,
+# which Palette does not read); slices before it do not, because
+# GET /dishes/{dish_id}/fish changed meaning twice after 509a3eb8 (see
+# tests/contracts/metazebrobot_consumers/README.md).
+COMPATIBLE_CONSUMER_OPENAPI_SHA256 = frozenset({
+    MZB_PIN["consumer_openapi_sha256"],
+    "a8cb88841430739f16958777062e1c6ed1e01c98583e6a2b0bc14e9864752d03",  # c93b2530
+})
 
 
 def consumer_schema_matches_pin(served: str | None) -> bool | None:

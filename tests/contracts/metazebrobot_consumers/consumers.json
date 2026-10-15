@@ -3,9 +3,9 @@
   "producer": {
     "name": "metazebrobot",
     "repo": "jmdelahanty/metazebrobot",
-    "commit": "c93b2530030bd80e65a008299a26442b1f5fb3ce",
+    "commit": "b2f4b20751fd4206ce5cc85fe996444a95043fe9",
     "consumer_openapi": "docs/api/consumer_openapi.json",
-    "consumer_openapi_sha256": "a8cb88841430739f16958777062e1c6ed1e01c98583e6a2b0bc14e9864752d03",
+    "consumer_openapi_sha256": "d80e79a68c65a04c5ec3b519648b9cf82985bde987abdce378e7a7d07e92710f",
     "meaning": "docs/zebrobot_snapshot.md",
     "api_schema_version": 2
   },
