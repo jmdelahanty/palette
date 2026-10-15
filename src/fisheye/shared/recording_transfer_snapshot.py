@@ -46,12 +46,18 @@ OBSERVATION_FINALIZATION_PATH = f"{OBSERVATION_BINDING_DIR}/finalized_collection
 # It changes nothing on disk, so a v3 head seals exactly like a v2 head
 # (snapshot v3, marker v4); the sealer checks subject_reference structurally
 # and leaves its semantics to Citrus (writer) and Orange/Palette (readers).
-SNAPSHOT_VERSION_CITRUS_ARTIFACTS = 3  # head receipts all v2 or all v3
+# Sealer 3.3.0: receipt v4 is v3 with contract.subject_reference
+# citrus.subject_reference v2 (subject identity v4; agent-contracts #105).
+# Receipt v3 pairs only with reference v1 and receipt v4 only with v2. A head
+# of v4 receipts seals like v2 and v3 heads (snapshot v3, marker v4); a
+# collection whose revisions mix v3 and v4 receipts is refused, and a v4 head's
+# earlier revisions must be v4 as well.
+SNAPSHOT_VERSION_CITRUS_ARTIFACTS = 3  # head receipts all v2, all v3 or all v4
 MARKER_SCHEMA_V4 = "citrus.transfer_completion_marker.v4"  # pairs with snapshot v3
 MARKER_VERSION_V4 = 4
 CITRUS_DIR = "citrus"
-RECEIPT_VERSIONS = (1, 2, 3)
-RECEIPT_VERSIONS_CITRUS_ARTIFACTS = (2, 3)
+RECEIPT_VERSIONS = (1, 2, 3, 4)
+RECEIPT_VERSIONS_CITRUS_ARTIFACTS = (2, 3, 4)
 RECEIPT_KEYS = {"schema_id", "schema_version", "canonicalization", "receipt_id",
                 "contract_sha256", "contract"}
 RECEIPT_V2_CONTRACT_KEYS = {
@@ -61,7 +67,11 @@ RECEIPT_V2_CONTRACT_KEYS = {
     "h5_artifact", "session_status", "runtime_geometry_contract_sha256",
     "protocol_semantic", "citrus_artifacts"}
 RECEIPT_V3_CONTRACT_KEYS = RECEIPT_V2_CONTRACT_KEYS | {"subject_reference"}
-RECEIPT_CONTRACT_KEYS = {2: RECEIPT_V2_CONTRACT_KEYS, 3: RECEIPT_V3_CONTRACT_KEYS}
+RECEIPT_V4_CONTRACT_KEYS = RECEIPT_V3_CONTRACT_KEYS
+RECEIPT_CONTRACT_KEYS = {2: RECEIPT_V2_CONTRACT_KEYS, 3: RECEIPT_V3_CONTRACT_KEYS,
+                         4: RECEIPT_V4_CONTRACT_KEYS}
+# citrus.subject_reference version each receipt version carries (strict pairing).
+SUBJECT_REFERENCE_VERSION = {3: 1, 4: 2}
 # citrus.subject_reference v1 (agent-contracts citrus-orange/; the receipt v3
 # schema that embeds it is pinned by digest in the tests): key sets only, the
 # schema's allOf conditionals are the readers' business.
@@ -445,7 +455,7 @@ def parent_contexts(manifest: dict, cameras: list[str]) -> dict:
     return contexts
 
 
-# Ported from citrus-recording-transfer 3.2.0 snapshot.py (00787e7c; 3.1.0 was
+# Ported from citrus-recording-transfer 3.3.0 snapshot.py (9f6816e7; 3.2.0 was 00787e7c, 3.1.0 was
 # 456d7fe) so Palette's independent rebuild applies the sealer's exact rules.
 def require_observation_binding_transfer_admission(
         root: Path, manifest: dict, refs: dict[str, dict], *,
@@ -597,8 +607,8 @@ def require_observation_binding_transfer_admission(
         require(set(receipt) == RECEIPT_KEYS and
                 set(contract) == RECEIPT_CONTRACT_KEYS[version],
                 f"receipt v{version} keys are not exact")
-        if version == 3:
-            check_subject_reference(contract["subject_reference"])
+        if version in SUBJECT_REFERENCE_VERSION:
+            check_subject_reference(contract["subject_reference"], receipt_version=version)
         session_uuid = contract.get("citrus_session_uuid")
         require(isinstance(session_uuid, str) and
                 re.fullmatch(r"citsess_[0-9a-f]{64}", session_uuid) is not None and
@@ -615,6 +625,18 @@ def require_observation_binding_transfer_admission(
 
     require(len(versions) == 1, "the head collection mixes receipt versions")
     receipt_version = versions.pop()
+    # 3.3.0, for v3 and v4 heads only (v1 and v2 heads behave exactly as in
+    # 3.2.0 and read no superseded receipt): no revision may carry v3 receipts
+    # while another carries v4, and a v4 head's earlier revisions must be v4
+    # too (the contract defines no upgrade to v4; Orange's
+    # citrus_receipt_v2_upgrade produces v2 only).
+    if receipt_version in SUBJECT_REFERENCE_VERSION:
+        earlier = earlier_revision_receipt_versions(root, refs, chain)
+        require(not {3, 4} <= ({receipt_version} | earlier),
+                "the collection revision chain mixes receipt v3 and v4")
+        require(receipt_version != 4 or earlier <= {4},
+                "a receipt v4 head has an earlier revision with another receipt version "
+                "(the contract defines no upgrade to v4)")
     paths = [row["path"] for row in declared]
     require(len(paths) == len(set(paths)) and not set(paths) & seen_h5,
             "Citrus artifact declared twice in the collection")
@@ -637,18 +659,47 @@ def require_observation_binding_transfer_admission(
             "revisions": [refs[path] for _, path, _ in chain]}
 
 
-def check_subject_reference(reference) -> None:
-    """Structural check of receipt v3 contract.subject_reference (key sets and
-    the two consts). Its semantics (status/reason pairing, subject_type vs
-    count) are the writer's and the readers' contract, not transfer integrity."""
+def check_subject_reference(reference, *, receipt_version: int = 3) -> None:
+    """Structural check of contract.subject_reference (key sets and the two
+    consts): receipt v3 carries citrus.subject_reference v1, receipt v4 carries
+    v2 (same key sets). Its semantics (status/reason pairing, subject_type vs
+    count, a null subject_id for a dish group) are the writer's and the
+    readers' contract, not transfer integrity."""
+    expected = SUBJECT_REFERENCE_VERSION[receipt_version]
     require(type(reference) is dict and set(reference) == SUBJECT_REFERENCE_KEYS and
             reference["schema_id"] == SUBJECT_REFERENCE_SCHEMA and
-            type(reference["schema_version"]) is int and reference["schema_version"] == 1,
-            "receipt v3 subject_reference is not citrus.subject_reference v1")
+            type(reference["schema_version"]) is int and reference["schema_version"] == expected,
+            f"receipt v{receipt_version} subject_reference is not citrus.subject_reference v{expected}")
     for key, keys in SUBJECT_REFERENCE_OBJECT_KEYS.items():
         value = reference[key]
         require(value is None or (type(value) is dict and set(value) == keys),
-                f"receipt v3 subject_reference.{key} keys are not exact")
+                f"receipt v{receipt_version} subject_reference.{key} keys are not exact")
+
+
+def earlier_revision_receipt_versions(root: Path, refs: dict[str, dict],
+                                      chain: list[tuple[int, str, dict]]) -> set[int]:
+    """Receipt schema_versions of every revision before the head, for the
+    3.3.0 v3/v4 mixing rule. Receipts absent from the inventory are skipped:
+    the chain rules (3.1.0) do not require superseded receipts to be delivered."""
+    found: set[int] = set()
+    for _, _, collection in chain[:-1]:
+        for context in collection.get("observation_contexts") or []:
+            receipt_ref = context.get("finalized_receipt") if isinstance(context, dict) else None
+            if not isinstance(receipt_ref, dict):
+                continue
+            relative = normalized_path(receipt_ref.get("relative_path"))
+            if relative not in refs:
+                continue
+            try:
+                receipt = strict_json(root / relative)
+            except TransferSnapshotError:
+                raise
+            except (ValueError, OSError):
+                require(False, f"superseded finalized receipt is not readable JSON: {relative}")
+            require(isinstance(receipt, dict) and type(receipt.get("schema_version")) is int,
+                    f"superseded finalized receipt has no integer schema_version: {relative}")
+            found.add(receipt["schema_version"])
+    return found
 
 
 def observation_binding_revision_chain(
