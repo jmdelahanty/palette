@@ -111,7 +111,7 @@ from .web_auth import (
     _utc_timestamp,
     _verify_signed_invite_token,
 )
-from .web_app import create_labeling_app
+from .web_app import create_labeling_app, install_same_origin_guard
 from .web_static import register_static_routes
 from .web_subject_mask_edit_operations import validated_edit_operations
 from .upgrade_mask_run_metrics import ensure_full_metrics_for_tasks, metric_upgrade_warnings
@@ -1154,6 +1154,7 @@ def _project_approved_keypoint_review_to_recording_step_status(
 
 def _make_handler(state: ServerState):
     flask_app = create_labeling_app(config={"LABELING_SERVER_STATE": state})
+    install_same_origin_guard(flask_app, enabled=bool(state.config.csrf_same_origin))
     register_admin_api_routes(flask_app, state)
     register_admin_page_routes(flask_app, state, _admin_page_response_payload)
     register_personal_api_routes(flask_app, state, _personal_api_response_payload)
