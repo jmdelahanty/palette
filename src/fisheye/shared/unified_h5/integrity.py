@@ -13,6 +13,7 @@ import h5py
 from fisheye.shared.recording_transfer_snapshot import (
     RECEIPT_VERSIONS,
     RECEIPT_VERSIONS_CITRUS_ARTIFACTS,
+    SUBJECT_REFERENCE_VERSION,
     TransferSnapshotError,
     check_subject_reference,
 )
@@ -111,7 +112,8 @@ def validate_external_receipt(h5, *, source_h5: Path, receipt: dict) -> dict:
     # Receipt v2 (Citrus sealer 3.1.0) adds only contract.citrus_artifacts. The
     # transfer admission validates those rows against the sealed inventory.
     # Receipt v3 (sealer 3.2.0) is v2 plus contract.subject_reference, checked
-    # structurally here exactly as the sealer checks it.
+    # structurally here exactly as the sealer checks it. Receipt v4 (sealer
+    # 3.3.0) has v3's keys and carries citrus.subject_reference v2.
     version = receipt["schema_version"]
     require(
         receipt["schema_id"] == expected
@@ -140,7 +142,7 @@ def validate_external_receipt(h5, *, source_h5: Path, receipt: dict) -> dict:
             "finalized_at_utc",
             "h5_artifact",
             *(("citrus_artifacts",) if version in RECEIPT_VERSIONS_CITRUS_ARTIFACTS else ()),
-            *(("subject_reference",) if version == 3 else ()),
+            *(("subject_reference",) if version in SUBJECT_REFERENCE_VERSION else ()),
         ),
         "external_receipt_contract",
     )
@@ -152,9 +154,9 @@ def validate_external_receipt(h5, *, source_h5: Path, receipt: dict) -> dict:
         and (version == 1 or isinstance(body["citrus_artifacts"], list)),
         "external_receipt_not_complete",
     )
-    if version == 3:
+    if version in SUBJECT_REFERENCE_VERSION:
         try:
-            check_subject_reference(body["subject_reference"])
+            check_subject_reference(body["subject_reference"], receipt_version=version)
         except TransferSnapshotError:
             require(False, "external_receipt_subject_reference")
     contract_digest = digest(canonical_json(body))
