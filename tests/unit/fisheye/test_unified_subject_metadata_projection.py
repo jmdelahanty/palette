@@ -151,16 +151,18 @@ def test_pre_contract_citrus_snapshot_is_recorded_not_paired(tmp_path: Path) -> 
 
 # Citrus 288f14d sealed full_bound_pair fixtures, subject identity v3
 # (agent-contracts PR 52 #6026862148): admitted and projected unmodified.
+# "pin": sealed by MetaZebrobot 509a3eb8, whose slice no longer matches the
+# pin (GET /dishes/{dish_id}/fish changed meaning since; recorded, not refused).
 V3_EXPECTED = {
     "v3_dish_collected": {"count": 1, "assigned": (1, "explicit"), "subject_type": "individual", "uuid": True,
                           "lookup": "collected", "fish": ("not_collected", "operator_did_not_select"),
-                          "pin": True},
+                          "pin": False},
     "v3_dish_group": {"count": 3, "assigned": (None, "count_only"), "subject_type": "dish_group", "uuid": True,
                       "lookup": "collected", "fish": ("not_collected", "dish_group_subject"),
-                      "pin": True},
+                      "pin": False},
     "v3_lookup_failed": {"count": 1, "assigned": (1, "explicit"), "subject_type": "individual", "uuid": False,
                          "lookup": "lookup_failed", "fish": ("lookup_failed", "dish_lookup_failed"),
-                         "pin": True},
+                         "pin": False},
     "v3_version_read_failed": {"count": 1, "assigned": (1, "explicit"), "subject_type": "individual", "uuid": True,
                                "lookup": "collected", "fish": ("not_collected", "operator_did_not_select"),
                                "pin": None},

@@ -3,9 +3,9 @@
   "producer": {
     "name": "metazebrobot",
     "repo": "jmdelahanty/metazebrobot",
-    "commit": "509a3eb88d6ff44fe07e7ea20d212be5eafe46b7",
+    "commit": "c93b2530030bd80e65a008299a26442b1f5fb3ce",
     "consumer_openapi": "docs/api/consumer_openapi.json",
-    "consumer_openapi_sha256": "f5280e430d4b5f10c3643cb89a6187eacc45fdac7af55b2e81f5e315b7b754dc",
+    "consumer_openapi_sha256": "a8cb88841430739f16958777062e1c6ed1e01c98583e6a2b0bc14e9864752d03",
     "meaning": "docs/zebrobot_snapshot.md",
     "api_schema_version": 2
   },
@@ -33,7 +33,7 @@
     },
     "citrus": {
       "status": "confirmed",
-      "source": "citrus agent/citrus/subject-identity-v2-20261005: src/api/dish_api_client.cpp, src/api/zebrobot_subject_reference.cpp",
+      "source": "citrus agent/citrus/subject-identity-v2-20261005: src/api/dish_api_client.cpp, src/api/zebrobot_subject_reference.cpp; POST /dishes/{dish_id}/fish and /usage-links: citrus-palette/subject_identity_v4_2026-10-14.md (Citrus implementation pending)",
       "relies_on": [
         {
           "operation": "GET /acquisition/dishes",
@@ -60,6 +60,21 @@
             "items[].revision", "items[].updated_at"
           ],
           "errors": ["404", "503"]
+        },
+        {
+          "operation": "POST /dishes/{dish_id}/fish",
+          "fields": ["fish_id", "dish_id", "subject_label", "current_unit_id", "revision", "updated_at"],
+          "errors": ["404", "409", "422"]
+        },
+        {
+          "operation": "POST /usage-links",
+          "fields": ["recording_ref", "ref_kind", "started_at", "ended_at", "end_status"],
+          "errors": ["404", "409", "422"]
+        },
+        {
+          "operation": "PATCH /usage-links/{recording_ref}",
+          "fields": ["recording_ref", "ended_at", "end_status"],
+          "errors": ["404", "409", "422"]
         },
         {
           "operation": "GET /version",

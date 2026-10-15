@@ -772,6 +772,174 @@
         "title": "FishListResponse",
         "type": "object"
       },
+      "FishRevisionListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FishRevisionResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "title": "FishRevisionListResponse",
+        "type": "object"
+      },
+      "FishRevisionResponse": {
+        "description": "A fish's content as of one revision (fish_subject_revisions).",
+        "properties": {
+          "current_unit_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Unit Id"
+          },
+          "dish_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dish Id"
+          },
+          "end_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Reason"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "fish_id": {
+            "title": "Fish Id",
+            "type": "string"
+          },
+          "genotype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Genotype"
+          },
+          "kind": {
+            "enum": [
+              "created",
+              "changed",
+              "backfilled"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "origin_dish_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Dish Id"
+          },
+          "recorded_at": {
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "sex": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sex"
+          },
+          "species": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Species"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "subject_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Label"
+          }
+        },
+        "required": [
+          "fish_id",
+          "revision",
+          "kind",
+          "recorded_at"
+        ],
+        "title": "FishRevisionResponse",
+        "type": "object"
+      },
       "FishSubjectResponse": {
         "properties": {
           "created_at": {
@@ -811,6 +979,49 @@
             ],
             "title": "Dish Uuid"
           },
+          "end_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "found_dead",
+                  "euthanized",
+                  "propagated",
+                  "other"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Reason"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "ended_precision": {
+            "anyOf": [
+              {
+                "enum": [
+                  "time",
+                  "day"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended Precision"
+          },
           "fish_id": {
             "title": "Fish Id",
             "type": "string"
@@ -837,16 +1048,24 @@
             ],
             "title": "Notes"
           },
-          "revision": {
+          "origin_dish_id": {
+            "title": "Origin Dish Id",
+            "type": "string"
+          },
+          "origin_dish_uuid": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Revision"
+            "title": "Origin Dish Uuid"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
           },
           "sex": {
             "anyOf": [
@@ -870,6 +1089,15 @@
             ],
             "title": "Species"
           },
+          "status": {
+            "enum": [
+              "alive",
+              "dead",
+              "propagated"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
           "subject_label": {
             "anyOf": [
               {
@@ -882,20 +1110,17 @@
             "title": "Subject Label"
           },
           "updated_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Updated At"
+            "title": "Updated At",
+            "type": "string"
           }
         },
         "required": [
           "fish_id",
-          "dish_id"
+          "dish_id",
+          "revision",
+          "updated_at",
+          "origin_dish_id",
+          "status"
         ],
         "title": "FishSubjectResponse",
         "type": "object"
@@ -911,6 +1136,154 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "UsageLinkListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/UsageLinkResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "title": "UsageLinkListResponse",
+        "type": "object"
+      },
+      "UsageLinkResponse": {
+        "description": "A recording's use of a dish (and fish); docs/fish_timeline_design.md.",
+        "properties": {
+          "arena_id": {
+            "title": "Arena Id",
+            "type": "string"
+          },
+          "dish_id": {
+            "title": "Dish Id",
+            "type": "string"
+          },
+          "end_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "completed",
+                  "aborted",
+                  "interrupted"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Status"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "fish_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fish Id"
+          },
+          "fish_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fish Revision"
+          },
+          "received_at": {
+            "title": "Received At",
+            "type": "string"
+          },
+          "recording_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recording Id"
+          },
+          "recording_ref": {
+            "title": "Recording Ref",
+            "type": "string"
+          },
+          "ref_kind": {
+            "enum": [
+              "observation_context",
+              "citrus_session"
+            ],
+            "title": "Ref Kind",
+            "type": "string"
+          },
+          "rig_id": {
+            "title": "Rig Id",
+            "type": "string"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "string"
+          },
+          "subject_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Count"
+          },
+          "unit_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Id"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "recording_ref",
+          "ref_kind",
+          "dish_id",
+          "rig_id",
+          "arena_id",
+          "started_at",
+          "received_at",
+          "updated_at"
+        ],
+        "title": "UsageLinkResponse",
         "type": "object"
       },
       "ValidationError": {
@@ -1308,7 +1681,7 @@
     },
     "/dishes/{dish_id}/fish": {
       "get": {
-        "description": "List all fish subjects registered to a dish.",
+        "description": "Fish in this dish now. Ended fish (dead, propagated) are hidden\nunless ``include_ended=true``.",
         "operationId": "list_fish_for_dish_dishes__dish_id__fish_get",
         "parameters": [
           {
@@ -1318,6 +1691,18 @@
             "schema": {
               "title": "Dish Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Also list fish whose record has ended (dead or propagated)",
+            "in": "query",
+            "name": "include_ended",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Also list fish whose record has ended (dead or propagated)",
+              "title": "Include Ended",
+              "type": "boolean"
             }
           }
         ],
@@ -1364,6 +1749,95 @@
           }
         },
         "summary": "List Fish For Dish"
+      },
+      "post": {
+        "description": "Register a fish on a dish; idempotent on a client-supplied ``fish_id``.\n\nSubject identity v4 (agent-contracts citrus-palette): a client may\nmint the ``fish_id`` (lowercase canonical UUID v4). An existing\n``fish_id`` is answered 200 (same creation values; current record) or\n409 ``fish_id_conflict`` before any dish check, so an outbox replay\nsucceeds even after the dish is retired. For a new ``fish_id``: 404\n``dish_not_found``, 409 ``dish_inactive``, else 201. Sex, genotype and\nspecies default from the dish when not supplied.",
+        "operationId": "create_fish_for_dish_dishes__dish_id__fish_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dish_id",
+            "required": true,
+            "schema": {
+              "title": "Dish Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "default": {},
+                "title": "Body",
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FishSubjectResponse"
+                }
+              }
+            },
+            "description": "fish_id already exists with the same creation values; the current record"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FishSubjectResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "dish_not_found (only for a new fish_id)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "fish_id_conflict (existing fish_id, different creation values) or dish_inactive (only for a new fish_id)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_fish_id or invalid_subject_label; a malformed body gets FastAPI's validation shape instead"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "Create Fish For Dish"
       }
     },
     "/fish/{fish_id}": {
@@ -1424,6 +1898,484 @@
           }
         },
         "summary": "Get Fish"
+      }
+    },
+    "/fish/{fish_id}/end": {
+      "post": {
+        "description": "Record that a fish died (docs/fish_deaths_design.md).\n\nBody: ``reason`` (found_dead | euthanized | other), optional ``at``\n(RFC 3339 UTC, default now) and ``notes``. Frees its well and lowers\nits dish's count by one. 409 ``fish_already_ended`` if it already ended\ndifferently; an identical repeat is 200.",
+        "operationId": "end_fish_fish__fish_id__end_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "fish_id",
+            "required": true,
+            "schema": {
+              "title": "Fish Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "default": {},
+                "title": "Body",
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FishSubjectResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "fish_not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "fish_already_ended (a different ending)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_fish_end (with field)"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "End Fish"
+      }
+    },
+    "/fish/{fish_id}/revisions": {
+      "get": {
+        "description": "Every stored revision of a fish, oldest first.\n\n``kind`` is ``created`` for revision 1, ``changed`` for later edits,\nand ``backfilled`` for the state an existing fish had when history\nbegan (its earlier revisions are unknown). History outlives a deleted\nfish.",
+        "operationId": "get_fish_revisions_fish__fish_id__revisions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "fish_id",
+            "required": true,
+            "schema": {
+              "title": "Fish Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FishRevisionListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found (dish_not_found / fish_not_found)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "Get Fish Revisions"
+      }
+    },
+    "/usage-links": {
+      "get": {
+        "description": "Links by fish, by dish (including dish-level rows), or open at an instant.",
+        "operationId": "list_usage_links_usage_links_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "fish_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fish Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "dish_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dish Id"
+            }
+          },
+          {
+            "description": "RFC 3339 UTC instant; links open then",
+            "in": "query",
+            "name": "active_at",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "RFC 3339 UTC instant; links open then",
+              "title": "Active At"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageLinkListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "dish_not_found / fish_not_found (new link) or usage_link_not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "usage_link_conflict (different creation body) or usage_link_end_conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_usage_link (with field)"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "List Usage Links"
+      },
+      "post": {
+        "description": "Record that an arena recording used a dish (and fish), at Start.\n\nIdempotent on ``recording_ref``: an identical replay is 200, a\ndifferent body 409. An existing ref is answered before any dish or\nfish check. No server-filled fields in the request.",
+        "operationId": "create_usage_link_usage_links_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "default": {},
+                "title": "Body",
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageLinkResponse"
+                }
+              }
+            },
+            "description": "Identical replay; the current link"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageLinkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "dish_not_found / fish_not_found (new link) or usage_link_not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "usage_link_conflict (different creation body) or usage_link_end_conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_usage_link (with field)"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "Create Usage Link"
+      }
+    },
+    "/usage-links/{recording_ref}": {
+      "get": {
+        "operationId": "get_usage_link_usage_links__recording_ref__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "recording_ref",
+            "required": true,
+            "schema": {
+              "title": "Recording Ref",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageLinkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "dish_not_found / fish_not_found (new link) or usage_link_not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "usage_link_conflict (different creation body) or usage_link_end_conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_usage_link (with field)"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "Get Usage Link"
+      },
+      "patch": {
+        "description": "Record a link's end (``ended_at``, ``end_status``), at Stop.\n\nClients percent-encode ``recording_ref``. An identical replay is 200;\na different end once one is recorded is 409; no link is 404.",
+        "operationId": "end_usage_link_usage_links__recording_ref__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "recording_ref",
+            "required": true,
+            "schema": {
+              "title": "Recording Ref",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "default": {},
+                "title": "Body",
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageLinkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "dish_not_found / fish_not_found (new link) or usage_link_not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "usage_link_conflict (different creation body) or usage_link_end_conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_usage_link (with field)"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "End Usage Link"
       }
     },
     "/version": {
