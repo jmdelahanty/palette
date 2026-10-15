@@ -1,6 +1,6 @@
 """Citrus subject identity v3, 2026-10-14 amendment: the Citrus-written witnesses.
 
-agent-contracts PR 110 head 3b3f214 ``citrus-palette/fixtures/subject_v3/``,
+agent-contracts PR 110 head 3b3f214 (merged f918d312) ``citrus-palette/fixtures/subject_v3/``,
 generated at Citrus PR 43 ``533ce76`` by the production DishAPI code from canned
 MetaZebrobot responses; vendored verbatim with their outer finalization receipts.
 The complete files go through the full path (receipt-gated admission, native

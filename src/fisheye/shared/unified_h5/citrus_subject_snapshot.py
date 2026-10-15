@@ -36,7 +36,7 @@ SNAPSHOT_PATH = "/metadata/zebrobot/snapshot_json"
 PRE_CONTRACT_VERSION = 2
 CONTRACT_VERSION = 3
 SCHEMA_FILE = "citrus_zebrobot_snapshot_v3.schema.json"
-# agent-contracts PR 52 at e16f6251, amended 2026-10-14 by PR 110 head 3b3f214
+# agent-contracts PR 52 at e16f6251, amended 2026-10-14 by PR 110 head 3b3f214 (merged f918d312)
 # (Citrus PR 43 533ce76; contract md sha256 6c23e38d...): three not_collected
 # fish reasons, which require the optional fish_reference.mzb_fish_unit_id, and
 # fish_list_unavailable's failed request in errors[]; schema_version 3.
