@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .appearance import validate_appearance_witness
+from .citrus_subject_snapshot import SNAPSHOT_PATH as SUBJECT_SNAPSHOT_PATH
+from .citrus_subject_snapshot import check_receipt_subject_reference
 from .common import PROFILE, canonical_json, digest, require
 from .correspondence import (
     BINDING,
@@ -153,6 +155,10 @@ def validate_artifact(
         h5, binding, camera_serial=correspondence.camera_serial, outcomes=outcomes
     )
     validate_recording_identity(h5, finalization_receipt, geometry, snapshot)
+    check_receipt_subject_reference(
+        read_json(h5, SUBJECT_SNAPSHOT_PATH) if SUBJECT_SNAPSHOT_PATH in h5 else None,
+        finalization_receipt,
+    )
     authored = read_json(h5, "/protocol/authored/protocol_trial_index_json")
     declared = any(
         chaser.get("appearance") is not None

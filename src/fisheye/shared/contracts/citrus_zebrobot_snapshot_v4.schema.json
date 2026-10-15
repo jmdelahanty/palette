@@ -1,0 +1,1240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jmdelahanty/agent-contracts/citrus-palette/citrus_zebrobot_snapshot_v4.schema.json",
+  "title": "Citrus MetaZebrobot snapshot v4 (H5 /metadata/zebrobot)",
+  "description": "Citrus's own snapshot version 4; distinct from the MetaZebrobot API schema_version, recorded as api_schema_version. v3 with subject_id = MetaZebrobot fish UUID for an individual, a registration record for picked and Citrus-minted fish, dish_group without a subject_id, optional members, and errors[] naming the HTTP method. See subject_identity_v4_2026-10-14.md. Cross-field rules a JSON Schema cannot express are listed there and checked by test_citrus_zebrobot_snapshot_v4.py.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "api_schema_version",
+    "queried_at_utc",
+    "dish_id",
+    "subject_lookup_status",
+    "subject_lookup_reason",
+    "dish",
+    "cross",
+    "fish_reference",
+    "errors",
+    "zebrobot_service",
+    "subject",
+    "members",
+    "usage_link_request"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 4
+    },
+    "api_schema_version": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "queried_at_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "dish_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "subject_lookup_status": {
+      "$ref": "#/$defs/status"
+    },
+    "subject_lookup_reason": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "no_dish_declared",
+            "zebrobot_not_configured",
+            "dish_lookup_transport_failure",
+            "dish_lookup_invalid_body",
+            "dish_lookup_api_schema_mismatch",
+            "dish_lookup_identity_mismatch"
+          ]
+        },
+        {
+          "type": "string",
+          "pattern": "^dish_lookup_http_[0-9]{3}$"
+        },
+        {
+          "type": "string",
+          "pattern": "^dish_lookup_missing_[a-z_]+$"
+        }
+      ]
+    },
+    "dish": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/dish"
+        }
+      ]
+    },
+    "cross": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/cross"
+        }
+      ]
+    },
+    "fish_reference": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/fish_reference"
+        }
+      ]
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/error"
+      }
+    },
+    "zebrobot_service": {
+      "$ref": "#/$defs/zebrobot_service"
+    },
+    "subject": {
+      "$ref": "#/$defs/subject"
+    },
+    "members": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/members"
+        }
+      ]
+    },
+    "usage_link_request": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/usage_link_request"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "subject_lookup_status": {
+            "const": "collected"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "dish_id": {
+            "type": "string"
+          },
+          "api_schema_version": {
+            "const": 2
+          },
+          "subject_lookup_reason": {
+            "type": "null"
+          },
+          "dish": {
+            "$ref": "#/$defs/dish"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "subject_lookup_reason": {
+            "type": "string"
+          },
+          "dish": {
+            "type": "null"
+          },
+          "cross": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "subject_lookup_status": {
+            "const": "not_collected"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "dish_id": {
+            "type": "null"
+          },
+          "subject_lookup_reason": {
+            "const": "no_dish_declared"
+          },
+          "fish_reference": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "subject_lookup_status": {
+            "const": "lookup_failed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "dish_id": {
+            "type": "string"
+          },
+          "errors": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dish_id": {
+            "type": "null"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "subject": {
+            "properties": {
+              "subject_type": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "subject": {
+            "properties": {
+              "subject_type": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "subject": {
+            "properties": {
+              "subject_type": {
+                "const": "individual"
+              }
+            },
+            "required": [
+              "subject_type"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fish_reference": {
+            "$ref": "#/$defs/fish_reference"
+          },
+          "members": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "subject": {
+            "properties": {
+              "subject_type": {
+                "const": "dish_group"
+              }
+            },
+            "required": [
+              "subject_type"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fish_reference": {
+            "type": "null"
+          },
+          "members": {
+            "$ref": "#/$defs/members"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "subject": {
+            "properties": {
+              "subject_type": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "subject_type"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fish_reference": {
+            "type": "null"
+          },
+          "members": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dish_id": {
+            "type": "null"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "usage_link_request": {
+            "type": "null"
+          }
+        }
+      },
+      "description": "No dish declared: no usage link."
+    }
+  ],
+  "$defs": {
+    "status": {
+      "enum": [
+        "collected",
+        "not_collected",
+        "lookup_failed"
+      ]
+    },
+    "dish": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dish_id",
+        "dish_uuid",
+        "dish_revision",
+        "dish_updated_at",
+        "cross_id",
+        "genotype",
+        "dof",
+        "fish_count",
+        "species",
+        "sex"
+      ],
+      "properties": {
+        "dish_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dish_uuid": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dish_revision": {
+          "type": "integer"
+        },
+        "dish_updated_at": {
+          "type": "string",
+          "description": "Verbatim copy of the served updated_at; never reformatted. Format is owned by MetaZebrobot (docs/api/consumer_openapi.json)."
+        },
+        "cross_id": {
+          "type": "string"
+        },
+        "genotype": {
+          "type": "string"
+        },
+        "dof": {
+          "type": "string"
+        },
+        "dpf": {
+          "type": "integer"
+        },
+        "fish_count": {
+          "type": "integer",
+          "description": "Copied as served; never used to derive subject_count or a fish reference."
+        },
+        "species": {
+          "type": "string"
+        },
+        "sex": {
+          "type": "string"
+        }
+      }
+    },
+    "cross": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cross_id",
+        "line_strain",
+        "parents"
+      ],
+      "properties": {
+        "cross_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line_strain": {
+          "type": "string"
+        },
+        "parents": {
+          "type": "array"
+        }
+      }
+    },
+    "fish_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mzb_fish_id",
+        "mzb_fish_revision",
+        "mzb_fish_updated_at",
+        "mzb_fish_subject_label",
+        "mzb_fish_unit_id",
+        "mzb_dish_listed_fish_count_at_start",
+        "mzb_registration_mode",
+        "mzb_registration_status",
+        "mzb_registration_reason",
+        "mint",
+        "registration_request"
+      ],
+      "description": "Individual subjects only. Sealed at experiment start and never rewritten: a queued registration that later succeeds or fails is resolved by the reader against MetaZebrobot, not by editing the recording.",
+      "properties": {
+        "mzb_fish_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "mzb_fish_revision": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
+          ]
+        },
+        "mzb_fish_updated_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Verbatim copy of the served updated_at; never reformatted."
+        },
+        "mzb_fish_subject_label": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+            }
+          ],
+          "description": "Display label copied as served with the fish record (e.g. Z1); never an identifier. Null unless registered, and null when MetaZebrobot served none."
+        },
+        "mzb_fish_unit_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "MetaZebrobot current_unit_id copied as served with the fish record at start (fish list item for existing, create response for a minted fish): MZB's housing record at the sealed fish revision, not proof of where the fish was during the recording. Null unless registered, and null when MetaZebrobot served none. Never inferred."
+        },
+        "mzb_dish_listed_fish_count_at_start": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 0
+            }
+          ],
+          "description": "Minted fish only: how many fish GET /dishes/{dish_id}/fish listed for the declared dish at Start (living fish in the dish now). Citrus blocks a new fish on a dish that lists fish unless the operator ticks \"New fish anyway\" in the GUI (a socket start cannot), so a value > 0 is the evidence of that override. Null for an existing fish, and null when the dish or its fish list could not be read; never inferred (Jeremy, 2026-10-15)."
+        },
+        "mzb_registration_mode": {
+          "enum": [
+            "existing",
+            "created_at_start",
+            "outbox"
+          ]
+        },
+        "mzb_registration_status": {
+          "enum": [
+            "registered",
+            "unverified",
+            "queued",
+            "failed"
+          ]
+        },
+        "mzb_registration_reason": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "dish_lookup_failed",
+                "fish_lookup_transport_failure",
+                "fish_lookup_invalid_body",
+                "fish_lookup_selected_fish_missing",
+                "create_fish_id_conflict",
+                "create_dish_inactive",
+                "create_dish_not_found",
+                "create_invalid_fish_id",
+                "create_invalid_subject_label",
+                "create_transport_failure",
+                "create_invalid_body"
+              ]
+            },
+            {
+              "type": "string",
+              "pattern": "^fish_lookup_http_[0-9]{3}$"
+            },
+            {
+              "type": "string",
+              "pattern": "^create_http_[45][0-9]{2}$"
+            }
+          ]
+        },
+        "mint": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/mint"
+            }
+          ]
+        },
+        "registration_request": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/registration_request"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mzb_registration_status": {
+                "const": "registered"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mzb_registration_reason": {
+                "type": "null"
+              },
+              "mzb_fish_revision": {
+                "type": "integer"
+              },
+              "mzb_fish_updated_at": {
+                "type": "string"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "mzb_registration_reason": {
+                "type": "string"
+              },
+              "mzb_fish_revision": {
+                "type": "null"
+              },
+              "mzb_fish_updated_at": {
+                "type": "null"
+              },
+              "mzb_fish_subject_label": {
+                "type": "null"
+              },
+              "mzb_fish_unit_id": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mzb_registration_mode": {
+                "const": "existing"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mzb_registration_status": {
+                "enum": [
+                  "registered",
+                  "unverified"
+                ]
+              },
+              "mzb_registration_reason": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "enum": [
+                      "dish_lookup_failed",
+                      "fish_lookup_transport_failure",
+                      "fish_lookup_invalid_body",
+                      "fish_lookup_selected_fish_missing"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^fish_lookup_http_[0-9]{3}$"
+                  }
+                ]
+              },
+              "mint": {
+                "type": "null"
+              },
+              "registration_request": {
+                "type": "null"
+              },
+              "mzb_dish_listed_fish_count_at_start": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "mzb_fish_id": {
+                "$ref": "#/$defs/uuid4"
+              },
+              "mint": {
+                "$ref": "#/$defs/mint"
+              },
+              "registration_request": {
+                "$ref": "#/$defs/registration_request"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mzb_registration_mode": {
+                "const": "created_at_start"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mzb_registration_status": {
+                "enum": [
+                  "registered",
+                  "failed"
+                ]
+              },
+              "mzb_registration_reason": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "enum": [
+                      "create_fish_id_conflict",
+                      "create_dish_inactive",
+                      "create_dish_not_found",
+                      "create_invalid_fish_id",
+                      "create_invalid_subject_label"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^create_http_4[0-9]{2}$"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mzb_registration_mode": {
+                "const": "outbox"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mzb_registration_status": {
+                "const": "queued"
+              },
+              "mzb_registration_reason": {
+                "oneOf": [
+                  {
+                    "enum": [
+                      "create_transport_failure",
+                      "create_invalid_body"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^create_http_5[0-9]{2}$"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "endpoint",
+        "method",
+        "kind",
+        "http_status",
+        "detail_error",
+        "message"
+      ],
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "description": "Request path, e.g. /version, /dishes/{dish_id}/citrus-snapshot or /dishes/{dish_id}/fish. GET and POST share /dishes/{dish_id}/fish, so method is required."
+        },
+        "method": {
+          "enum": [
+            "GET",
+            "POST"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "transport",
+            "http",
+            "body"
+          ]
+        },
+        "http_status": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "detail_error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "MetaZebrobot detail.error when served; values are owned by MetaZebrobot (docs/api/consumer_openapi.json)."
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "transport"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "http_status": {
+                "type": "null"
+              },
+              "detail_error": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "http",
+                  "body"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "http_status": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "zebrobot_service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "service_commit",
+        "service_commit_dirty",
+        "consumer_schema_sha256"
+      ],
+      "description": "Copied as served from MetaZebrobot GET /version, read once per arena session at experiment start; all null when the read failed (errors[] then carries an entry for endpoint /version).",
+      "properties": {
+        "service_commit": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{7,40}$"
+            }
+          ]
+        },
+        "service_commit_dirty": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "consumer_schema_sha256": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subject_id",
+        "subject_type",
+        "subject_count"
+      ],
+      "description": "Subject identity, equal to the /metadata/subject attrs of the same names. The arena context (amendment D) is the file's digest-covered recording_association claims, not a field here. individual: subject_id is the MetaZebrobot fish UUID and equals fish_reference.mzb_fish_id. dish_group: subject_id is null. No dish declared: subject_id, subject_type and subject_count are null.",
+      "properties": {
+        "subject_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/uuid"
+            }
+          ]
+        },
+        "subject_type": {
+          "enum": [
+            "individual",
+            "dish_group",
+            null
+          ]
+        },
+        "subject_count": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "subject_type": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "subject_id": {
+                "type": "null"
+              },
+              "subject_count": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "subject_count": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "subject_type": {
+                "const": "individual"
+              }
+            },
+            "required": [
+              "subject_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "subject_id": {
+                "$ref": "#/$defs/uuid"
+              },
+              "subject_count": {
+                "const": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "subject_type": {
+                "const": "dish_group"
+              }
+            },
+            "required": [
+              "subject_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "subject_id": {
+                "type": "null"
+              },
+              "subject_count": {
+                "type": "integer",
+                "minimum": 2
+              }
+            }
+          }
+        }
+      ]
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "Lowercase canonical UUID (any version): MetaZebrobot fish ids as served."
+    },
+    "uuid4": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "Lowercase canonical UUID version 4: the only form Citrus mints and MetaZebrobot accepts as a client fish_id."
+    },
+    "mint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "minted_at_utc"
+      ],
+      "description": "How and when Citrus minted mzb_fish_id (created_at_start and outbox only).",
+      "properties": {
+        "method": {
+          "const": "os_csprng_uuid4",
+          "description": "122 random bits from the operating system CSPRNG, formatted as a lowercase UUID v4."
+        },
+        "minted_at_utc": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$",
+          "description": "Citrus clock, when the operator chose a new fish for the arena."
+        }
+      }
+    },
+    "registration_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "path",
+        "body"
+      ],
+      "description": "The exact create request Citrus sent at start, and that an outbox replay sends unchanged (amendment F). path is /dishes/{dish_id}/fish for the declared dish_id; body.fish_id equals mzb_fish_id.",
+      "properties": {
+        "method": {
+          "const": "POST"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/dishes/[^/]+/fish$"
+        },
+        "body": {
+          "type": "object",
+          "required": [
+            "fish_id",
+            "subject_label"
+          ],
+          "properties": {
+            "fish_id": {
+              "$ref": "#/$defs/uuid4"
+            },
+            "subject_label": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "description": "Field names follow MetaZebrobot's create-fish request at the pin this contract records once that endpoint ships; the schema closes on those two fields until then."
+        }
+      }
+    },
+    "members": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "dish_group only. Fish known to be in the arena because each was placed from a registered unit. Never a track-to-fish mapping. Citrus emits [] until members have a GUI.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "mzb_fish_id",
+          "mzb_fish_revision",
+          "provenance"
+        ],
+        "properties": {
+          "mzb_fish_id": {
+            "$ref": "#/$defs/uuid"
+          },
+          "mzb_fish_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "provenance": {
+            "enum": [
+              "placed_from_registered_units"
+            ]
+          }
+        }
+      }
+    },
+    "usage_link_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "path",
+        "body"
+      ],
+      "description": "The exact MetaZebrobot POST /usage-links request Citrus sends at Start (or would send: the outbox may still hold it). Palette may replay it at intake; MetaZebrobot compares values, so replays from either side are idempotent. Null when no dish is declared or when recording_ref fails MetaZebrobot's pattern (the link is then never sent).",
+      "properties": {
+        "method": {
+          "const": "POST"
+        },
+        "path": {
+          "const": "/usage-links"
+        },
+        "body": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "recording_ref",
+            "ref_kind",
+            "recording_id",
+            "dish_id",
+            "fish_id",
+            "fish_revision",
+            "unit_id",
+            "subject_count",
+            "rig_id",
+            "arena_id",
+            "started_at"
+          ],
+          "properties": {
+            "recording_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "ref_kind": {
+              "enum": [
+                "observation_context",
+                "citrus_session"
+              ]
+            },
+            "recording_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "minLength": 1
+                }
+              ]
+            },
+            "dish_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "fish_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/uuid"
+                }
+              ]
+            },
+            "fish_revision": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              ]
+            },
+            "unit_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subject_count": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "rig_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "arena_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "started_at": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "Z$"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "ref_kind": {
+                    "const": "observation_context"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "recording_ref": {
+                    "pattern": "^obsctx_[0-9a-f]{64}$"
+                  },
+                  "recording_id": {
+                    "type": "string"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "recording_ref": {
+                    "pattern": "^[\\x20-\\x2e\\x30-\\x7e]{1,160}$"
+                  },
+                  "recording_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "fish_id": {
+                    "type": "null"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "fish_revision": {
+                    "type": "null"
+                  },
+                  "unit_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

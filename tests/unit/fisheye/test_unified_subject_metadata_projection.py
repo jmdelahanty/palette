@@ -396,3 +396,111 @@ def test_retried_unified_intake_projects_the_subject_once(
 
     mod.process_recording_import(plan, opts, logger=None)
     assert _state() == first
+
+
+# Citrus subject identity v4 (agent-contracts PR 103): no sealed v4 H5 exists
+# yet, so the contract's snapshot fixtures are served through a stand-in for
+# the sealed reference; admission and publication run unpatched.
+from tests.unit.fisheye.test_citrus_subject_snapshot_v4 import FIXTURES as V4_FIXTURES  # noqa: E402
+from tests.unit.fisheye.test_citrus_subject_snapshot_v4 import project_attrs  # noqa: E402
+
+
+class _V4Reader:
+    """Serves a contract snapshot plus the file's own recording refs."""
+
+    reference_sha256 = "0" * 64
+
+    def __init__(self, snapshot: dict, session: dict, claims: dict | None) -> None:
+        self.snapshot, self.session, self.claims = snapshot, session, claims
+
+    def typed_attributes(self, path: str) -> dict:
+        return self.session if path == "/metadata/session" else {}
+
+    def read_json(self, path: str) -> dict:
+        if path == mod.CITRUS_SNAPSHOT_PATH:
+            return self.snapshot
+        assert path == "/metadata/recording_association/claims_json"
+        if self.claims is None:
+            raise UnifiedH5ContractError(f"unified_dataset_not_admitted:{path}")
+        return self.claims
+
+
+def _session_descriptors(tmp_path: Path, session_uuid: str) -> dict:
+    from fisheye.shared.unified_h5.metadata import native_attributes
+
+    path = tmp_path / "session_attrs.h5"
+    with h5py.File(path, "w") as h5:
+        h5.create_group("session").attrs["session_uuid"] = session_uuid
+    with h5py.File(path, "r") as h5:
+        return native_attributes(h5["session"])
+
+
+def _project_v4(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fixture: str,
+                *, recording_ref: str | None = None):
+    snapshot = json.loads((V4_FIXTURES / "accepted" / f"{fixture}.json").read_text())
+    link = snapshot["usage_link_request"]
+    body = link["body"] if link else {"ref_kind": "citrus_session", "recording_ref": "citrus-session"}
+    ref = body["recording_ref"] if recording_ref is None else recording_ref
+    bound = body["ref_kind"] == "observation_context"
+    session = _session_descriptors(tmp_path, "citrus-session" if bound else ref)
+    claims = {"observation_context_id": ref} if bound else None
+    zarr_path = tmp_path / "analysis.zarr"
+    zarr.open_group(str(zarr_path), mode="w")
+    zarr.consolidate_metadata(str(zarr_path))
+    monkeypatch.setattr(mod, "open_unified_source",
+                        lambda root, run_name: _V4Reader(snapshot, session, claims))
+    monkeypatch.setattr(mod, "subject_attributes", lambda descriptors: project_attrs(snapshot))
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=tmp_path, h5_path=tmp_path / "x.h5", cam_video=None, zarr_path=zarr_path
+    )
+    published = mod.project_unified_subject_metadata(plan, "candidate")
+    return snapshot, published, zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+
+
+@pytest.mark.parametrize(
+    "fixture", ["individual_existing_registered", "individual_existing_registered_unbound",
+                "individual_existing_unverified", "individual_outbox_queued",
+                "individual_created_at_start_refused"])
+def test_citrus_v4_individual_subject_is_the_mzb_fish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fixture: str
+) -> None:
+    snapshot, published, root = _project_v4(tmp_path, monkeypatch, fixture)
+    resolved = resolve_subject_metadata(root, allow_legacy=False)
+    fish = snapshot["fish_reference"]
+    assert resolved.subject_ids == (fish["mzb_fish_id"],)
+    assert resolved.subject["mzb_fish_id"] == fish["mzb_fish_id"]
+    assert resolved.subject["mzb_registration"]["status"] == fish["mzb_registration_status"]
+    assert "fish_reference" not in resolved.subject
+    setup = resolve_experiment_setup(root, allow_legacy=False)
+    assert published["expected_subject_count"] == 1
+    assert dict(setup.source)["citrus_snapshot_schema_version"] == 4
+
+
+def test_citrus_v4_dish_group_is_a_counted_dish_not_an_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot, published, root = _project_v4(tmp_path, monkeypatch, "dish_group")
+    resolved = resolve_subject_metadata(root, allow_legacy=False)
+    assert resolved.subject_ids == ()
+    assert resolved.subject["subject_type"] == "dish_group"
+    assert resolved.subject["dish_id"] == snapshot["dish_id"]
+    setup = resolve_experiment_setup(root, allow_legacy=False)
+    assert published["expected_subject_count"] == snapshot["subject"]["subject_count"]
+    assert (setup.assigned_subject_count, setup.subject_assignment_status) == (None, "count_only")
+
+
+def test_citrus_v4_no_dish_records_its_declared_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, published, root = _project_v4(tmp_path, monkeypatch, "no_dish")
+    assert published is None
+    assert "fish_reference" not in resolve_subject_metadata(root, allow_legacy=False).subject
+    assert "experiment_setup_runs" not in root["analysis"]
+
+
+def test_citrus_v4_usage_link_naming_another_recording_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(UnifiedH5ContractError, match="usage_link_recording_ref:observation_context"):
+        _project_v4(tmp_path, monkeypatch, "individual_existing_registered",
+                    recording_ref="obsctx_" + "0" * 64)
