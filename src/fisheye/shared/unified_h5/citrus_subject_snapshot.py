@@ -221,6 +221,60 @@ def subject_attributes(descriptors: Mapping[str, Any]) -> dict[str, Any]:
     return {**string_attributes(strings), **integers}
 
 
+RECEIPT_V4_VERSION = 4
+
+
+def check_receipt_subject_reference(
+    snapshot: Mapping[str, Any] | None, receipt: Mapping[str, Any]
+) -> None:
+    """Snapshot v4 pairs only with finalized receipt v4, and they agree.
+
+    Agreed on agent-contracts #105 (Palette review): the snapshot is the only
+    authority for registration state; the receipt's citrus.subject_reference v2
+    is a copy that must not disagree. Earlier pairs (snapshot v2/v3 with receipt
+    v1-v3) are unchanged.
+    """
+
+    receipt_v4 = receipt.get("schema_version") == RECEIPT_V4_VERSION
+    snapshot_v4 = isinstance(snapshot, Mapping) and snapshot.get("schema_version") == CONTRACT_V4_VERSION
+    require(receipt_v4 == snapshot_v4,
+            f"citrus_receipt_snapshot_version_pairing:receipt_v{receipt.get('schema_version')}")
+    if not receipt_v4:
+        return
+    reference = receipt["contract"]["subject_reference"]
+    subject, fish = snapshot["subject"], snapshot["fish_reference"]
+    dish = snapshot["dish"]
+    agree = {
+        "subject_id": (reference["subject_id"], subject["subject_id"]),
+        "subject_type": (reference["subject_type"], subject["subject_type"]),
+        "subject_count": (reference["subject_count"], subject["subject_count"]),
+        "dish_id": (reference["dish_id"], snapshot["dish_id"]),
+        "dish_uuid": ((reference["dish"] or {}).get("dish_uuid"), (dish or {}).get("dish_uuid")),
+        "lookup_status": (reference["lookup_status"], snapshot["subject_lookup_status"]),
+    }
+    registered = fish is not None and fish["mzb_registration_status"] == "registered"
+    if registered:
+        served = reference["fish"] or {}
+        agree["fish"] = (
+            (served.get("fish_id"), served.get("revision"), served.get("updated_at")),
+            (fish["mzb_fish_id"], fish["mzb_fish_revision"], fish["mzb_fish_updated_at"]),
+        )
+        agree["fish_status"] = (reference["fish_status"], "collected")
+        agree["fish_reason"] = (reference["fish_reason"], None)
+    else:
+        agree["fish"] = (reference["fish"], None)
+        agree["fish_status"] = (reference["fish_status"], "not_collected")
+        if fish is not None:
+            expected_reason = fish["mzb_registration_reason"]
+        elif subject["subject_type"] == "dish_group":
+            expected_reason = "dish_group_subject"
+        else:
+            expected_reason = "no_dish_declared"
+        agree["fish_reason"] = (reference["fish_reason"], expected_reason)
+    for name, (copy, sealed) in agree.items():
+        require(copy == sealed, f"citrus_receipt_subject_reference_disagrees:{name}")
+
+
 def _same(attr: Any, value: Any) -> bool:
     if isinstance(value, bool) or isinstance(attr, bool):
         return False
@@ -318,6 +372,7 @@ __all__ = [
     "SNAPSHOT_PATH",
     "UnifiedH5ContractError",
     "admit_subject_snapshot",
+    "check_receipt_subject_reference",
     "check_usage_link_recording_ref",
     "subject_attributes",
     "v4_invariant_errors",
