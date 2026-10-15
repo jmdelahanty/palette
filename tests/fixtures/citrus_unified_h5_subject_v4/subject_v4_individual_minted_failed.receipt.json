@@ -1,0 +1,71 @@
+{
+  "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+  "contract": {
+    "acceptance_contract_sha256": "sha256:78a5480f902a9e866221ca067fc30bc727ab522a829383727c37fd3086214d59",
+    "acceptance_id": "obsbindacc_78a5480f902a9e866221ca067fc30bc727ab522a829383727c37fd3086214d59",
+    "citrus_artifacts": [],
+    "citrus_experiment_id": "citexp_2a79e41d977b2eeff7ebc259a7db8095b891a438fa9a75da12b7634489fb2b2b",
+    "citrus_session_uuid": "citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80",
+    "finalized_at_utc": "2026-09-07T12:00:00Z",
+    "h5_artifact": {
+      "relative_path": "citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair.h5",
+      "sha256": "sha256:659def6918b4574715e6ecacb5f61f53518a04805b0e3e5c2c72671acef16f0e",
+      "size_bytes": 887248
+    },
+    "observation_context_id": "obsctx_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80",
+    "protocol_semantic": {
+      "semantic_sha256": "sha256:12a538650045fd05e88d227856fa3f6d4ffd4b3093efab206c4fe0188693355e",
+      "status": "available"
+    },
+    "request_contract_sha256": "sha256:7d66c3f67960ce351fd0d3f0bcae9e23fc887c4da82f900752631559f3bd4ed3",
+    "request_id": "obsbindreq_7d66c3f67960ce351fd0d3f0bcae9e23fc887c4da82f900752631559f3bd4ed3",
+    "runtime_geometry_contract_sha256": "sha256:4ca0fa9e128e411178b6ef3f60163c39db3080b762366d60ed4d1b2c1bbf5b91",
+    "schema_id": "citrus.recording_observation_finalized_receipt",
+    "schema_version": 4,
+    "session_status": "COMPLETE",
+    "subject_reference": {
+      "dish": {
+        "cross_id": "19220",
+        "dish_id": "19220_1",
+        "dish_revision": 1,
+        "dish_updated_at": "2026-10-02 16:28:20",
+        "dish_uuid": "28c29cc6-a1ef-4382-9dc5-414fbb445d92",
+        "fish_count": 32
+      },
+      "dish_id": "19220_1",
+      "fish": null,
+      "fish_reason": "create_fish_id_conflict",
+      "fish_status": "not_collected",
+      "lookup_http_status": null,
+      "lookup_reason": null,
+      "lookup_status": "collected",
+      "queried_at_utc": "2026-09-07T12:00:00Z",
+      "schema_id": "citrus.subject_reference",
+      "schema_version": 2,
+      "source": "citrus_mzb_lookup",
+      "subject_count": 1,
+      "subject_id": "9c4e6a2b-1d3f-4a5b-8c7d-0e1f2a3b4c5d",
+      "subject_type": "individual",
+      "zebrobot_version": {
+        "api_schema_version": 2,
+        "base_url": "http://127.0.0.1:18000",
+        "consumer_schema_sha256": "463def80f58621b3d67db307cd6faee796fe032c0bc8e65d84ed446492ded6b1",
+        "error": null,
+        "http_status": 200,
+        "service_commit": "ed39b042e318d5175891cb2b9d8a38a93454cb84",
+        "service_commit_dirty": false
+      }
+    },
+    "target": {
+      "arena_id": "arena_1",
+      "camera_id": "CAM-42",
+      "canvas_name": "synthetic-canvas",
+      "rig_id": "synthetic-preservation-rig",
+      "source_camera_stream_id": "CAM-42"
+    }
+  },
+  "contract_sha256": "sha256:14d217bbe0092d182777b9316a3f024d954fbc76f18f6b94a8e8fc8a563c2568",
+  "receipt_id": "obsbindfin_14d217bbe0092d182777b9316a3f024d954fbc76f18f6b94a8e8fc8a563c2568",
+  "schema_id": "citrus.recording_observation_finalized_receipt",
+  "schema_version": 4
+}

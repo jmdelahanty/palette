@@ -313,4 +313,38 @@ def test_a_receipt_v3_admits_the_same_h5(tmp_path: Path) -> None:
         with pytest.raises(UnifiedH5ContractError, match="external_receipt_subject_reference"):
             validate_external_receipt(h5, source_h5=source, receipt=bad)
         with pytest.raises(UnifiedH5ContractError, match="external_receipt_schema"):
+            validate_external_receipt(h5, source_h5=source, receipt=_receipt_v3(version=5))
+        # Receipt v4 pairs only with citrus.subject_reference v2 (sealer 3.3.0).
+        with pytest.raises(UnifiedH5ContractError, match="external_receipt_subject_reference"):
             validate_external_receipt(h5, source_h5=source, receipt=_receipt_v3(version=4))
+
+
+SUBJECT_REFERENCE_V2_FIXTURE = (
+    Path(__file__).resolve().parents[2]
+    / "fixtures/recording_transfer_v3_3/bound_v4_video/recording_observation_bindings/receipts"
+    / ("obsctx_" + "1" * 64 + ".json")
+)
+
+
+def test_a_receipt_v4_admits_the_same_h5(tmp_path: Path) -> None:
+    from fisheye.shared.unified_h5 import UnifiedH5ContractError
+    from fisheye.shared.unified_h5.integrity import validate_external_receipt
+    from tests.unit.fisheye.unified_h5_fixtures import emit_fixture as emit
+
+    v2 = json.loads(SUBJECT_REFERENCE_V2_FIXTURE.read_bytes())["contract"]["subject_reference"]
+    assert v2["schema_version"] == 2
+    group = dict(v2, subject_id=None, subject_type="dish_group", subject_count=4, fish=None,
+                 fish_status="not_collected", fish_reason="dish_group_subject")
+    source = emit(tmp_path, "base")
+    with h5py.File(source, "r") as h5:
+        validate_external_receipt(h5, source_h5=source, receipt=_receipt_v3(v2, version=4))
+        validate_external_receipt(h5, source_h5=source, receipt=_receipt_v3(group, version=4))
+        for receipt in (
+            _receipt_v3(v2, version=4, edit=lambda c: c.pop("subject_reference")),
+            _receipt_v3(v2, version=4, edit=lambda c: c.update(subject_declaration={})),
+        ):
+            with pytest.raises(UnifiedH5ContractError, match="external_receipt_contract"):
+                validate_external_receipt(h5, source_h5=source, receipt=receipt)
+        # Receipt v3 still pairs only with reference v1.
+        with pytest.raises(UnifiedH5ContractError, match="external_receipt_subject_reference"):
+            validate_external_receipt(h5, source_h5=source, receipt=_receipt_v3(v2, version=3))
