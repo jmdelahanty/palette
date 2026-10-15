@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 from . import checkpoint_store as _checkpoint_store
+from . import peer_review as _peer_review
 
 
 STORE_ENV_VAR = "PALETTE_LABELING_STORE_PATH"
@@ -644,6 +645,10 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 ON labeling_admin_reviews(recording_id, state);
             """
         )
+        # Advisory peer-review flags. Additive: older code ignores the table,
+        # so SCHEMA_VERSION is unchanged and servers on older commits can keep
+        # sharing the store.
+        cur.executescript(_peer_review.FRAME_FLAGS_SCHEMA_SQL)
         checkpoint_columns = {
             str(row["name"])
             for row in conn.execute(

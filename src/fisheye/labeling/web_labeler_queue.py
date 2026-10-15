@@ -82,6 +82,7 @@ def _task(
     *,
     fallback_url: str,
     row_progress: Mapping[str, Mapping[str, object]],
+    open_flags: Mapping[str, int],
     **start: Any,
 ) -> dict[str, object]:
     task_id = _text(task.get("task_id"))
@@ -96,6 +97,7 @@ def _task(
         "work_url": _text(task.get("expected_user_work_url") or task.get("work_url") or fallback_url),
         "start": _task_start(task, **start),
         "progress": dict(row_progress.get(task_id) or _EMPTY_PROGRESS),
+        "open_flag_count": int(open_flags.get(task_id) or 0),
     }
 
 
@@ -116,14 +118,17 @@ def labeler_queue_payload(
     *,
     user: str,
     row_progress: Mapping[str, Mapping[str, object]] | None = None,
+    open_flags: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
     """Project the labeler's queue from the full personal `work` summary.
 
     ``row_progress`` is ``LabelingStore.task_row_progress`` for the listed
     tasks; a task missing from it reports no saved rows and an unknown total.
+    ``open_flags`` is the open peer-review flag count per task.
     """
 
     row_progress = row_progress or {}
+    open_flags = open_flags or {}
 
     policy = _mapping(work.get("dataset_queue_direct_start_policy"))
     start = {
@@ -147,7 +152,7 @@ def labeler_queue_payload(
                 "blocked_reason": _text(recording.get("blocked_reason")),
                 "work_url": recording_url,
                 "tasks": [
-                    _task(task, fallback_url=recording_url, row_progress=row_progress, **start)
+                    _task(task, fallback_url=recording_url, row_progress=row_progress, open_flags=open_flags, **start)
                     for task in recording.get("tasks") or []
                 ],
             })
@@ -204,6 +209,7 @@ def labeler_queue_payload(
             "personal_dataset_queue": _text(work.get("expected_user_personal_dataset_queue_url")),
             "personal_work": _text(work.get("expected_user_personal_work_url")),
             "identity_probe": _text(work.get("expected_user_identity_probe_url")),
+            "peer_review": "/peer",
             # The full payload with every policy and diagnostic field, for
             # "Operator details" and support references, fetched on demand.
             "diagnostics": "/api/me/datasets?expected_user=" + quote(expected_user, safe=""),

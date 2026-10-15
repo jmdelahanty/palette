@@ -116,6 +116,7 @@ from .web_static import register_static_routes
 from .web_subject_mask_edit_operations import validated_edit_operations
 from .upgrade_mask_run_metrics import ensure_full_metrics_for_tasks, metric_upgrade_warnings
 from .web_admin_inspect import register_admin_inspect_routes
+from .web_peer_review import register_peer_review_routes
 from .web_admin_api import register_admin_api_routes
 from .web_admin_pages import _admin_page_response_payload, register_admin_page_routes
 from .web_admin_renderers import (
@@ -156,7 +157,7 @@ from .web_identity import (
 )
 from .web_personal_api import _personal_api_response_payload, register_personal_api_routes
 from .web_personal_pages import _personal_page_response_payload, register_personal_page_routes
-from .web_personal_renderers import _dashboard_html, _datasets_html
+from .web_personal_renderers import _dashboard_html
 from .web_post_completion_queue import _post_completion_queue_metadata
 from .web_promotion_retry import (
     _admin_promotion_retry_preflight_error,
@@ -1159,6 +1160,7 @@ def _make_handler(state: ServerState):
     register_personal_page_routes(flask_app, state, _personal_page_response_payload)
     register_static_routes(flask_app)
     register_admin_inspect_routes(flask_app, state)
+    register_peer_review_routes(flask_app, state)
 
     class LabelingWorkHandler(BaseHTTPRequestHandler):
         server_version = "PaletteLabelingWork/0.1"
@@ -2994,44 +2996,6 @@ def _make_handler(state: ServerState):
                 return
             parsed = urlparse(self.path)
             path = parsed.path
-            if path == "":
-                user, _auth_source = self._require_user(html_error=True)
-                if user is None:
-                    return
-                query = parse_qs(parsed.query, keep_blank_values=True)
-                expected_user = str((query.get("expected_user") or [""])[-1]).strip()
-                if expected_user and str(user) != expected_user:
-                    self._write_error(
-                        "dashboard_user_mismatch",
-                        details=(
-                            f"This dashboard link is for {expected_user}, "
-                            f"but the browser is authenticated as {user}. "
-                            "Stop and contact the operator before labeling."
-                        ),
-                        status=HTTPStatus.FORBIDDEN,
-                        html_error=True,
-                        extra=_labeler_read_authorization_denial_metadata(
-                            user=user,
-                            expected_user=expected_user,
-                            route_path=path,
-                            response_kind="html",
-                        ),
-                    )
-                    return
-                known_user_status = self._require_active_labeling_user(
-                    user,
-                    html_error=True,
-                    expected_user=expected_user or user,
-                    route_path=path,
-                )
-                if known_user_status is None:
-                    return
-                self._write(
-                    _dashboard_html()
-                    if path in {DASHBOARD_PATH, PERSONAL_WORK_PATH}
-                    else _datasets_html()
-                )
-                return
             if path.startswith("/t/"):
                 token = path[len("/t/") :].strip("/")
                 if not token:
