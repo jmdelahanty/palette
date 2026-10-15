@@ -21,9 +21,12 @@ from .integrity import (
 )
 from .phototaxis import validate_phototaxis_states
 from .pose import COMPONENT as POSE_COMPONENT
+from .pose import require_pose_version_for_binding
 from .protocol import validate_protocol
 from .rows import validate_table_relations
 from .schema import APPEARANCE, read_json
+from .video_overlay import STATES as VIDEO_OVERLAY_STATES
+from .video_overlay import validate_video_overlay_states
 
 TABLE_COMPONENTS = {
     "frames": "/frames/stimulus",
@@ -32,6 +35,7 @@ TABLE_COMPONENTS = {
     "independent_motion_grid": "/components/independent_motion_grid/states",
     "moving_grating": "/components/moving_grating/states",
     "phototaxis": "/components/phototaxis/states",
+    "video_tracking_overlay": VIDEO_OVERLAY_STATES,
     "bounding_boxes": "/observations/bounding_boxes",
     "events": "/events/records",
     "runtime_trials": "/trials/trial_index",
@@ -139,6 +143,14 @@ def validate_artifact(
     )
     geometry = validate_geometry(
         h5, read_json(h5, BINDING, canonical=True), integrity.table_descriptors
+    )
+    # Revision 7: pose v3 under video_overlay_v1, and the overlay states only
+    # under a binding that admits them (after geometry: they read its
+    # homography and arena origin).
+    require_pose_version_for_binding(h5, binding)
+    outcomes = {value["component_id"]: value for value in integrity.component_outcomes}
+    validate_video_overlay_states(
+        h5, binding, camera_serial=correspondence.camera_serial, outcomes=outcomes
     )
     validate_recording_identity(h5, finalization_receipt, geometry, snapshot)
     authored = read_json(h5, "/protocol/authored/protocol_trial_index_json")

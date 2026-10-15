@@ -66,19 +66,29 @@ CONTRACT_HASHES = {
     "experimental_h5_core_phototaxis_v1.json": "cb6b86fe16f46a7aef64b051a388dc9d4b3e6bc4fbf0c6cc9791f76b755d33ed",
     "experimental_h5_capacity_preflight_v4.schema.json": "5892090691243097abbd952f72655c45bcc7d8998fce74a86a1e4b71d87eeb9e",
     "reactive_phototaxis_states_v1.json": "4270da37b8cacc2722494eef99a0652576902955e35de07904fd23ee9c77408c",
+    # Admission revision 7 (video_overlay_v1: video tracking overlay states and
+    # pose observation v3; agent-contracts PR 104 head c8c92f1, Citrus PR 42 at
+    # a3849567 / 1855e374 / 20f27395).
+    "unified_h5_admission_v7.json": "82d9d3ca0205c23e8d0e2936d60a866677d9ba094c37e616a8699c29b70a57a7",
+    "unified_h5_producer_policy_543102f7.json": "543102f7b9610f2ab7d55880ab02cf863e0bd791fcc62b067d964a55ffd24e5d",
+    "experimental_h5_core_video_overlay_v1.json": "544d7d1095a1591961b307b5acd0a0d61a0c486ea475d7ea218289f62f980733",
+    "experimental_h5_capacity_preflight_v5.schema.json": "dfad0cd22cb3a6de6b18adf768395ef30713d9dbe6618fac6ae872d0188c1337",
+    "video_tracking_overlay_states_v1.json": "a407533eb5e5dcde9963643a5af95910efcfa5be35ae8965c5544e15ae1245d1",
 }
 # The admission revision a file is judged under is chosen by its capacity
 # preflight's schema_version: preflight v1 files (no catalog_id) keep revision
 # 3 and its (chaser_state, bounding_boxes) pair key; preflight v2 files carry
 # catalog_id and are selected by revision 4's full table-version map; preflight
 # v3 files (catalog_id angle_v1) are selected the same way by revision 5, and
-# preflight v4 files (catalog_id phototaxis_v1) by revision 6. Any other
+# preflight v4 files (catalog_id phototaxis_v1) by revision 6, and preflight v5
+# files (catalog_id video_overlay_v1) by revision 7. Any other
 # preflight version is refused. A later catalog needs only its pins here.
 ADMISSIONS_BY_PREFLIGHT_VERSION = {
     1: "unified_h5_admission_v3.json",
     2: "unified_h5_admission_v4.json",
     3: "unified_h5_admission_v5.json",
     4: "unified_h5_admission_v6.json",
+    5: "unified_h5_admission_v7.json",
 }
 ADMISSION = ADMISSIONS_BY_PREFLIGHT_VERSION[1]
 # Every pinned core catalog. The original v1 catalog stays pinned byte-for-byte
@@ -90,6 +100,7 @@ CORE_CATALOG_FILES = (
     "experimental_h5_core_frame_identity_v1.json",
     "experimental_h5_core_angle_v1.json",
     "experimental_h5_core_phototaxis_v1.json",
+    "experimental_h5_core_video_overlay_v1.json",
 )
 CORE_CATALOGS = {
     1: "experimental_h5_core_v1.json",
@@ -279,6 +290,10 @@ def admitted_binding(h5, declared_policy_sha256: str, preflight: dict | None = N
         # Revision 6: only a catalog pin that declares phototaxis semantics
         # (phototaxis_v1) admits a reactive heading-split trial-index step.
         "admits_heading_split": "phototaxis_semantics" in catalogs[matches[0]],
+        # Revision 7: only a catalog pin that declares video overlay semantics
+        # (video_overlay_v1) admits the video_tracking_overlay component, and
+        # a file under it that carries pose observations must carry v3.
+        "admits_video_overlay": "video_overlay_semantics" in catalogs[matches[0]],
         "catalog_file": _catalog_file(catalogs[matches[0]]),
         "preflight_schema": schema_name,
         "admission": admission_name,

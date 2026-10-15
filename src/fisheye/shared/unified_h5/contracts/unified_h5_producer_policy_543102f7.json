@@ -1,0 +1,700 @@
+{
+  "schema_id": "citrus_palette.unified_h5_admission",
+  "schema_version": 7,
+  "status": "draft_not_production_admitted",
+  "producer_candidate": {
+    "repository": "JohnsonLabJanelia/citrus",
+    "branch": "agent/citrus/video-tracking-overlay",
+    "commit": "a3849567cf7378f3e6f9acdb9a22016491a35813"
+  },
+  "artifact_profile": "unified_experimental_h5_v1",
+  "versions": {
+    "core": {
+      "schema_id": "citrus.experimental_h5",
+      "schema_version": 1
+    },
+    "correspondence_input": {
+      "schema_id": "citrus.experimental_h5.correspondence_input",
+      "schema_version": 2
+    },
+    "correspondence_receipt": {
+      "schema_id": "citrus.experimental_h5.correspondence_receipt",
+      "schema_version": 3
+    },
+    "acquisition_binding": {
+      "schema_id": "citrus.experimental_h5.acquisition_binding",
+      "schema_version": 1
+    },
+    "optional_pose": {
+      "schema_id": "citrus.pose_observation",
+      "schema_versions": [
+        1,
+        2,
+        3
+      ],
+      "rule": "governed by contract_json.schema_version: citrus-pose-observation-v1, v2 or v3; a file whose trial index has a step with features.fill.type heading_split (features.reactive present) must carry pose observation v2 or v3 complete (receipt complete): pose v1 or absent pose is refused for such a file with reactive_phototaxis_requires_pose_v2; a file under the video_overlay_v1 binding that carries pose must carry v3 (pose_v3_required_by_video_overlay_v1): every distinct sidecar verbatim at /observations/pose/sidecars/<sidecar_sha256> (bytes hash to sidecar_sha256, prefix64 equals ipc_skeleton_id_hash), and every object's heading_status and heading recomputed from its keypoints by contract_json.heading_arithmetic (pose_heading_arithmetic_v3): statuses, origin, forward, unit direction and eye check exactly, the angle within 1e-4 degrees by wrap_delta"
+    },
+    "optional_pose_receipt": {
+      "schema_id": "citrus.pose_observation_receipt",
+      "schema_versions": [
+        1,
+        2,
+        3
+      ]
+    },
+    "capacity_preflight": {
+      "schema_id": "citrus.experimental_h5.capacity_preflight",
+      "schema_version": 5
+    },
+    "chaser_state": {
+      "schema_id": "citrus.experimental_h5.chaser_state",
+      "schema_version": 3
+    },
+    "live_frame_identity": {
+      "schema_id": "citrus.experimental_h5.live_frame_identity.v2",
+      "schema_version": 2
+    },
+    "live_chaser_identity": {
+      "schema_id": "citrus.experimental_h5.live_chaser_identity.v2",
+      "schema_version": 2
+    },
+    "bounding_boxes": {
+      "schema_id": "citrus.experimental_h5.bounding_boxes",
+      "schema_version": 3
+    },
+    "frame_identity": {
+      "contract_id": "frame_identity",
+      "version": 1,
+      "path": "citrus-orange/frame_identity_v1.json"
+    },
+    "stimulus_angle": {
+      "contract_id": "stimulus_angle_convention",
+      "version": 1,
+      "path": "citrus-palette/angles/stimulus_angle_convention_v1.json",
+      "rule": "the convention of every stimulus direction angle in a file is fixed by the admitted catalog binding the file selects (core_definition_pins.<catalog>.stimulus_angle_convention), never by a file attribute alone: angle_v1 and later catalogs -> atan2_negative_y_x_degrees; historical_v1, chaser_v2, bounding_boxes_v2 and frame_identity_v1 -> canvas_y_down_clockwise_legacy; a file whose binding selects angle_v1 but whose /metadata/session attribute stimulus_angle_convention is absent or differs from atan2_negative_y_x_degrees is refused with stimulus_angle_convention_mismatch (as catalog_id_mismatch); the attribute is not read for legacy bindings",
+      "h5_declaration": "/metadata/session attribute stimulus_angle_convention"
+    },
+    "phototaxis_state": {
+      "schema_id": "citrus.experimental_h5.phototaxis_state",
+      "schema_version": 1
+    },
+    "reactive_phototaxis": {
+      "contract_id": "reactive_phototaxis",
+      "version": 1,
+      "path": "citrus-palette/reactive_phototaxis/reactive_phototaxis_states_v1.json",
+      "rule": "a trial index with a mode-18 step whose features.fill.type is heading_split (features.reactive present exactly then) is admitted only under the phototaxis_v1 binding and only when /components/phototaxis/states is present and declared; revisions 1 to 5 refuse such a file; features.fill.style gradient and features.reactive.fill_style gradient are reserved and refused by this revision; the per-row invariants are those of the states contract, with validity flags (heading_valid, midline_valid, held_valid, *_valid) instead of NaN payloads",
+      "h5_declaration": "/components/phototaxis/states attribute schema_version 1; trial index features.reactive"
+    },
+    "video_overlay_state": {
+      "schema_id": "citrus.experimental_h5.video_overlay_state",
+      "schema_version": 1
+    },
+    "video_tracking_overlay": {
+      "contract_id": "video_tracking_overlay",
+      "version": 1,
+      "path": "citrus-palette/video_tracking_overlay/video_tracking_overlay_states_v1.json",
+      "rule": "a file that declares the video_tracking_overlay component (video logging on and the overlay enabled) is admitted only under the video_overlay_v1 binding and only with /components/video_tracking_overlay/states (schema_version 1) and /components/video_tracking_overlay/settings_json present; one states row per /frames/stimulus row; revisions 1 to 6 refuse such a file; the per-row invariants, the bounding-box and pose cross-checks and the exact position, arrow origin and direction arithmetic are those of the states contract (typed validity flags, payload zero, no NaN)",
+      "h5_declaration": "/components/video_tracking_overlay/states attribute schema_version 1; /components/video_tracking_overlay/settings_json schema_id citrus.video_tracking_overlay schema_version 1"
+    }
+  },
+  "digest_encodings": {
+    "core_tables": "core_schema_json_and_packed_le_v1",
+    "generic_datasets": "hdf5_closed_logical_values_v1",
+    "canonical_json": "canonical_json_utf8_sort_keys_compact_v1"
+  },
+  "resource_profile": {
+    "schema_id": "citrus_palette.unified_h5.long_session_resources",
+    "schema_version": 1,
+    "max_dataset_logical_bytes": 1099511627776,
+    "max_dataset_rows": 1099511627776,
+    "max_single_element_bytes": 67108864,
+    "max_json_payload_bytes": 8388608,
+    "max_variable_string_dataset_payload_bytes": 8388608,
+    "max_decoded_chunk_bytes": 67108864,
+    "target_io_buffer_bytes": 1048576,
+    "max_io_buffer_bytes": 67108864
+  },
+  "table_storage": {
+    "layout": "one_rank1_chunked_dataset_per_table",
+    "segmentation": false,
+    "chunk_shape_authority": "per_file_hdf5_dataset_creation_properties",
+    "chunk_shape_fixed_by_schema": false,
+    "allowed_filter_ids": [],
+    "filter_policy": "no_filters_for_fixed_width_tables_in_this_admission_revision",
+    "logical_digests_independent_of_chunk_shape": true,
+    "physical_chunk_digests_producer_supplied": false
+  },
+  "required_operations": {
+    "hashing": "bounded_row_ranges",
+    "copying": "bounded_buffers",
+    "reading": "genuine_row_range_hyperslabs_no_whole_table_then_slice",
+    "capacity_preflight": "required_before_arming",
+    "runtime_capacity_check": "required_before_dataset_extension",
+    "preflight_evidence_path": "/metadata/admission/capacity_preflight_json",
+    "preflight_evidence_location": "same_experimental_h5_not_a_companion",
+    "output_creation": "exclusive_no_overwrite",
+    "post_receipt_h5_mutation": "forbidden"
+  },
+  "delivery": {
+    "collection_relative_path": "recording_observation_bindings/finalized_collection.json",
+    "receipt_relative_path_template": "recording_observation_bindings/receipts/<observation_context_id>.json",
+    "h5_path_authority": "collection.observation_contexts[].citrus_h5.relative_path",
+    "receipt_path_authority": "collection.observation_contexts[].finalized_receipt.relative_path",
+    "internal_receipt_path": "/evidence/integrity/finalization_receipt_json",
+    "palette_storage_policy": "sealed_reference_to_source_h5_not_native_h5_byte_copy",
+    "palette_storage_version": "assigned_by_palette_not_defined_here"
+  },
+  "core_definition_pins": {
+    "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+    "selection": {
+      "key": "table_version_map",
+      "rule": "the file's map {core table path -> dataset schema_version attribute}, over every table of an admitted catalog that the capacity preflight declares, must equal that catalog's table_version_map; a declared table whose version is not in any admitted map is refused; absent and undeclared tables do not constrain the choice (as revision 3); the map together with the declared capacity_preflight_json.catalog_id (preflight v2, v3, v4 or v5) must select exactly one admitted catalog: catalog_id must name a catalog whose map the file matches, otherwise the file is refused with catalog_id_mismatch rather than no_binding; a file that declares none of /components/moving_grating/states, /components/independent_motion_grid/states, /components/phototaxis/states and /components/video_tracking_overlay/states matches frame_identity_v1, angle_v1, phototaxis_v1 and video_overlay_v1 by map and is told apart only by catalog_id (and the binding's admission_policy_sha256); every table attribute is validated against the selected catalog, and the selected catalog fixes the stimulus angle convention (versions.stimulus_angle)",
+      "legacy_pair_key": [
+        "chaser_state",
+        "bounding_boxes"
+      ],
+      "legacy_pair_rule": "revision 2 and 3 catalogs (historical_v1, chaser_v2, bounding_boxes_v2) remain selectable by their (chaser_state, bounding_boxes) pair for files without catalog_id (preflight v1); pair keys are unique only over these three legacy catalogs; the map-keyed catalogs (frame_identity_v1, angle_v1, phototaxis_v1, video_overlay_v1) share the pair (3, 3) and are distinguished by table_version_map plus catalog_id, never by the pair",
+      "current_producer_catalog": "video_overlay_v1"
+    },
+    "historical_v1": {
+      "catalog_path": "docs/schemas/experimental_h5_core_v1.json",
+      "catalog_file_sha256": "sha256:febb7516ff96f359b6784bf137682abe387b7922270e9637ebc58b369e07f9c1",
+      "catalog_canonical_json_sha256": "sha256:a8bf656a41cd6ccc4d78a1c896fb54c31a5f9fee1787d04861b2ba4d5df301a7",
+      "table_versions": {
+        "chaser_state": 1,
+        "bounding_boxes": 1
+      },
+      "chaser_table": {
+        "schema_id": "citrus.experimental_h5.chaser_state",
+        "schema_version": 1,
+        "definition_canonical_json_sha256": "sha256:0a257c510f57c08a2b308aef1901daf01988760fbca5a321b5419eaa944c9e34"
+      },
+      "bounding_boxes_table": {
+        "schema_id": "citrus.experimental_h5.bounding_boxes",
+        "schema_version": 1,
+        "definition_canonical_json_sha256": "sha256:4fd978728dc265746d8f2b6a4b7657b194769f6d1e28273dfce4e1285c73c1b0"
+      },
+      "admitted_by_this_revision": false,
+      "catalog_id": null,
+      "stimulus_angle_convention": "canvas_y_down_clockwise_legacy"
+    },
+    "chaser_v2": {
+      "catalog_path": "docs/schemas/experimental_h5_core_chaser_v2.json",
+      "catalog_file_sha256": "sha256:cb68ab6ecea614030b8f2a3d2096e9122b1efa5156b56ed7a495b3072c70316a",
+      "catalog_canonical_json_sha256": "sha256:cadf30c237c2d00e280554258599fce1ee10c6e7417a1409bb66c945ec72a243",
+      "table_versions": {
+        "chaser_state": 2,
+        "bounding_boxes": 1
+      },
+      "chaser_table": {
+        "schema_id": "citrus.experimental_h5.chaser_state",
+        "schema_version": 2,
+        "definition_canonical_json_sha256": "sha256:c6c6e41a00efc770fd18bb410a6126ab00c09308ad4affbb6303a36f53138a3c"
+      },
+      "bounding_boxes_table": {
+        "schema_id": "citrus.experimental_h5.bounding_boxes",
+        "schema_version": 1,
+        "definition_canonical_json_sha256": "sha256:4fd978728dc265746d8f2b6a4b7657b194769f6d1e28273dfce4e1285c73c1b0"
+      },
+      "admitted_by_this_revision": true,
+      "bounding_boxes_row_rule": "every_received_shaman_v2_update; with /observations/pose present each box appears twice (detections update and same-frame pose-enriched update); consumers deduplicate on (payload_frame_id, payload_camera_id, box_index_in_payload) keeping the later payload_timestamp_ns_monotonic",
+      "catalog_id": null,
+      "stimulus_angle_convention": "canvas_y_down_clockwise_legacy"
+    },
+    "bounding_boxes_v2": {
+      "catalog_path": "docs/schemas/experimental_h5_core_bounding_boxes_v2.json",
+      "catalog_file_sha256": "sha256:55f94f83e6f43824488161b7238846b2233933be871ac8044bef04d3fa6df4f8",
+      "catalog_canonical_json_sha256": "sha256:3349cba786f7350317d11e6d3f69c345bfaaf1a543250ba1b5d7a2fbe82e45e1",
+      "table_versions": {
+        "chaser_state": 2,
+        "bounding_boxes": 2
+      },
+      "chaser_table": {
+        "schema_id": "citrus.experimental_h5.chaser_state",
+        "schema_version": 2,
+        "definition_canonical_json_sha256": "sha256:c6c6e41a00efc770fd18bb410a6126ab00c09308ad4affbb6303a36f53138a3c"
+      },
+      "bounding_boxes_table": {
+        "schema_id": "citrus.experimental_h5.bounding_boxes",
+        "schema_version": 2,
+        "definition_canonical_json_sha256": "sha256:29f67ef95815229003bbfcb7914e0584dca15860b8de708641ef465bc3eb9772"
+      },
+      "admitted_by_this_revision": true,
+      "bounding_boxes_row_rule": "one_row_per_source_frame_per_object_per_camera; layout and fields identical to v1; Citrus docs/bounding_boxes_table_v2_2026-10-11.md",
+      "catalog_id": null,
+      "stimulus_angle_convention": "canvas_y_down_clockwise_legacy"
+    },
+    "frame_identity_v1": {
+      "catalog_id": "frame_identity_v1",
+      "catalog_path": "docs/schemas/experimental_h5_core_frame_identity_v1.json",
+      "catalog_file_sha256": "sha256:4365821df9cdde35d0417fec5b656de12607c211e24232b408e87344883a8264",
+      "catalog_canonical_json_sha256": "sha256:4b76873fea792138f504727c4c266ae666400eea85fe7bd1b6f6e5a8d79c474b",
+      "table_versions": {
+        "chaser_state": 3,
+        "bounding_boxes": 3
+      },
+      "table_version_map": {
+        "/frames/stimulus": 2,
+        "/components/chaser/states": 3,
+        "/components/visual_appearance/states": 1,
+        "/components/independent_motion_grid/states": 1,
+        "/components/moving_grating/states": 2,
+        "/correspondence/frames/sources": 1,
+        "/correspondence/{component}/sources": 1,
+        "/events/records": 2,
+        "/trials/trial_index": 2,
+        "/definitions/enums/{component}": 1,
+        "/observations/bounding_boxes": 3,
+        "/observations/region_routing": 2,
+        "/observations/region_candidates": 2,
+        "/timing/display_submissions/frame_submissions": 2
+      },
+      "table_definitions": {
+        "/frames/stimulus": {
+          "schema_id": "citrus.experimental_h5.stimulus_frame",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:6babbfbd05ce4411958eee89479eee033dcddbecc0028b31d9fed2361f01b5a4"
+        },
+        "/components/chaser/states": {
+          "schema_id": "citrus.experimental_h5.chaser_state",
+          "schema_version": 3,
+          "definition_canonical_json_sha256": "sha256:a4b6b53678751c56dc5b2850fa6f0719933a25eebd4890114953a2168c64dbf3"
+        },
+        "/components/visual_appearance/states": {
+          "schema_id": "citrus.experimental_h5.object_appearance_state",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:c69722a6a19239e861088576fc8c288add7e29091e6beddb4e5ba4be9bc4d9f2"
+        },
+        "/components/independent_motion_grid/states": {
+          "schema_id": "citrus.experimental_h5.independent_motion_grid_state",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:e0950946fe73d30b315222672efc88bdfd32132458953ff68351ae467fe6cc0f"
+        },
+        "/components/moving_grating/states": {
+          "schema_id": "citrus.experimental_h5.moving_grating_state",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:c15556eae78600dd8987f44e546b479a314ec963d58e7cf26882794391e24ecc"
+        },
+        "/correspondence/frames/sources": {
+          "schema_id": "citrus.experimental_h5.frame_source",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:89fb7248621a41f0aa1282883b0f58cfe87ac7f6ee84c17f311738d996cb1b0a"
+        },
+        "/correspondence/{component}/sources": {
+          "schema_id": "citrus.experimental_h5.state_source",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:bc1900f286c17d07a838358673a5a7367aed0b341b64ae6a8bc3d50043267691"
+        },
+        "/events/records": {
+          "schema_id": "citrus.experimental_h5.event_record",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:086a2d3750fccbd266a308b0b8da3668eee4de4f8b1ea5e2e08faf9e408cdf63"
+        },
+        "/trials/trial_index": {
+          "schema_id": "citrus.experimental_h5.runtime_trial",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:e1fb41bf136337dba6573d0b9bbd1dabe03b12eaadc468df82523ef68cee5043"
+        },
+        "/definitions/enums/{component}": {
+          "schema_id": "citrus.experimental_h5.enum_definition",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:f0c255fb65910b51fc0dc0bfb39889dfecae618ab0935c1177a1ccf318d5f7e0"
+        },
+        "/observations/bounding_boxes": {
+          "schema_id": "citrus.experimental_h5.bounding_boxes",
+          "schema_version": 3,
+          "definition_canonical_json_sha256": "sha256:c3b7632b3036c8918394a3f54e2e382023355f2b9ba0b11a9a51a95d601938bc"
+        },
+        "/observations/region_routing": {
+          "schema_id": "citrus.experimental_h5.region_routing",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:c3bf8146ffa4c8c92c33841086a76c1900dc84661b49517a9659be1a99adaf73"
+        },
+        "/observations/region_candidates": {
+          "schema_id": "citrus.experimental_h5.region_candidates",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:744111b8b3b66d83fd04d954dfb84f386229d202daa4b53cb9ab50cf887fa310"
+        },
+        "/timing/display_submissions/frame_submissions": {
+          "schema_id": "citrus.experimental_h5.display_submission",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:4629bc9f0dbe9529117a9dfbadb4f5f3fa04458f64c6a8451cefc80415a592a4"
+        }
+      },
+      "chaser_table": {
+        "schema_id": "citrus.experimental_h5.chaser_state",
+        "schema_version": 3,
+        "definition_canonical_json_sha256": "sha256:a4b6b53678751c56dc5b2850fa6f0719933a25eebd4890114953a2168c64dbf3"
+      },
+      "bounding_boxes_table": {
+        "schema_id": "citrus.experimental_h5.bounding_boxes",
+        "schema_version": 3,
+        "definition_canonical_json_sha256": "sha256:c3b7632b3036c8918394a3f54e2e382023355f2b9ba0b11a9a51a95d601938bc"
+      },
+      "admitted_by_this_revision": true,
+      "frame_identity": "agent-contracts citrus-orange/frame_identity_v1: one counter per table; removed triggering_camera_frame_id (frames, moving_grating), camera_frame_id (events), start_/end_camera_frame_id (trials), source_camera_frame_id (display_submissions), target_source_frame_id (chaser_state); renamed payload_frame_id and observation_frame_id to recording_frame_id (bounding_boxes, region_routing, region_candidates) and the nested slot provenance fields to state_/source_stream_frame_id",
+      "bounding_boxes_row_rule": "one_row_per_source_frame_per_object_per_camera (as v2); recording_frame_id is Orange's recording counter from the SHAMAN v2 slot, 0 = received outside recording; consumers deduplicate in-recording rows on (recording_frame_id, payload_camera_id, box_index_in_payload) keeping the later payload_timestamp_ns_monotonic; rows with recording_frame_id 0 have no video frame",
+      "stimulus_angle_convention": "canvas_y_down_clockwise_legacy"
+    },
+    "angle_v1": {
+      "catalog_id": "angle_v1",
+      "catalog_path": "docs/schemas/experimental_h5_core_angle_v1.json",
+      "catalog_file_sha256": "sha256:0c054c7d5d3c1a4f7b39f800b63e272bb43bac30b5b640993a94974e2be24f07",
+      "catalog_canonical_json_sha256": "sha256:61444d92e5e7a7854033ebf658c7bf75d1d34fadd5e033fd311b9edf83c82b8e",
+      "table_versions": {
+        "chaser_state": 3,
+        "bounding_boxes": 3
+      },
+      "table_version_map": {
+        "/frames/stimulus": 2,
+        "/components/chaser/states": 3,
+        "/components/visual_appearance/states": 1,
+        "/components/independent_motion_grid/states": 2,
+        "/components/moving_grating/states": 3,
+        "/correspondence/frames/sources": 1,
+        "/correspondence/{component}/sources": 1,
+        "/events/records": 2,
+        "/trials/trial_index": 2,
+        "/definitions/enums/{component}": 1,
+        "/observations/bounding_boxes": 3,
+        "/observations/region_routing": 2,
+        "/observations/region_candidates": 2,
+        "/timing/display_submissions/frame_submissions": 2
+      },
+      "table_definitions": {
+        "/frames/stimulus": {
+          "schema_id": "citrus.experimental_h5.stimulus_frame",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:6babbfbd05ce4411958eee89479eee033dcddbecc0028b31d9fed2361f01b5a4"
+        },
+        "/components/chaser/states": {
+          "schema_id": "citrus.experimental_h5.chaser_state",
+          "schema_version": 3,
+          "definition_canonical_json_sha256": "sha256:a4b6b53678751c56dc5b2850fa6f0719933a25eebd4890114953a2168c64dbf3"
+        },
+        "/components/visual_appearance/states": {
+          "schema_id": "citrus.experimental_h5.object_appearance_state",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:c69722a6a19239e861088576fc8c288add7e29091e6beddb4e5ba4be9bc4d9f2"
+        },
+        "/components/independent_motion_grid/states": {
+          "schema_id": "citrus.experimental_h5.independent_motion_grid_state",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:bb5b5727ccf620408bc9401030a5b54c46cb0f4d7639c93041d51b29cbdb32fc"
+        },
+        "/components/moving_grating/states": {
+          "schema_id": "citrus.experimental_h5.moving_grating_state",
+          "schema_version": 3,
+          "definition_canonical_json_sha256": "sha256:a49ded20b50ed5dfe51648110a166597d145536a3720096bc10e59414badbc1a"
+        },
+        "/correspondence/frames/sources": {
+          "schema_id": "citrus.experimental_h5.frame_source",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:89fb7248621a41f0aa1282883b0f58cfe87ac7f6ee84c17f311738d996cb1b0a"
+        },
+        "/correspondence/{component}/sources": {
+          "schema_id": "citrus.experimental_h5.state_source",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:bc1900f286c17d07a838358673a5a7367aed0b341b64ae6a8bc3d50043267691"
+        },
+        "/events/records": {
+          "schema_id": "citrus.experimental_h5.event_record",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:086a2d3750fccbd266a308b0b8da3668eee4de4f8b1ea5e2e08faf9e408cdf63"
+        },
+        "/trials/trial_index": {
+          "schema_id": "citrus.experimental_h5.runtime_trial",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:e1fb41bf136337dba6573d0b9bbd1dabe03b12eaadc468df82523ef68cee5043"
+        },
+        "/definitions/enums/{component}": {
+          "schema_id": "citrus.experimental_h5.enum_definition",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:f0c255fb65910b51fc0dc0bfb39889dfecae618ab0935c1177a1ccf318d5f7e0"
+        },
+        "/observations/bounding_boxes": {
+          "schema_id": "citrus.experimental_h5.bounding_boxes",
+          "schema_version": 3,
+          "definition_canonical_json_sha256": "sha256:c3b7632b3036c8918394a3f54e2e382023355f2b9ba0b11a9a51a95d601938bc"
+        },
+        "/observations/region_routing": {
+          "schema_id": "citrus.experimental_h5.region_routing",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:c3bf8146ffa4c8c92c33841086a76c1900dc84661b49517a9659be1a99adaf73"
+        },
+        "/observations/region_candidates": {
+          "schema_id": "citrus.experimental_h5.region_candidates",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:744111b8b3b66d83fd04d954dfb84f386229d202daa4b53cb9ab50cf887fa310"
+        },
+        "/timing/display_submissions/frame_submissions": {
+          "schema_id": "citrus.experimental_h5.display_submission",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:4629bc9f0dbe9529117a9dfbadb4f5f3fa04458f64c6a8451cefc80415a592a4"
+        }
+      },
+      "chaser_table": {
+        "schema_id": "citrus.experimental_h5.chaser_state",
+        "schema_version": 3,
+        "definition_canonical_json_sha256": "sha256:a4b6b53678751c56dc5b2850fa6f0719933a25eebd4890114953a2168c64dbf3"
+      },
+      "bounding_boxes_table": {
+        "schema_id": "citrus.experimental_h5.bounding_boxes",
+        "schema_version": 3,
+        "definition_canonical_json_sha256": "sha256:c3b7632b3036c8918394a3f54e2e382023355f2b9ba0b11a9a51a95d601938bc"
+      },
+      "admitted_by_this_revision": true,
+      "stimulus_angle_convention": "atan2_negative_y_x_degrees",
+      "angle_semantics": "differs from frame_identity_v1 only in /components/moving_grating/states schema_version 2 -> 3 and /components/independent_motion_grid/states 1 -> 2, with the meanings of motion_direction_degrees_canvas and render_axis_degrees_canvas (moving_grating) and direction_degrees (independent_motion_grid) now counter-clockwise (+90 = up) and pointing at /metadata/session stimulus_angle_convention; no field name, type, offset or other table changes; the chaser table attributes angle_zero_direction and positive_rotation_direction are not written under angle_v1; legacy value = -value under wrap_delta (citrus-palette/angles/stimulus_angle_convention_v1.json)",
+      "frame_identity": "agent-contracts citrus-orange/frame_identity_v1: one counter per table; removed triggering_camera_frame_id (frames, moving_grating), camera_frame_id (events), start_/end_camera_frame_id (trials), source_camera_frame_id (display_submissions), target_source_frame_id (chaser_state); renamed payload_frame_id and observation_frame_id to recording_frame_id (bounding_boxes, region_routing, region_candidates) and the nested slot provenance fields to state_/source_stream_frame_id",
+      "bounding_boxes_row_rule": "one_row_per_source_frame_per_object_per_camera (as v2); recording_frame_id is Orange's recording counter from the SHAMAN v2 slot, 0 = received outside recording; consumers deduplicate in-recording rows on (recording_frame_id, payload_camera_id, box_index_in_payload) keeping the later payload_timestamp_ns_monotonic; rows with recording_frame_id 0 have no video frame"
+    },
+    "phototaxis_v1": {
+      "catalog_id": "phototaxis_v1",
+      "catalog_path": "docs/schemas/experimental_h5_core_phototaxis_v1.json",
+      "catalog_file_sha256": "sha256:cb6b86fe16f46a7aef64b051a388dc9d4b3e6bc4fbf0c6cc9791f76b755d33ed",
+      "catalog_canonical_json_sha256": "sha256:d31d90f77cf07659a0c8fea0fca83c9f9ed9e5b0a3090e11d3a9a458273dcb3c",
+      "table_versions": {
+        "chaser_state": 3,
+        "bounding_boxes": 3
+      },
+      "table_version_map": {
+        "/frames/stimulus": 2,
+        "/components/chaser/states": 3,
+        "/components/visual_appearance/states": 1,
+        "/components/independent_motion_grid/states": 2,
+        "/components/moving_grating/states": 3,
+        "/components/phototaxis/states": 1,
+        "/correspondence/frames/sources": 1,
+        "/correspondence/{component}/sources": 1,
+        "/events/records": 2,
+        "/trials/trial_index": 2,
+        "/definitions/enums/{component}": 1,
+        "/observations/bounding_boxes": 3,
+        "/observations/region_routing": 2,
+        "/observations/region_candidates": 2,
+        "/timing/display_submissions/frame_submissions": 2
+      },
+      "table_definitions": {
+        "/frames/stimulus": {
+          "schema_id": "citrus.experimental_h5.stimulus_frame",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:6babbfbd05ce4411958eee89479eee033dcddbecc0028b31d9fed2361f01b5a4"
+        },
+        "/components/chaser/states": {
+          "schema_id": "citrus.experimental_h5.chaser_state",
+          "schema_version": 3,
+          "definition_canonical_json_sha256": "sha256:a4b6b53678751c56dc5b2850fa6f0719933a25eebd4890114953a2168c64dbf3"
+        },
+        "/components/visual_appearance/states": {
+          "schema_id": "citrus.experimental_h5.object_appearance_state",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:c69722a6a19239e861088576fc8c288add7e29091e6beddb4e5ba4be9bc4d9f2"
+        },
+        "/components/independent_motion_grid/states": {
+          "schema_id": "citrus.experimental_h5.independent_motion_grid_state",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:bb5b5727ccf620408bc9401030a5b54c46cb0f4d7639c93041d51b29cbdb32fc"
+        },
+        "/components/moving_grating/states": {
+          "schema_id": "citrus.experimental_h5.moving_grating_state",
+          "schema_version": 3,
+          "definition_canonical_json_sha256": "sha256:a49ded20b50ed5dfe51648110a166597d145536a3720096bc10e59414badbc1a"
+        },
+        "/components/phototaxis/states": {
+          "schema_id": "citrus.experimental_h5.phototaxis_state",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:ce989c043104b5d97b10fd459128509a2c1d50202c8e0b725c14b1e0439cc83f"
+        },
+        "/correspondence/frames/sources": {
+          "schema_id": "citrus.experimental_h5.frame_source",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:89fb7248621a41f0aa1282883b0f58cfe87ac7f6ee84c17f311738d996cb1b0a"
+        },
+        "/correspondence/{component}/sources": {
+          "schema_id": "citrus.experimental_h5.state_source",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:bc1900f286c17d07a838358673a5a7367aed0b341b64ae6a8bc3d50043267691"
+        },
+        "/events/records": {
+          "schema_id": "citrus.experimental_h5.event_record",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:086a2d3750fccbd266a308b0b8da3668eee4de4f8b1ea5e2e08faf9e408cdf63"
+        },
+        "/trials/trial_index": {
+          "schema_id": "citrus.experimental_h5.runtime_trial",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:e1fb41bf136337dba6573d0b9bbd1dabe03b12eaadc468df82523ef68cee5043"
+        },
+        "/definitions/enums/{component}": {
+          "schema_id": "citrus.experimental_h5.enum_definition",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:f0c255fb65910b51fc0dc0bfb39889dfecae618ab0935c1177a1ccf318d5f7e0"
+        },
+        "/observations/bounding_boxes": {
+          "schema_id": "citrus.experimental_h5.bounding_boxes",
+          "schema_version": 3,
+          "definition_canonical_json_sha256": "sha256:c3b7632b3036c8918394a3f54e2e382023355f2b9ba0b11a9a51a95d601938bc"
+        },
+        "/observations/region_routing": {
+          "schema_id": "citrus.experimental_h5.region_routing",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:c3bf8146ffa4c8c92c33841086a76c1900dc84661b49517a9659be1a99adaf73"
+        },
+        "/observations/region_candidates": {
+          "schema_id": "citrus.experimental_h5.region_candidates",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:744111b8b3b66d83fd04d954dfb84f386229d202daa4b53cb9ab50cf887fa310"
+        },
+        "/timing/display_submissions/frame_submissions": {
+          "schema_id": "citrus.experimental_h5.display_submission",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:4629bc9f0dbe9529117a9dfbadb4f5f3fa04458f64c6a8451cefc80415a592a4"
+        }
+      },
+      "chaser_table": {
+        "schema_id": "citrus.experimental_h5.chaser_state",
+        "schema_version": 3,
+        "definition_canonical_json_sha256": "sha256:a4b6b53678751c56dc5b2850fa6f0719933a25eebd4890114953a2168c64dbf3"
+      },
+      "bounding_boxes_table": {
+        "schema_id": "citrus.experimental_h5.bounding_boxes",
+        "schema_version": 3,
+        "definition_canonical_json_sha256": "sha256:c3b7632b3036c8918394a3f54e2e382023355f2b9ba0b11a9a51a95d601938bc"
+      },
+      "admitted_by_this_revision": true,
+      "stimulus_angle_convention": "atan2_negative_y_x_degrees",
+      "angle_semantics": "differs from frame_identity_v1 only in /components/moving_grating/states schema_version 2 -> 3 and /components/independent_motion_grid/states 1 -> 2, with the meanings of motion_direction_degrees_canvas and render_axis_degrees_canvas (moving_grating) and direction_degrees (independent_motion_grid) now counter-clockwise (+90 = up) and pointing at /metadata/session stimulus_angle_convention; no field name, type, offset or other table changes; the chaser table attributes angle_zero_direction and positive_rotation_direction are not written under angle_v1; legacy value = -value under wrap_delta (citrus-palette/angles/stimulus_angle_convention_v1.json)",
+      "frame_identity": "agent-contracts citrus-orange/frame_identity_v1: one counter per table; removed triggering_camera_frame_id (frames, moving_grating), camera_frame_id (events), start_/end_camera_frame_id (trials), source_camera_frame_id (display_submissions), target_source_frame_id (chaser_state); renamed payload_frame_id and observation_frame_id to recording_frame_id (bounding_boxes, region_routing, region_candidates) and the nested slot provenance fields to state_/source_stream_frame_id",
+      "bounding_boxes_row_rule": "one_row_per_source_frame_per_object_per_camera (as v2); recording_frame_id is Orange's recording counter from the SHAMAN v2 slot, 0 = received outside recording; consumers deduplicate in-recording rows on (recording_frame_id, payload_camera_id, box_index_in_payload) keeping the later payload_timestamp_ns_monotonic; rows with recording_frame_id 0 have no video frame",
+      "phototaxis_semantics": "phototaxis_v1 adds one table to angle_v1, /components/phototaxis/states schema_version 1 (reactive heading split: one row per stimulus update while a PHOTOTAXIS step with fill_type heading_split is active; raw heading and midline, held midline, input_used 1 pose / 2 held / 3 fallback, fallback_id, hold age, SHAMAN slot identities and pose engine hash64s; step constants only in the trial index step named by protocol_step_index), plus the enum datasets /definitions/enums/phototaxis_input_used, phototaxis_fallbacks and phototaxis_heading_status; every other table, field, type, offset and meaning is angle_v1's (verify_citrus_definition_pins.py verify_phototaxis_drift)"
+    },
+    "video_overlay_v1": {
+      "catalog_id": "video_overlay_v1",
+      "catalog_path": "docs/schemas/experimental_h5_core_video_overlay_v1.json",
+      "catalog_file_sha256": "sha256:544d7d1095a1591961b307b5acd0a0d61a0c486ea475d7ea218289f62f980733",
+      "catalog_canonical_json_sha256": "sha256:709723c94085a4353d65f5018f4d96d776089725b4c88a13563fbe7cb9a7db96",
+      "table_versions": {
+        "chaser_state": 3,
+        "bounding_boxes": 3
+      },
+      "table_version_map": {
+        "/frames/stimulus": 2,
+        "/components/chaser/states": 3,
+        "/components/visual_appearance/states": 1,
+        "/components/independent_motion_grid/states": 2,
+        "/components/moving_grating/states": 3,
+        "/components/phototaxis/states": 1,
+        "/components/video_tracking_overlay/states": 1,
+        "/correspondence/frames/sources": 1,
+        "/correspondence/{component}/sources": 1,
+        "/events/records": 2,
+        "/trials/trial_index": 2,
+        "/definitions/enums/{component}": 1,
+        "/observations/bounding_boxes": 3,
+        "/observations/region_routing": 2,
+        "/observations/region_candidates": 2,
+        "/timing/display_submissions/frame_submissions": 2
+      },
+      "table_definitions": {
+        "/frames/stimulus": {
+          "schema_id": "citrus.experimental_h5.stimulus_frame",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:6babbfbd05ce4411958eee89479eee033dcddbecc0028b31d9fed2361f01b5a4"
+        },
+        "/components/chaser/states": {
+          "schema_id": "citrus.experimental_h5.chaser_state",
+          "schema_version": 3,
+          "definition_canonical_json_sha256": "sha256:a4b6b53678751c56dc5b2850fa6f0719933a25eebd4890114953a2168c64dbf3"
+        },
+        "/components/visual_appearance/states": {
+          "schema_id": "citrus.experimental_h5.object_appearance_state",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:c69722a6a19239e861088576fc8c288add7e29091e6beddb4e5ba4be9bc4d9f2"
+        },
+        "/components/independent_motion_grid/states": {
+          "schema_id": "citrus.experimental_h5.independent_motion_grid_state",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:bb5b5727ccf620408bc9401030a5b54c46cb0f4d7639c93041d51b29cbdb32fc"
+        },
+        "/components/moving_grating/states": {
+          "schema_id": "citrus.experimental_h5.moving_grating_state",
+          "schema_version": 3,
+          "definition_canonical_json_sha256": "sha256:a49ded20b50ed5dfe51648110a166597d145536a3720096bc10e59414badbc1a"
+        },
+        "/components/phototaxis/states": {
+          "schema_id": "citrus.experimental_h5.phototaxis_state",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:ce989c043104b5d97b10fd459128509a2c1d50202c8e0b725c14b1e0439cc83f"
+        },
+        "/components/video_tracking_overlay/states": {
+          "schema_id": "citrus.experimental_h5.video_overlay_state",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:ec4815deb78264cb1fa94dc8d59afd2a7fe87de1b56deae6eb1caaba4c342eb8"
+        },
+        "/correspondence/frames/sources": {
+          "schema_id": "citrus.experimental_h5.frame_source",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:89fb7248621a41f0aa1282883b0f58cfe87ac7f6ee84c17f311738d996cb1b0a"
+        },
+        "/correspondence/{component}/sources": {
+          "schema_id": "citrus.experimental_h5.state_source",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:bc1900f286c17d07a838358673a5a7367aed0b341b64ae6a8bc3d50043267691"
+        },
+        "/events/records": {
+          "schema_id": "citrus.experimental_h5.event_record",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:086a2d3750fccbd266a308b0b8da3668eee4de4f8b1ea5e2e08faf9e408cdf63"
+        },
+        "/trials/trial_index": {
+          "schema_id": "citrus.experimental_h5.runtime_trial",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:e1fb41bf136337dba6573d0b9bbd1dabe03b12eaadc468df82523ef68cee5043"
+        },
+        "/definitions/enums/{component}": {
+          "schema_id": "citrus.experimental_h5.enum_definition",
+          "schema_version": 1,
+          "definition_canonical_json_sha256": "sha256:f0c255fb65910b51fc0dc0bfb39889dfecae618ab0935c1177a1ccf318d5f7e0"
+        },
+        "/observations/bounding_boxes": {
+          "schema_id": "citrus.experimental_h5.bounding_boxes",
+          "schema_version": 3,
+          "definition_canonical_json_sha256": "sha256:c3b7632b3036c8918394a3f54e2e382023355f2b9ba0b11a9a51a95d601938bc"
+        },
+        "/observations/region_routing": {
+          "schema_id": "citrus.experimental_h5.region_routing",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:c3bf8146ffa4c8c92c33841086a76c1900dc84661b49517a9659be1a99adaf73"
+        },
+        "/observations/region_candidates": {
+          "schema_id": "citrus.experimental_h5.region_candidates",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:744111b8b3b66d83fd04d954dfb84f386229d202daa4b53cb9ab50cf887fa310"
+        },
+        "/timing/display_submissions/frame_submissions": {
+          "schema_id": "citrus.experimental_h5.display_submission",
+          "schema_version": 2,
+          "definition_canonical_json_sha256": "sha256:4629bc9f0dbe9529117a9dfbadb4f5f3fa04458f64c6a8451cefc80415a592a4"
+        }
+      },
+      "chaser_table": {
+        "schema_id": "citrus.experimental_h5.chaser_state",
+        "schema_version": 3,
+        "definition_canonical_json_sha256": "sha256:a4b6b53678751c56dc5b2850fa6f0719933a25eebd4890114953a2168c64dbf3"
+      },
+      "bounding_boxes_table": {
+        "schema_id": "citrus.experimental_h5.bounding_boxes",
+        "schema_version": 3,
+        "definition_canonical_json_sha256": "sha256:c3b7632b3036c8918394a3f54e2e382023355f2b9ba0b11a9a51a95d601938bc"
+      },
+      "admitted_by_this_revision": true,
+      "stimulus_angle_convention": "atan2_negative_y_x_degrees",
+      "angle_semantics": "differs from frame_identity_v1 only in /components/moving_grating/states schema_version 2 -> 3 and /components/independent_motion_grid/states 1 -> 2, with the meanings of motion_direction_degrees_canvas and render_axis_degrees_canvas (moving_grating) and direction_degrees (independent_motion_grid) now counter-clockwise (+90 = up) and pointing at /metadata/session stimulus_angle_convention; no field name, type, offset or other table changes; the chaser table attributes angle_zero_direction and positive_rotation_direction are not written under angle_v1; legacy value = -value under wrap_delta (citrus-palette/angles/stimulus_angle_convention_v1.json)",
+      "frame_identity": "agent-contracts citrus-orange/frame_identity_v1: one counter per table; removed triggering_camera_frame_id (frames, moving_grating), camera_frame_id (events), start_/end_camera_frame_id (trials), source_camera_frame_id (display_submissions), target_source_frame_id (chaser_state); renamed payload_frame_id and observation_frame_id to recording_frame_id (bounding_boxes, region_routing, region_candidates) and the nested slot provenance fields to state_/source_stream_frame_id",
+      "bounding_boxes_row_rule": "one_row_per_source_frame_per_object_per_camera (as v2); recording_frame_id is Orange's recording counter from the SHAMAN v2 slot, 0 = received outside recording; consumers deduplicate in-recording rows on (recording_frame_id, payload_camera_id, box_index_in_payload) keeping the later payload_timestamp_ns_monotonic; rows with recording_frame_id 0 have no video frame",
+      "phototaxis_semantics": "phototaxis_v1 adds one table to angle_v1, /components/phototaxis/states schema_version 1 (reactive heading split: one row per stimulus update while a PHOTOTAXIS step with fill_type heading_split is active; raw heading and midline, held midline, input_used 1 pose / 2 held / 3 fallback, fallback_id, hold age, SHAMAN slot identities and pose engine hash64s; step constants only in the trial index step named by protocol_step_index), plus the enum datasets /definitions/enums/phototaxis_input_used, phototaxis_fallbacks and phototaxis_heading_status; every other table, field, type, offset and meaning is angle_v1's (verify_citrus_definition_pins.py verify_phototaxis_drift)",
+      "video_overlay_semantics": "video_overlay_v1 adds one table to phototaxis_v1, /components/video_tracking_overlay/states schema_version 1 (the session video's fish dot and heading arrow, never projected: one row per stimulus update while the video_tracking_overlay component is declared; decision_draw, drawn = decision and the encoder accepted the frame, input_used 0 none / 1 current box / 2 held box, arena-local and camera positions, box slot identity and payload publish time, current-pose heading with heading_valid and midline_valid, arrow origin and direction, arrow_drawn, pose slot identity and object index), the session JSON /components/video_tracking_overlay/settings_json and the enum dataset /definitions/enums/video_overlay_input_used; every other table, field, type, offset and meaning is phototaxis_v1's (verify_citrus_definition_pins.py verify_video_overlay_drift)"
+    }
+  }
+}
