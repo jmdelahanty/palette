@@ -10,14 +10,14 @@ POST /api/peer/flags/<flag_id>/resolve      resolve: task owner, flag author, or
 Any active labeling user (or an admin) may use these routes. Reads go through
 fisheye.labeling.peer_review, which never returns a saved, unapplied payload
 and never opens a Zarr for writing. The two POST routes write only the
-labeling_frame_flags table.
+labeling_frame_flags table. Cross-origin POSTs are refused for every Flask
+route by ``web_app.install_same_origin_guard``.
 """
 
 from __future__ import annotations
 
 from http import HTTPStatus
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Mapping
 
 from flask import Flask, Response, request
@@ -38,7 +38,7 @@ from .web_admin_api import _json, _last_arg, _request_adapter
 from .web_app import claimed_route
 from .web_auth import _is_admin_user, _resolve_user
 from .web_auth_errors import _authentication_required_error_details
-from .web_responses import _format_error, request_has_same_origin
+from .web_responses import _format_error
 from .web_static import static_url
 
 PEER_REVIEW_PAGE_PATH = "/peer"
@@ -63,12 +63,6 @@ def _peer_user_or_error(state: Any) -> tuple[str | None, Response | None]:
         code = "unknown_labeling_user" if not bool(known.get("registry_row_present")) else "inactive_labeling_user"
         return None, _error(code, HTTPStatus.FORBIDDEN, "Ask the operator to add or activate this user.")
     return user, None
-
-
-def _same_origin_or_error(state: Any) -> Response | None:
-    if state.config.csrf_same_origin and not request_has_same_origin(SimpleNamespace(headers=request.headers)):
-        return _error("same_origin_required", HTTPStatus.FORBIDDEN, "Cross-origin mutating requests are rejected.")
-    return None
 
 
 def _store_path(state: Any) -> Path:
@@ -139,9 +133,6 @@ def register_peer_review_routes(app: Flask, state: Any) -> None:
         user, error = _peer_user_or_error(state)
         if error is not None:
             return error
-        error = _same_origin_or_error(state)
-        if error is not None:
-            return error
         body = request.get_json(silent=True)
         if not isinstance(body, Mapping):
             return _error("payload_validation", HTTPStatus.BAD_REQUEST, "Expected a JSON object body.")
@@ -172,9 +163,6 @@ def register_peer_review_routes(app: Flask, state: Any) -> None:
     )
     def peer_review_resolve_flag(flag_id: str) -> Response:
         user, error = _peer_user_or_error(state)
-        if error is not None:
-            return error
-        error = _same_origin_or_error(state)
         if error is not None:
             return error
         try:

@@ -83,6 +83,7 @@ Names are chosen from what consumers already read, to keep churn low. All are op
 | `dish_updated_at` | str | verbatim server string |
 | `source_dish_population_count` | int | fish in the source dish; **not** the subject count |
 | `mzb_fish_id`, `mzb_fish_revision`, `mzb_fish_updated_at` | str, int, str | verified only when `fish_reference.status == collected` |
+| `mzb_fish_unit_id` | str | the picked fish's MetaZebrobot `current_unit_id` as served at start (Citrus subject identity v3 amendment, 2026-10-14); only when `fish_reference.status == collected`; a housing record at `mzb_fish_revision`, not where the fish was during the recording |
 | `subject_lookup` | {`status`, `reason`} | `collected` \| `not_collected` \| `lookup_failed` |
 | `fish_reference` | {`status`, `reason`} | same vocabulary |
 | `zebrobot_service` | {`service_commit`, `service_commit_dirty`, `consumer_schema_sha256`, `matches_pin`} | the build that served the dish, when sealed |

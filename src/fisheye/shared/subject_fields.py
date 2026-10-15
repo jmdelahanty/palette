@@ -39,7 +39,7 @@ _MANUAL_SOURCES = frozenset(
 )
 
 TEXT_FIELDS = ("species", "sex", "genotype", "line_strain", "cross_id", "dish_id", "dish_uuid",
-               "dish_updated_at", "mzb_fish_id", "mzb_fish_updated_at")
+               "dish_updated_at", "mzb_fish_id", "mzb_fish_updated_at", "mzb_fish_unit_id")
 
 
 def _text(value: Any) -> str | None:

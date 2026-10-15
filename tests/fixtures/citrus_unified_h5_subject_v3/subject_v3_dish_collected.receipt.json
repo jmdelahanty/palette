@@ -1,0 +1,38 @@
+{
+  "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+  "contract": {
+    "acceptance_contract_sha256": "sha256:e6da1570f1a56fd6371b74aa18f2422abc555820e44ed4ea7c932309a4b1bce1",
+    "acceptance_id": "obsbindacc_e6da1570f1a56fd6371b74aa18f2422abc555820e44ed4ea7c932309a4b1bce1",
+    "citrus_artifacts": [],
+    "citrus_experiment_id": "citexp_fec136512c91983475a6d7bfe9eb9b46036fa5a6c5e4d95ea4db360a613b8be3",
+    "citrus_session_uuid": "citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80",
+    "finalized_at_utc": "2026-09-07T12:00:00Z",
+    "h5_artifact": {
+      "relative_path": "citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair.h5",
+      "sha256": "sha256:003296d0b769efbd9f573c0f14f245e083dc4598e652768fffadc94aabc53141",
+      "size_bytes": 879472
+    },
+    "observation_context_id": "obsctx_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80",
+    "protocol_semantic": {
+      "semantic_sha256": "sha256:0233393c4c3cb41b2763139e2613f360b81d544c7334bfb0216722d52e39534a",
+      "status": "available"
+    },
+    "request_contract_sha256": "sha256:67215f966ded52264bdbcc7546a85e2e124374bf5c85f706b9e91f051fb1ba15",
+    "request_id": "obsbindreq_67215f966ded52264bdbcc7546a85e2e124374bf5c85f706b9e91f051fb1ba15",
+    "runtime_geometry_contract_sha256": "sha256:6292a2a23d4864ddcd2bf2db5d7c4acd2213e925c92c49b85cfcf2bf399798f7",
+    "schema_id": "citrus.recording_observation_finalized_receipt",
+    "schema_version": 2,
+    "session_status": "COMPLETE",
+    "target": {
+      "arena_id": "arena_1",
+      "camera_id": "CAM-42",
+      "canvas_name": "synthetic-canvas",
+      "rig_id": "synthetic-preservation-rig",
+      "source_camera_stream_id": "CAM-42"
+    }
+  },
+  "contract_sha256": "sha256:e3f3aa67adbd40e9de94e9918e7ce7687590e632270e723159b4e081fc5efc7d",
+  "receipt_id": "obsbindfin_e3f3aa67adbd40e9de94e9918e7ce7687590e632270e723159b4e081fc5efc7d",
+  "schema_id": "citrus.recording_observation_finalized_receipt",
+  "schema_version": 2
+}
