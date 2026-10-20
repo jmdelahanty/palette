@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .appearance import validate_appearance_witness
@@ -69,6 +69,11 @@ class UnifiedH5Admission:
     catalog: str
     stimulus_angle_convention: str
     selector_eligible: bool = False
+    # Producer defects read under a recorded rule (phototaxis states), and
+    # reactive step-first rows whose freshness the file cannot show. Present
+    # in the claims only when non-empty, so earlier admissions are unchanged.
+    producer_defects: dict = field(default_factory=dict)
+    unverified_phototaxis_step_starts: int = 0
 
     def manifest_claims(self):
         return {
@@ -89,6 +94,12 @@ class UnifiedH5Admission:
             "catalog": self.catalog,
             "stimulus_angle_convention": self.stimulus_angle_convention,
             "selector_eligible": False,
+            **({"producer_defects": self.producer_defects} if self.producer_defects else {}),
+            **(
+                {"unverified_phototaxis_step_starts": self.unverified_phototaxis_step_starts}
+                if self.unverified_phototaxis_step_starts
+                else {}
+            ),
         }
 
 
@@ -140,8 +151,9 @@ def validate_artifact(
     snapshot, execution = validate_protocol(
         h5, binding["stimulus_angle_convention"], binding["admits_heading_split"]
     )
+    phototaxis = {}
     validate_phototaxis_states(
-        h5, snapshot, execution, camera_serial=correspondence.camera_serial
+        h5, snapshot, execution, camera_serial=correspondence.camera_serial, report=phototaxis
     )
     geometry = validate_geometry(
         h5, read_json(h5, BINDING, canonical=True), integrity.table_descriptors
@@ -189,4 +201,6 @@ def validate_artifact(
         node_kinds=dict(integrity.nodes),
         catalog=binding["catalog"],
         stimulus_angle_convention=binding["stimulus_angle_convention"],
+        producer_defects=phototaxis.get("producer_defects", {}),
+        unverified_phototaxis_step_starts=phototaxis.get("unverified_step_start_rows", 0),
     )

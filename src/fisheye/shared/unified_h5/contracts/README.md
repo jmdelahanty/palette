@@ -116,6 +116,22 @@ pose observations; a reactive file must carry pose observation v2. The
 phototaxis_v1 witness H5s are under `tests/fixtures/citrus_unified_h5_phototaxis_v1`
 (agent-contracts PR 101 `citrus-palette/fixtures/phototaxis_v1/`, README verbatim).
 
+Two readings decided by Jeremy on 2026-10-19, after real 2026-10-17/18 files
+were refused, apply to the states table. (1) A raw heading drives an update
+only when it is fresh: the update consumed a new SHAMAN slot (Citrus
+`data_is_fresh`), replayed as a `pose_sequence_id` change from the previous
+update (the previous row inside a step, the video tracking overlay row at a
+step's first row). `held_age_updates` is 0 on a fresh usable heading and
+otherwise one more than the step's previous update (1 at a step's first
+update). The contract text (reactive_phototaxis_v1 §4) said any status-7
+heading; its amendment is pending. Step-first rows whose freshness the file
+cannot show are counted in the admission claim
+(`unverified_phototaxis_step_starts`). (2) Citrus builds `eab6b3b` through
+`25c31f5`, plus `431dbde` and `2719d0b`, set `pose_identity_valid` on slots
+without a pose; for those clean builds only, a row with valid 1, both hashes 0
+and `heading_status` 0 is read as identity-invalid and the admission claim
+records `producer_defects.citrus_pose_identity_valid_on_no_pose_slot_v1`.
+
 Admission revision 7 (agent-contracts PR 104 head `c8c92f1` merged `cd33be09`,
 Citrus PR 42 commits `a3849567` / `1855e374` / `20f27395` merged `1cf5fe61`;
 every vendored file re-checked byte-for-byte against the merges) sits next to revision 6:

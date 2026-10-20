@@ -152,7 +152,9 @@ def _fallback_row(rows):
     rows["held_valid"] = 0
     rows["input_used"] = 3
     rows["fallback_id"] = 3
-    rows["held_age_updates"] = 61
+    # A step's first update starts with no held heading: age 1, as Citrus
+    # writes it (every step-first fallback row in the 10-17/18 recordings).
+    rows["held_age_updates"] = 1
     return rows
 
 
@@ -166,9 +168,13 @@ def _fallback_row(rows):
         (_mutate(**{"0__input_used": 0}), "phototaxis_input_used_unknown"),
         (_mutate(**{"0__fallback_id": 4}), "phototaxis_fallback_unknown"),
         (_mutate(**{"1__fallback_id": 3}), "phototaxis_fallback_input"),
-        (_mutate(**{"0__held_age_updates": 1}), "phototaxis_age_on_usable_heading"),
-        (_mutate(**{"1__held_age_updates": 0}), "phototaxis_lost_pose_hold_age"),
-        (_mutate(**{"1__held_age_updates": 61}), "phototaxis_hold_beyond_limit"),
+        # Without overlay states a step's first row shows freshness only by its
+        # age, so a pose row aged 1 there reads as a stale re-read (and the
+        # next row's count no longer follows).
+        (_mutate(**{"0__held_age_updates": 1}), "phototaxis_age_not_counted|phototaxis_pose_input_without_fresh_heading"),
+        (_mutate(**{"1__held_age_updates": 0}), "phototaxis_age_not_counted"),
+        (_mutate(**{"1__held_age_updates": 61}), "phototaxis_age_not_counted"),
+        (_mutate(**{"3__held_age_updates": 5}), "phototaxis_age_not_counted"),
         (_mutate(**{"0__held_angle_degrees_canvas": 37.0}), "phototaxis_pose_held_differs:held_angle_degrees_canvas"),
         (_mutate(**{"0__protocol_step_index": 1}), "phototaxis_step_not_active"),
         (_mutate(**{"0__pose_model_hash64": 1}), "phototaxis_pose_identity_mismatch"),
@@ -194,7 +200,10 @@ def test_hysteresis_hold_must_stay_under_the_threshold(tmp_path):
     rows["heading_status"][1] = 7
     rows["heading_valid"][1] = 1
     rows["midline_valid"][1] = 1
-    rows["held_age_updates"][1] = 0
+    # A hysteresis hold reads a new slot (fresh), so its age is 0 and the
+    # count restarts after it.
+    rows["pose_sequence_id"][1] = rows["pose_sequence_id"][0] + 1
+    rows["held_age_updates"][1:] = (0, 1, 2)
     rows["heading_camera_angle_degrees"][1] = rows["held_camera_angle_degrees"][1] + 4.0
     assert _validate(_write(tmp_path / "hold.h5", rows)) == 4
     rows["heading_camera_angle_degrees"][1] = rows["held_camera_angle_degrees"][1] + 6.0
@@ -210,13 +219,17 @@ def test_fallback_must_be_the_step_fallback(tmp_path):
         _validate(_write(tmp_path / "other.h5", rows))
 
 
+def test_hold_beyond_the_step_limit_is_refused(tmp_path):
+    path = _write(tmp_path / "limit.h5", _consistent_rows())  # held ages 1, 2, 3
+    with pytest.raises(UnifiedH5ContractError, match="phototaxis_hold_beyond_limit"):
+        _validate(path, snapshot=_snapshot({**REACTIVE, "maximum_held_heading_updates": 2}))
+
+
 def test_hold_never_has_no_age_limit(tmp_path):
-    rows = _consistent_rows()
-    rows["held_age_updates"][1] = 10_000
-    _validate(
-        _write(tmp_path / "never.h5", rows),
-        snapshot=_snapshot({**REACTIVE, "maximum_held_heading_updates": "never"}),
-    )
+    path = _write(tmp_path / "never.h5", _consistent_rows())
+    _validate(path, snapshot=_snapshot({**REACTIVE, "maximum_held_heading_updates": "never"}))
+    with pytest.raises(UnifiedH5ContractError, match="phototaxis_hold_beyond_limit"):
+        _validate(path, snapshot=_snapshot({**REACTIVE, "maximum_held_heading_updates": 0}))
 
 
 def test_pose_input_needs_its_pose_row(tmp_path):
@@ -262,7 +275,8 @@ def test_rows_in_the_overlap_frame_follow_their_named_step(tmp_path):
 def test_a_fallback_first_row_is_valid(tmp_path):
     rows = _consistent_rows()
     first = _fallback_row(rows)
-    first["held_age_updates"] = 0
+    # The pose update after it read a new slot.
+    first["pose_sequence_id"] = rows["pose_sequence_id"][0] - 1
     later = rows.copy()
     later["stimulus_frame_num"] += 1
     combined = np.concatenate([first, later])
@@ -281,3 +295,37 @@ def test_source_camera_must_be_the_binding_and_pose_slot_camera(tmp_path):
         _validate(_write(tmp_path / "binding.h5", _consistent_rows(), shaman_camera=3))
     with pytest.raises(UnifiedH5ContractError, match="phototaxis_source_camera_not_pose_slot"):
         _validate(_write(tmp_path / "slot.h5", _consistent_rows(), pose_camera=3))
+
+
+def test_a_fresh_usable_heading_restarts_the_age(tmp_path):
+    rows = _consistent_rows()
+    # Row 1 reads a new slot with a usable heading 4 degrees from the held one:
+    # a hysteresis hold, so its age must be 0.
+    for raw, held in (("midline_origin_canvas_px", "held_origin_canvas_px"),
+                      ("midline_direction_canvas", "held_direction_canvas"),
+                      ("midline_left_canvas", "held_left_canvas"),
+                      ("midline_angle_degrees_canvas", "held_angle_degrees_canvas")):
+        rows[raw][1] = rows[held][1]
+    rows["heading_origin_camera_px"][1] = rows["heading_origin_camera_px"][0]
+    rows["heading_status"][1] = 7
+    rows["heading_valid"][1] = 1
+    rows["midline_valid"][1] = 1
+    rows["heading_camera_angle_degrees"][1] = rows["held_camera_angle_degrees"][1] + 4.0
+    rows["pose_sequence_id"][1] = rows["pose_sequence_id"][0] + 1
+    with pytest.raises(UnifiedH5ContractError, match="phototaxis_age_on_fresh_heading"):
+        _validate(_write(tmp_path / "aged.h5", rows))  # ages still 1, 2, 3
+    # The same usable heading re-read from the same slot is stale: age grows.
+    rows["pose_sequence_id"][1] = rows["pose_sequence_id"][0]
+    assert _validate(_write(tmp_path / "stale.h5", rows)) == 4
+
+
+def test_a_fallback_never_coincides_with_a_fresh_usable_heading(tmp_path):
+    rows = _consistent_rows()
+    rows["input_used"][0] = 3
+    rows["fallback_id"][0] = 3
+    for name in ("held_camera_angle_degrees", "held_origin_canvas_px", "held_direction_canvas",
+                 "held_left_canvas", "held_angle_degrees_canvas"):
+        rows[name][0] = 0
+    rows["held_valid"][0] = 0
+    with pytest.raises(UnifiedH5ContractError, match="phototaxis_fallback_with_fresh_heading"):
+        _validate(_write(tmp_path / "fallback.h5", rows))
