@@ -329,3 +329,70 @@ def test_a_fallback_never_coincides_with_a_fresh_usable_heading(tmp_path):
     rows["held_valid"][0] = 0
     with pytest.raises(UnifiedH5ContractError, match="phototaxis_fallback_with_fresh_heading"):
         _validate(_write(tmp_path / "fallback.h5", rows))
+
+
+def _no_pose_identity_rows():
+    # Row 2 is a lost-pose hold (heading_status 0); the defective writer still
+    # claimed its slot identity, with both hashes 0.
+    rows = _consistent_rows()
+    rows["pose_identity_valid"][2] = 1
+    rows["pose_model_hash64"][2] = 0
+    rows["pose_skeleton_hash64"][2] = 0
+    assert rows["heading_status"][2] == 0
+    return rows
+
+
+def _with_build(path, commit, dirty=0):
+    with h5py.File(path, "a") as h5:
+        session = h5.require_group("/metadata/session")
+        session.attrs["git_commit_hash"] = commit
+        session.attrs["build_dirty"] = np.int32(dirty)
+    return path
+
+
+DEFECT_BUILD = "2228a0b1c1fac0d42df1e1d68e7bb0bb06ac3a93"
+
+
+def test_no_pose_identity_from_a_listed_build_is_read_and_recorded(tmp_path):
+    from fisheye.shared.unified_h5.phototaxis import POSE_IDENTITY_NO_POSE_DEFECT
+
+    path = _with_build(_write(tmp_path / "defect.h5", _no_pose_identity_rows()), DEFECT_BUILD)
+    report = {}
+    with h5py.File(path, "r") as h5:
+        assert validate_phototaxis_states(
+            h5, _snapshot(), _execution(), camera_serial=CAMERA, report=report
+        ) == 4
+    assert report["producer_defects"] == {
+        POSE_IDENTITY_NO_POSE_DEFECT: {"rows": 1, "citrus_build": DEFECT_BUILD}
+    }
+
+
+@pytest.mark.parametrize(
+    ("commit", "dirty"),
+    [
+        (None, 0),  # no recorded build
+        ("0" * 40, 0),  # a build outside the list (for example the fix)
+        (DEFECT_BUILD, 1),  # a dirty build of a listed commit
+    ],
+)
+def test_no_pose_identity_outside_the_listed_builds_is_refused(tmp_path, commit, dirty):
+    path = _write(tmp_path / "defect.h5", _no_pose_identity_rows())
+    if commit is not None:
+        _with_build(path, commit, dirty)
+    with pytest.raises(UnifiedH5ContractError, match="phototaxis_pose_identity_mismatch"):
+        _validate(path)
+
+
+def test_the_defect_rule_matches_only_its_exact_shape(tmp_path):
+    rows = _no_pose_identity_rows()
+    rows["pose_model_hash64"][2] = 1  # one hash nonzero: not the defect
+    path = _with_build(_write(tmp_path / "shape.h5", rows), DEFECT_BUILD)
+    with pytest.raises(UnifiedH5ContractError, match="phototaxis_pose_identity_mismatch"):
+        _validate(path)
+    rows = _no_pose_identity_rows()
+    rows["pose_identity_valid"][0] = 1
+    rows["pose_model_hash64"][0] = 0
+    rows["pose_skeleton_hash64"][0] = 0  # zero hashes on a status-7 pose row
+    path = _with_build(_write(tmp_path / "status.h5", rows), DEFECT_BUILD)
+    with pytest.raises(UnifiedH5ContractError, match="phototaxis_pose_identity_mismatch"):
+        _validate(path)
