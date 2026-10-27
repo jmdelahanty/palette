@@ -168,3 +168,68 @@ def test_bounding_rect_floors_min_and_max_like_opencv():
     horizon = np.array([[1.0, 0, 0], [0, 1.0, 0], [0, 0, 0.0]])
     ok, _, _ = box_arena_local(horizon, (0, 0), [0.0], [0.0], [1.0], [1.0])
     assert ok.tolist() == [False]
+
+
+DEFECT_BUILD = "2228a0b1c1fac0d42df1e1d68e7bb0bb06ac3a93"
+CANVAS = "/geometry/runtime/canvas_arena_config_json"
+
+
+def _canvas_file_scale(path: Path, value: float) -> None:
+    """The defective writer's shape: settings carry the canvas file's own scale."""
+
+    with h5py.File(path, "r+") as h5:
+        config = json.loads(h5[CANVAS][()])
+        for entry in config["arena"]["camera_calibrations"]:
+            entry["pixels_per_mm_projector"] = value
+        del h5[CANVAS]
+        h5.create_dataset(CANVAS, data=json.dumps(config), dtype=h5py.string_dtype())
+    # 10 px/mm: radius 1 mm -> 10 px, arrow 3 mm -> 30 px.
+    _edit_settings(
+        path,
+        lambda s: (
+            s.update(pixels_per_mm_projector=value, radius_px=10.0),
+            s["heading_arrow"].update(length_px=30.0),
+        ),
+    )
+
+
+def _build(path: Path, commit: str, dirty: int = 0) -> None:
+    with h5py.File(path, "r+") as h5:
+        h5["/metadata/session"].attrs["git_commit_hash"] = commit
+        h5["/metadata/session"].attrs["build_dirty"] = np.int32(dirty)
+
+
+def test_canvas_file_scale_from_a_listed_build_is_read_and_recorded(tmp_path):
+    from fisheye.shared.unified_h5.video_overlay import OVERLAY_SCALE_DEFECT
+
+    path = _copy(tmp_path)
+    _canvas_file_scale(path, 10.0)
+    _build(path, DEFECT_BUILD)
+    result = _validate(path)
+    assert result["producer_defects"] == {
+        OVERLAY_SCALE_DEFECT: {"citrus_build": DEFECT_BUILD, "scale_used": 10.0}
+    }
+
+
+@pytest.mark.parametrize(("commit", "dirty"), [("0" * 40, 0), (DEFECT_BUILD, 1)])
+def test_canvas_file_scale_outside_the_listed_clean_builds_is_refused(tmp_path, commit, dirty):
+    path = _copy(tmp_path)
+    _canvas_file_scale(path, 10.0)
+    _build(path, commit, dirty)
+    with pytest.raises(UnifiedH5ContractError, match="video_overlay_scale_authority_mismatch"):
+        _validate(path)
+
+
+def test_a_listed_build_still_needs_the_canvas_file_scale_exactly(tmp_path):
+    path = _copy(tmp_path)
+    _canvas_file_scale(path, 10.0)
+    _edit_settings(path, lambda s: s.update(pixels_per_mm_projector=11.0, radius_px=11.0))
+    _build(path, DEFECT_BUILD)
+    with pytest.raises(UnifiedH5ContractError, match="video_overlay_scale_authority_mismatch"):
+        _validate(path)
+
+
+def test_a_listed_build_with_the_correct_scale_records_nothing(tmp_path):
+    path = _copy(tmp_path)
+    _build(path, DEFECT_BUILD)
+    assert "producer_defects" not in _validate(path)

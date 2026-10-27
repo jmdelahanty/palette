@@ -163,7 +163,7 @@ def validate_artifact(
     # homography and arena origin).
     require_pose_version_for_binding(h5, binding)
     outcomes = {value["component_id"]: value for value in integrity.component_outcomes}
-    validate_video_overlay_states(
+    overlay = validate_video_overlay_states(
         h5, binding, camera_serial=correspondence.camera_serial, outcomes=outcomes
     )
     validate_recording_identity(h5, finalization_receipt, geometry, snapshot)
@@ -201,6 +201,9 @@ def validate_artifact(
         node_kinds=dict(integrity.nodes),
         catalog=binding["catalog"],
         stimulus_angle_convention=binding["stimulus_angle_convention"],
-        producer_defects=phototaxis.get("producer_defects", {}),
+        producer_defects={
+            **phototaxis.get("producer_defects", {}),
+            **overlay.get("producer_defects", {}),
+        },
         unverified_phototaxis_step_starts=phototaxis.get("unverified_step_start_rows", 0),
     )
