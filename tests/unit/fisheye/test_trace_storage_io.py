@@ -157,7 +157,15 @@ def test_real_process_tree_trace_is_replayable_and_nonpromoting(
     assert persisted == receipt
     assert receipt["payload"]["command_completed"] is True
     assert receipt["payload"]["physical_io_measured"] is True
-    assert receipt["payload"]["target_reads_observed"] is True
+    import subprocess, os
+    raw = "\n".join(
+        f"== {path.name}\n{path.read_text(errors='replace')[:4000]}"
+        for path in sorted(output.glob("strace*"))
+    )
+    versions = subprocess.run(["sh", "-c", "strace -V | head -1; head --version | head -1; uname -r; realpath " + str(tmp_path)], capture_output=True, text=True).stdout
+    assert receipt["payload"]["target_reads_observed"] is True, (
+        f"DIAG versions:\n{versions}\nDIAG target={target} payload={payload}\nDIAG reads={json.dumps(receipt['payload'].get('reads'))[:2000]}\nDIAG raw strace:\n{raw}"
+    )
     assert receipt["payload"]["benchmark_evidence_bound"] is True
     assert receipt["payload"]["benchmark_binding"]["normalized_identity"] == normalized
     assert receipt["payload"]["promotion_authorized"] is False
