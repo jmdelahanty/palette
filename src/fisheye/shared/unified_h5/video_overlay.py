@@ -41,7 +41,46 @@ FRAMES = "/frames/stimulus"
 BOXES = "/observations/bounding_boxes"
 RUNTIME_GEOMETRY = "/runtime_geometry_contract/contract_json"
 CALIBRATION = "/calibration_snapshot"
+CANVAS_CONFIG = "/runtime_geometry_contract/canvas_arena_config_json"
+SESSION = "/metadata/session"
 INPUT_NONE, INPUT_CURRENT, INPUT_HELD = 0, 1, 2
+# Citrus builds whose encoder sized the dot and arrow from the selected canvas
+# file's own camera scale (read before the start resolved the projected-surface
+# scale authority; Citrus arena.cpp:1107 vs 1186-1203), while declaring the
+# calibration snapshot as the authority: every main commit from 1cf5fe6 (PR 42,
+# the overlay) through 947cf18, plus the calibration builds 431dbde and
+# 2719d0b. Jeremy 2026-10-27: for these clean builds only, the recorded scale is
+# checked bit-for-bit against that canvas-file scale, and the reading recorded.
+# A build containing the Citrus fix gets no exception.
+OVERLAY_SCALE_DEFECT = "citrus_video_overlay_scale_from_canvas_file_v1"
+OVERLAY_SCALE_DEFECT_BUILDS = frozenset(
+    {
+        "1cf5fe6167f77739e4e01f9bcfdeee2359364688",
+        "09172aa0f1b9e23fcbd3bd74f66bb25cb1215712",
+        "f5213678a4d75118c93ef8187b1eab96c6e6f173",
+        "4533043d2a596f46666f8633e74f2ffc960a221f",
+        "e76917b18c29c6d09c2c124a3a8aa92dd5c4f94d",
+        "3853f95b9375d08338da1def242751564ab21d4c",
+        "920bf4164fd3399661fe99e85987fef0be686d57",
+        "0693b808475f431589165858b990eeef475f9eb8",
+        "5aef4b9628dc2e33aa54dd08f7ba9399d39914dd",
+        "88132a3df50af446a89bd91b07ed1555021b658b",
+        "90ccfd196b32fee9311d6c9e4c98e1b88633d3f2",
+        "ede33c8f540ad915b89e1efaf1c5ae949925d196",
+        "dcc6fb18b8a360a8501563d09e706a6820bf2c14",
+        "2228a0b1c1fac0d42df1e1d68e7bb0bb06ac3a93",
+        "dddbc916567695749143ca96767ed6d682f080f7",
+        "c8c1162e5f0be317b6a986ff2000e270078acf9f",
+        "49475be0ed5f614f89f18a4d14f5f9c78491f118",
+        "25c31f545397ce388b4f996926d83852435adba3",
+        "eae1aa73b93d295a894c58245a80bde90242dd79",
+        "741e0d70a6ef51e457d94c652fd6a404247d5556",
+        "ec90f5841ce42eaf9d96e231a42b86f340111bea",
+        "947cf1865e01ac7a1d95b3a42f88450955ada94b",
+        "431dbde658b89635c028e43c459e8b0f464912ab",
+        "2719d0ba6979cba0db5ef6d5aabd633150868339",
+    }
+)
 HEADING_VALID = 7
 PROBE_LENGTH_PX = np.float32(20.0)
 PROJECTION_EPSILON = 1e-12
@@ -246,6 +285,39 @@ def _projector_scale(h5, camera_serial: str) -> float:
     return float(np.float32(value))
 
 
+def _defect_build(h5) -> str | None:
+    """The producer commit when it is a clean build listed for the scale defect."""
+
+    if SESSION not in h5:
+        return None
+    attrs = h5[SESSION].attrs
+    commit, dirty = attrs.get("git_commit_hash"), attrs.get("build_dirty")
+    if isinstance(commit, bytes):
+        commit = commit.decode("utf-8")
+    if dirty is None or bool(int(dirty)) or commit not in OVERLAY_SCALE_DEFECT_BUILDS:
+        return None
+    return commit
+
+
+def _canvas_file_scale(h5, camera_serial: str) -> float:
+    """The selected canvas file's own scale for the active camera, as float32."""
+
+    path = _resolve(CANVAS_CONFIG)
+    require(path in h5, "video_overlay_canvas_config_missing")
+    arena = read_small_json(h5, path).get("arena")
+    require(isinstance(arena, Mapping), "video_overlay_canvas_config_arena")
+    active = arena.get("active_camera_id")
+    require(active == camera_serial, "video_overlay_canvas_active_camera")
+    matches = [
+        entry for entry in arena.get("camera_calibrations") or ()
+        if isinstance(entry, Mapping) and entry.get("camera_id") == active
+    ]
+    require(len(matches) == 1, "video_overlay_canvas_camera_calibration")
+    value = _number(matches[0].get("pixels_per_mm_projector"), "video_overlay_canvas_scale")
+    require(value > 0, "video_overlay_canvas_scale")
+    return float(np.float32(value))
+
+
 def _number(value: object, reason: str) -> float:
     require(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value), reason)
     return float(value)
@@ -267,7 +339,15 @@ def validate_settings(h5, settings: Mapping, *, camera_serial: str, pose_enabled
     require(settings["pose_observation_enabled"] is pose_enabled, "video_overlay_settings_pose_flag_mismatch")
     scale = _projector_scale(h5, camera_serial)
     recorded = _number(settings["pixels_per_mm_projector"], "video_overlay_settings_scale")
-    require(recorded == scale, "video_overlay_scale_authority_mismatch")
+    defect = None
+    if recorded != scale:
+        build = _defect_build(h5)
+        require(build is not None, "video_overlay_scale_authority_mismatch")
+        # The defect's exact shape: the recorded scale is the canvas file's,
+        # and the radius and length below are checked against it.
+        scale = _canvas_file_scale(h5, camera_serial)
+        require(recorded == scale, "video_overlay_scale_authority_mismatch")
+        defect = {OVERLAY_SCALE_DEFECT: {"citrus_build": build, "scale_used": scale}}
     radius_mm = _number(settings["radius_mm"], "video_overlay_settings_radius")
     require(radius_mm > 0 and float(F32(radius_mm)) == radius_mm, "video_overlay_settings_radius")
     require(_number(settings["radius_px"], "video_overlay_settings_radius_px") == _f32_product(radius_mm, scale), "video_overlay_settings_radius_px")
@@ -286,7 +366,7 @@ def validate_settings(h5, settings: Mapping, *, camera_serial: str, pose_enabled
         "video_overlay_settings_arrow_thickness",
     )
     _colour(arrow["color_authored_rgba"], arrow["color_quantised_rgba"], "arrow")
-    return {"held_policy": settings["held_policy"], "arrow_active": arrow["active"]}
+    return {"held_policy": settings["held_policy"], "arrow_active": arrow["active"], "producer_defects": defect or {}}
 
 
 def _colour(authored: object, quantised: object, name: str) -> None:
@@ -513,7 +593,10 @@ def validate_video_overlay_states(
 
         superseded += _check_boxes(h5, rows, homography, origin)
         _check_headings(h5, rows, homography, origin)
-    return {"rows": total, "superseded_box_rows": superseded}
+    result = {"rows": total, "superseded_box_rows": superseded}
+    if settings["producer_defects"]:
+        result["producer_defects"] = settings["producer_defects"]
+    return result
 
 
 def _check_boxes(h5, rows, homography, origin) -> int:
