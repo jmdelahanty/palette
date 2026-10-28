@@ -3,7 +3,7 @@
 version: 2
 status: active
 implementation: implemented
-last_verified: 2026-08-03
+last_verified: 2026-10-28
 -->
 
 Purpose: define the stable Palette Zarr contract for per-bout classifier
@@ -56,7 +56,7 @@ Required root attrs:
 
 ```text
 schema_id                         "analysis.bout_classification_runs"
-schema_version                    1
+schema_version                    2 (historical v1 is read as a compatibility surface only)
 classifier_family                 "megabouts" | "zebrazoom" | "stytra" | "beast_style" | "palette_native" | ...
 classifier_name                   method/model name
 source_mode                       "palette_bouts" | "external_bouts" | ...
@@ -245,13 +245,14 @@ scripts/py -m fisheye.analysis.megabouts_classifier <analysis.zarr> \
   --run-name <run>
 ```
 
-The implemented default is the strict audit/QC baseline:
+The default `--classifier-input-mode` is the strict audit/QC baseline:
 
 ```text
 --classifier-input-mode palette_prepared_fixed_windows
 ```
 
-Future model-matched Megabouts classifier runs should use:
+Model-matched Megabouts classifier runs use (implemented; it runs Megabouts
+preprocessing before classification):
 
 ```bash
 scripts/py -m fisheye.analysis.megabouts_classifier <analysis.zarr> \
@@ -274,7 +275,7 @@ For the feeding canary, the trusted comparison candidate is:
 analysis/bout_classification_runs/megabouts_classifier_onset_aligned_canary_20260501
 ```
 
-Interpret current Megabouts direct-adapter runs as "Megabouts classifier on
+Interpret default-mode Megabouts direct-adapter runs as "Megabouts classifier on
 Palette-prepared fixed windows." They are FPS-aware because Palette passes the
 resolved source FPS into Megabouts config objects and records the resulting
 window frame count, but they do not imply that full Megabouts preprocessing or
@@ -297,12 +298,13 @@ scripts/py -m fisheye.analysis.megabouts_preprocessing_comparison <analysis.zarr
 This diagnostic reports input similarity for the same source swim-bout windows.
 It only becomes a classifier-output comparison when `--classify` is provided.
 
-Current policy: the implemented persisted writer produces
+Current policy: the default persisted writer produces
 `classifier_input_mode="palette_prepared_fixed_windows"` and
 `megabouts_preprocessing=false`, which should be treated as the strict audit/QC
-baseline. A future persisted Megabouts-preprocessed mode should be the
-model-matched inference path for the Megabouts classifier, but it must record
-`classifier_input_mode="megabouts_preprocessed_full_timeseries"` plus source
+baseline. The persisted Megabouts-preprocessed mode is the model-matched
+inference path for the Megabouts classifier; it records
+`classifier_input_mode="megabouts_preprocessed_full_timeseries"`,
+`megabouts_preprocessing=true` and `megabouts_preprocessing_config`, plus source
 invalidity/coverage metadata. Megabouts preprocessing can rescue windows through
 interpolation, so those rescued classifier rows must not be conflated with
 strict Palette-valid rows.
