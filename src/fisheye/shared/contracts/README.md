@@ -35,6 +35,8 @@ before use. Change only with an explicit producer/consumer contract review.
 | `citrus_palette_heading_cases_v1.json` | agent-contracts PR 86, merged `6b63aa2`, `citrus-palette/heading/fixtures/heading_cases.json` | `9af3436fd63eeb00ea0efe2283f098b2e9e6a9905556498761a02f9bf34d6d06` |
 | `citrus_palette_stimulus_angle_convention_v1.json` | agent-contracts PR 91 head `4d0fa1597ad80fb1a1f39bdd0774da66d4dee5d9` (unchanged), merged `f3d97d46966077f3330ef8239901f78cd5a43f53`, `citrus-palette/angles/stimulus_angle_convention_v1.json`; ids in `fisheye.shared.heading_convention` (`STIMULUS_ANGLE_CONVENTION`, `LEGACY_CANVAS_ANGLE`) | `a99d82e708445db38f48919ba7ed76933b89cdb1f501d1d42b58394327e1b23c` |
 | `citrus_palette_stimulus_angle_cases_v1.json` | agent-contracts PR 91 head `4d0fa159`, merged `f3d97d46`, `citrus-palette/angles/fixtures/angle_cases.json` | `b05f4b19739c1d6ce64e1a47d30b7f0ab53910a10900418fea8b7514a10452a8` |
+| `citrus_palette_semantic_policy_pairing_v2.json` | agent-contracts PR 121 head `b63c4838eca123f337a82a37e39bddc2c8435b44` (not yet merged), `citrus-palette/angles/semantic_policy_pairing_v2.json`: pairing revision 2, semantic recipe v3 alongside v2 under angle_v1 (Citrus #86, recipe `2e870c8`); implemented by `fisheye.shared.protocol_semantic_contract` | `c0fdcab1f0c647adb2368bc499a3b0684e19f46271e38f3856d119f1dab363d6` |
+| `citrus_palette_semantic_hash_v3_cases.json` | agent-contracts PR 121 head `b63c4838`, `citrus-palette/angles/fixtures/semantic_hash_v3_cases.json` (Citrus `protocol_identity_dump`, v2 at `e13f893`, v3 at `2e870c8`); used by `tests/unit/fisheye/test_protocol_semantic_v3.py` | `5ab72f82da84bfe788b8cdb8527b8228803bd0186f0d8d59c5afcb32c1f68697` |
 
 ## Palette-published contracts
 

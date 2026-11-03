@@ -69,6 +69,19 @@ PROTOCOL_TRIAL_INDEX_NORMALIZATION_POLICIES = MappingProxyType(
 # Accepted only when the caller passes the convention its admitted binding
 # fixed; the default (legacy) keeps the historical v1/v2 contract unchanged.
 PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY = "citrus.protocol.semantic.v2"
+# Semantic recipe v3 (agent-contracts citrus-palette/angles pairing revision 2,
+# semantic_policy_pairing_v2.json; Citrus #86, recipe 2e870c8): admitted
+# alongside v2 under the same angle_v1 binding and trial index v3. v3 also
+# hashes, on every chaser step, ``z_eff`` (null when the authored value is 0),
+# ``target_radius``, chase-phase ``target_reference`` and ``loom`` whenever a
+# chaser has an ``appearance_drive``. Every protocol hash differs between v2
+# and v3; pool across them only through ``semantic_v2_relabels_to_v3``.
+PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY = "citrus.protocol.semantic.v3"
+PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICIES = (
+    PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY,
+    PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY,
+)
+CHASER_STIMULUS_MODE_ID = 12
 PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION = 3
 PROTOCOL_TRIAL_INDEX_ANGLE_V1_NORMALIZATION_POLICY = "citrus.protocol.trial_index.v3"
 
@@ -647,6 +660,107 @@ def _validate_heading_split_semantic(
             )
 
 
+def _scaled_mm(value: object, *, name: str, positive: bool) -> None:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {"scale", "unit", "value"}
+        or type(value["scale"]) is not str
+        or value["unit"] != "mm"
+        or type(value["value"]) is not int
+        or (value["value"] <= 0 if positive else value["value"] < 0)
+    ):
+        raise ProtocolSemanticContractError(
+            f"{name} must be one {'positive' if positive else 'non-negative'} "
+            "mm scaled integer."
+        )
+
+
+def _validate_recipe_v3_chaser_parameters(
+    parameters: object, *, step_index: int
+) -> None:
+    """The four chaser fields semantic recipe v3 newly hashes are well formed."""
+
+    name = f"semantic step {step_index}.parameters"
+    if not isinstance(parameters, Mapping):
+        raise ProtocolSemanticContractError(f"{name} must be one object.")
+    if "z_eff" not in parameters:
+        raise ProtocolSemanticContractError(f"{name}.z_eff is required by recipe v3.")
+    if parameters["z_eff"] is not None:
+        _scaled_mm(parameters["z_eff"], name=f"{name}.z_eff", positive=True)
+    _scaled_mm(
+        parameters.get("target_radius"), name=f"{name}.target_radius", positive=False
+    )
+    chasers = parameters.get("chasers", [])
+    if not isinstance(chasers, list):
+        raise ProtocolSemanticContractError(f"{name}.chasers must be a list.")
+    for chaser_index, chaser in enumerate(chasers):
+        label = f"{name}.chasers[{chaser_index}]"
+        if not isinstance(chaser, Mapping):
+            raise ProtocolSemanticContractError(f"{label} must be one object.")
+        if "appearance_drive" in chaser and not isinstance(chaser.get("loom"), Mapping):
+            raise ProtocolSemanticContractError(
+                f"{label}.loom is required with an appearance_drive under recipe v3."
+            )
+        program = chaser.get("behavior_program")
+        if program is None:
+            continue
+        phases = program.get("phases") if isinstance(program, Mapping) else None
+        if not isinstance(phases, list):
+            raise ProtocolSemanticContractError(
+                f"{label}.behavior_program.phases must be a list."
+            )
+        for phase_index, phase in enumerate(phases):
+            if not isinstance(phase, Mapping):
+                raise ProtocolSemanticContractError(
+                    f"{label}.behavior_program.phases[{phase_index}] must be one object."
+                )
+            reference = phase.get("target_reference")
+            if phase.get("type") == "chase" and (
+                type(reference) is not str or not reference
+            ):
+                raise ProtocolSemanticContractError(
+                    f"{label}.behavior_program.phases[{phase_index}].target_reference "
+                    "is required on a chase phase under recipe v3."
+                )
+
+
+_RELABEL_V2 = (
+    '"normalization_policy":"' + PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY + '"'
+).encode("utf-8")
+_RELABEL_V3 = (
+    '"normalization_policy":"' + PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY + '"'
+).encode("utf-8")
+
+
+def semantic_v2_relabels_to_v3(
+    v2_semantic_json_bytes: bytes, v2_semantic_hash: str, v3_semantic_hash: str
+) -> bool:
+    """Whether a v2 recording may join a v3 protocol_semantic_hash group.
+
+    The relabel pooling rule of agent-contracts pairing revision 2 (Jeremy,
+    2026-11-03), over the recorded bytes only, never a re-serialisation: the
+    bytes hash to the recorded v2 hash, the v2 policy member occurs exactly
+    once, and swapping it for the v3 member yields exactly the v3 hash. It
+    holds for label-only protocols and never for a protocol whose v3 identity
+    adds chaser fields. Semantic hash only; trial-index and execution-index
+    hashes are never joined across policies.
+    """
+
+    if type(v2_semantic_json_bytes) is not bytes:
+        raise TypeError("semantic_v2_relabels_to_v3 takes the recorded bytes.")
+    for value in (v2_semantic_hash, v3_semantic_hash):
+        if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
+            raise ProtocolSemanticContractError(
+                "protocol_semantic_hash must be 'sha256:' plus 64 lowercase hex digits."
+            )
+    if "sha256:" + sha256(v2_semantic_json_bytes).hexdigest() != v2_semantic_hash:
+        return False
+    if v2_semantic_json_bytes.count(_RELABEL_V2) != 1:
+        return False
+    relabeled = v2_semantic_json_bytes.replace(_RELABEL_V2, _RELABEL_V3)
+    return "sha256:" + sha256(relabeled).hexdigest() == v3_semantic_hash
+
+
 def validate_protocol_semantic_snapshot(
     *,
     semantic_hash: str,
@@ -663,7 +777,8 @@ def validate_protocol_semantic_snapshot(
     ``stimulus_angle_convention`` is the convention the recording's admitted
     binding fixed (never read from the payloads). Under
     ``STIMULUS_ANGLE_CONVENTION`` the snapshot must be v2 with semantic policy
-    v2 and trial index v3, each declaring that id; under the legacy default
+    v2 or recipe v3 and trial index v3, each declaring that id (recipe v3
+    also requires its well-formed chaser fields); under the legacy default
     the historical contract applies unchanged. ``admits_heading_split`` is
     likewise fixed by the admitted binding: only admission revision 6 admits a
     reactive heading-split step, and no binding sets it yet.
@@ -712,13 +827,18 @@ def validate_protocol_semantic_snapshot(
         PROTOCOL_SEMANTIC_SCHEMA_VERSION,
         name="protocol_semantic_json.schema_version",
     )
-    _require_exact(
-        semantic.get("normalization_policy"),
-        PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY
-        if angle_v1
-        else PROTOCOL_SEMANTIC_NORMALIZATION_POLICY,
-        name="protocol_semantic_json.normalization_policy",
-    )
+    semantic_policy = semantic.get("normalization_policy")
+    if angle_v1 and semantic_policy == PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY:
+        recipe_v3 = True
+    else:
+        recipe_v3 = False
+        _require_exact(
+            semantic_policy,
+            PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY
+            if angle_v1
+            else PROTOCOL_SEMANTIC_NORMALIZATION_POLICY,
+            name="protocol_semantic_json.normalization_policy",
+        )
 
     trial = _parse_object(trial_index_json, name="protocol_trial_index_json")
     _require_exact(
@@ -894,6 +1014,10 @@ def validate_protocol_semantic_snapshot(
             admits_heading_split=admits_heading_split,
             semantic_parameters=semantic_step.get("parameters"),
         )
+        if recipe_v3 and semantic_mode_id == CHASER_STIMULUS_MODE_ID:
+            _validate_recipe_v3_chaser_parameters(
+                semantic_step.get("parameters"), step_index=expected_index
+            )
         if semantic_mode_id == 4:
             parameters = semantic_step.get("parameters")
             if not isinstance(parameters, Mapping):
@@ -1303,6 +1427,7 @@ __all__ = [
     "PALETTE_PROTOCOL_SNAPSHOT_SCHEMA_VERSION",
     "PROTOCOL_SEMANTIC_HASH_H5_PATH",
     "PROTOCOL_SEMANTIC_JSON_H5_PATH",
+    "PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY",
     "PROTOCOL_TRIAL_INDEX_JSON_H5_PATH",
     "PROTOCOL_TRIAL_INDEX_HASH_H5_PATH",
     "TRIAL_INDEX_INTEGRITY_LOCAL",
@@ -1312,5 +1437,6 @@ __all__ = [
     "ProtocolStepIdentity",
     "read_materialized_protocol_semantic_snapshot",
     "read_protocol_semantic_snapshot",
+    "semantic_v2_relabels_to_v3",
     "validate_protocol_semantic_snapshot",
 ]
