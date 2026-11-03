@@ -543,17 +543,96 @@ def build_transfer_organization_plan(
     return {**plan, "plan_sha256": canonical_json_sha256(plan)}
 
 
-def _directory_identity(path: Path) -> list[int]:
+DIRECTORY_IDENTITY_SCHEMA_ID = "palette.transfer_directory_identity.v2"
+_NFS_FILESYSTEM_TYPES = frozenset({"nfs", "nfs4"})
+
+
+def _mountinfo_text() -> str:
+    return Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+
+
+def _unescape_mountinfo(value: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+
+def _mount_of(path: Path) -> dict | None:
+    """The deepest mount containing canonical ``path``, or None."""
+    matches = []
+    for line in _mountinfo_text().splitlines():
+        before, separator, after = line.partition(" - ")
+        fields, trailing = before.split(), after.split()
+        if not separator or len(fields) < 5 or len(trailing) < 2:
+            continue
+        mount_point = Path(_unescape_mountinfo(fields[4]))
+        if mount_point == path or mount_point in path.parents:
+            major, _, minor = fields[2].partition(":")
+            matches.append(
+                {
+                    "mount_point": mount_point,
+                    "device": os.makedev(int(major), int(minor)),
+                    "fstype": trailing[0],
+                    "source": _unescape_mountinfo(trailing[1]),
+                }
+            )
+    return max(matches, key=lambda item: len(item["mount_point"].parts), default=None)
+
+
+def _directory_stat(path: Path) -> os.stat_result:
     require(
         not any(p.is_symlink() for p in (path, *path.parents)),
         "directory contains a symlink",
     )
     current = path.lstat()
     require(stat.S_ISDIR(current.st_mode), "expected a real directory")
-    return [current.st_dev, current.st_ino]
+    return current
 
 
-def _require_directory(path: Path, expected: list[int]) -> None:
+def _filesystem_identity(path: Path, current: os.stat_result) -> dict:
+    mount = _mount_of(path)
+    if mount is not None and mount["fstype"] in _NFS_FILESYSTEM_TYPES:
+        # NFS st_dev is assigned per client host (98 on a batch node, 51 on
+        # ws1, 78 on login1 for one inode), so the export names the filesystem.
+        # The mount must own the directory's device, so an automount trigger or
+        # a stale parent mount is never mistaken for it.
+        require(
+            mount["device"] == current.st_dev,
+            f"NFS mount of {path} does not own its device",
+        )
+        return {"kind": "nfs_export", "fstype": mount["fstype"], "source": mount["source"]}
+    return {"kind": "local_device", "st_dev": current.st_dev}
+
+
+def _directory_identity(path: Path) -> dict:
+    current = _directory_stat(path)
+    return {
+        "schema_id": DIRECTORY_IDENTITY_SCHEMA_ID,
+        "filesystem": _filesystem_identity(path, current),
+        "st_ino": current.st_ino,
+    }
+
+
+def _require_directory(path: Path, expected: dict | list[int]) -> None:
+    """Refuse unless ``path`` is still the recorded directory.
+
+    A v1 record ``[st_dev, st_ino]`` (written before the versioned form) is
+    accepted on the recording host's device, or on an NFS export when the inode
+    matches: only the per-host st_dev is ignored. ``path`` is always the
+    plan-bound canonical path the record was written for (the plan is digest
+    bound in the same state), and symlinks are refused, so the path is unchanged.
+    """
+    if isinstance(expected, list):
+        current = _directory_stat(path)
+        require(
+            str(path.resolve()) == str(path)
+            and len(expected) == 2
+            and current.st_ino == expected[1]
+            and (
+                current.st_dev == expected[0]
+                or _filesystem_identity(path, current)["kind"] == "nfs_export"
+            ),
+            f"directory ownership lost: {path}",
+        )
+        return
     require(_directory_identity(path) == expected, f"directory ownership lost: {path}")
 
 
@@ -606,12 +685,13 @@ def _fsync_regular_file(path: Path) -> None:
 
 
 def _fsync_directory(path: Path) -> None:
-    identity = _directory_identity(path)
+    current = _directory_stat(path)
     descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         opened = os.fstat(descriptor)
         require(
-            [opened.st_dev, opened.st_ino] == identity, "durability directory changed"
+            (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino),
+            "durability directory changed",
         )
         os.fsync(descriptor)
     finally:
@@ -692,7 +772,7 @@ def _organization_state(plan: dict):
         else:
             directory.mkdir(exist_ok=False)
             state = {
-                "schema_id": "palette.transfer_organization_state.v1",
+                "schema_id": "palette.transfer_organization_state.v2",
                 "plan": plan,
                 "state_directory_identity": _directory_identity(directory),
                 "source_directory_identity": _directory_identity(
