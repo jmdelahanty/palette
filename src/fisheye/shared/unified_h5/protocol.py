@@ -21,7 +21,7 @@ def validate_protocol(
 
     ``stimulus_angle_convention`` is the admitted binding's
     (``validate_capacity_preflight(h5)["stimulus_angle_convention"]``); it
-    selects the protocol contract (semantic v2 / trial index v3 for
+    selects the protocol contract (semantic v2 or recipe v3 / trial index v3 for
     ``atan2_negative_y_x_degrees``). When omitted it is resolved from the
     file's capacity preflight binding, and a file without one is legacy
     (its admission revision predates capacity preflights). Likewise
