@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
+import stat
 
 import h5py
 import pytest
@@ -1101,3 +1103,74 @@ def test_a_declared_file_that_is_its_cameras_own_output_keeps_its_placement(tmp_
     item = next(i for i in plan["files"] if i["source"]["path"] == "Cam02010093_full.csv")
     assert (item["role"], item["camera_id"]) == ("camera_output", "02010093")
     assert [t["relative_path"] for t in item["destinations"]] == ["cams/acquisition/Cam02010093_full.csv"]
+
+
+def _mount_as_nfs(monkeypatch, mount: Path, device: int) -> None:
+    text = (
+        f"99 22 {os.major(device)}:{os.minor(device)} / {mount} rw - "
+        "nfs4 prfs.hhmi.org:/groups/johnson rw\n"
+    )
+    monkeypatch.setattr(organizer, "_mountinfo_text", lambda: text)
+
+
+def _renumber_devices(monkeypatch, device: int) -> None:
+    """Another NFS client host: every directory inode is the same, its st_dev differs."""
+    real_lstat, real_fstat = Path.lstat, os.fstat
+
+    def renumbered(result):
+        if not stat.S_ISDIR(result.st_mode):
+            return result
+        values = list(result)
+        values[2] = device
+        return os.stat_result(values)
+
+    monkeypatch.setattr(Path, "lstat", lambda self: renumbered(real_lstat(self)))
+    monkeypatch.setattr(os, "fstat", lambda fd: renumbered(real_fstat(fd)))
+
+
+def test_materialization_resumes_on_another_nfs_client_host(tmp_path, monkeypatch):
+    # 2026-10-28: six deliveries reserved in a batch job (st_dev 98) refused
+    # "directory ownership lost" when their retry ran on another node.
+    root = tmp_path.resolve()
+    source = _source(root)
+    plan = _plan(source, root / "recordings")
+    _mount_as_nfs(monkeypatch, root, root.lstat().st_dev)
+    first = organizer.materialize_transfer_organization(plan)
+    state = json.loads(
+        (organizer._state_directory(plan) / "organization_state.json").read_bytes()
+    )
+    assert state["schema_id"] == "palette.transfer_organization_state.v2"
+    assert state["source_directory_identity"]["filesystem"]["kind"] == "nfs_export"
+
+    _renumber_devices(monkeypatch, 98)
+    _mount_as_nfs(monkeypatch, root, 98)
+    assert organizer.materialize_transfer_organization(plan) == first
+
+
+def test_a_v1_state_resumes_on_another_nfs_client_host(tmp_path, monkeypatch):
+    root = tmp_path.resolve()
+    source = _source(root)
+    plan = _plan(source, root / "recordings")
+    organizer.materialize_transfer_organization(plan)
+    # The pre-v2 grammar, as a batch node recorded it ([st_dev, st_ino]).
+    path = organizer._state_directory(plan) / "organization_state.json"
+    state = json.loads(path.read_bytes())
+
+    def v1(identity):
+        return [98, identity["st_ino"]]
+
+    state["schema_id"] = "palette.transfer_organization_state.v1"
+    state["state_directory_identity"] = v1(state["state_directory_identity"])
+    state["source_directory_identity"] = v1(state["source_directory_identity"])
+    state["parent_directory_identities"] = {
+        key: v1(value) for key, value in state["parent_directory_identities"].items()
+    }
+    path.write_text(json.dumps(state))
+
+    with pytest.raises(Exception, match="directory ownership lost"):
+        organizer.materialize_transfer_organization(plan)
+    _mount_as_nfs(monkeypatch, root, root.lstat().st_dev)
+    assert organizer.materialize_transfer_organization(plan)["status"] == "materialized"
+    resumed = json.loads(path.read_bytes())
+    # Historical evidence is never rewritten into the new grammar.
+    assert resumed["source_directory_identity"] == state["source_directory_identity"]
