@@ -125,3 +125,26 @@ def test_registry_scan_and_explicit_census_backfill_recording_chasers(tmp_path: 
         registry.close()
     assert restored is not None
     assert int(restored["count"]) == 4
+
+
+def test_a_programmed_chaser_is_reported_not_written_under_another_class(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "rec_p_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    run = root.require_group("analysis/stimulus_runs").create_group("stimulus_programmed")
+    run.attrs["protocol_json"] = _protocol(
+        [
+            {"enable_chase": True, "behavior_program": {"schema_version": 2, "phases": []}},
+            {"enable_chase": False, "enable_random_movement": False},
+        ]
+    )
+
+    extraction = extract_recording_chaser_metadata(
+        zarr.open_group(str(zarr_path), mode="r", use_consolidated=False),
+        zarr_path=zarr_path,
+        recording_id="rec_p",
+    )
+
+    assert extraction.rows == ()
+    assert [issue.reason for issue in extraction.issues] == ["programmed_chaser_unsupported"]
