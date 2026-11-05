@@ -396,3 +396,16 @@ def test_the_defect_rule_matches_only_its_exact_shape(tmp_path):
     path = _with_build(_write(tmp_path / "status.h5", rows), DEFECT_BUILD)
     with pytest.raises(UnifiedH5ContractError, match="phototaxis_pose_identity_mismatch"):
         _validate(path)
+
+
+def test_age_counts_through_consecutive_fallback_updates(tmp_path):
+    rows = _consistent_rows()
+    first = _fallback_row(rows)  # a step's first update: age 1
+    second = first.copy()
+    second["stimulus_frame_num"] = first["stimulus_frame_num"] + 1
+    second["held_age_updates"] = 2
+    combined = np.concatenate([first, second])
+    assert _validate(_write(tmp_path / "counted.h5", combined)) == 2
+    combined["held_age_updates"][1] = 1  # the count must not restart after a fallback
+    with pytest.raises(UnifiedH5ContractError, match="phototaxis_age_not_counted"):
+        _validate(_write(tmp_path / "restarted.h5", combined))
