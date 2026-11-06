@@ -764,7 +764,7 @@ def test_parent_import_refusals_are_classified(
 
     session, sha = _delivery(tmp_path, "rolling")
 
-    def failed(plan, *, recording_only, lease_fd):
+    def failed(plan, *, recording_only, lease_fd, parent_workers=1):
         return [
             importing.ParentImportResult(
                 recording_id=p["identity"]["recording_id"], camera_id=p["identity"]["camera_id"],
