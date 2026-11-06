@@ -1,0 +1,32 @@
+{
+  "capture_selected": true,
+  "selection_source": "gui_operator",
+  "scene_unchanged_confirmed": true,
+  "capture_id": "2026_11_02_15_04_11",
+  "source_descriptor_path": "/home/jeremy/orange_data/backgrounds/2026_11_02_15_04_11/background.json",
+  "descriptor": {
+    "relative_path": "empty_background/background.json",
+    "size_bytes": 9876,
+    "sha256": "sha256:abababababababababababababababababababababababababababababababab"
+  },
+  "cameras": {
+    "2010095": {
+      "status": "settings_changed",
+      "image": {
+        "relative_path": "Cam2010095_empty_background.png",
+        "size_bytes": 5123456,
+        "sha256": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "settings_differences": [
+        {
+          "setting": "iris",
+          "capture_value": 19,
+          "recording_value": 20
+        }
+      ]
+    },
+    "2010096": {
+      "status": "attached"
+    }
+  }
+}
