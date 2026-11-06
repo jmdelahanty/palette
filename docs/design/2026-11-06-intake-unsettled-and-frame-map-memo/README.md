@@ -34,7 +34,16 @@ Delivery `2026_11_05_21_17_22` (4 arenas, reactive phototaxis, 239.5 GB, 252 inv
 
 ## Replay bench without new recordings
 
-Delivery `2026_11_05_17_00_17` (119 GB, solid black) can be rebuilt as a staging directory from hard links out of its imported recording folders, inverting the saved `organization_plan.json` (`/groups/johnson/johnsonlab/jeremy/scratch/intake_replay/rebuild_replay.sh`). Hard links keep the mtime the sealer attests against, so verification accepts the replay. A plan-only run matched the live plan phase (35 s). `run_citrus_session_import --apply` with `--dest-root` and `--run-dir` under scratch writes only there; the workflow lock lives in the staging copy, registration is separate, and retirement unlinks the scratch links only. Baseline (45b1ac30) and branch runs are recorded in the handoff below.
+Delivery `2026_11_05_17_00_17` (119 GB, solid black) can be rebuilt as a staging directory from hard links out of its imported recording folders, inverting the saved `organization_plan.json` (`/groups/johnson/johnsonlab/jeremy/scratch/intake_replay/rebuild_replay.sh`). Hard links keep the mtime the sealer attests against, so verification accepts the replay. A plan-only run matched the live plan phase (35 s). `run_citrus_session_import --apply` with `--dest-root` and `--run-dir` under scratch writes only there; the workflow lock lives in the staging copy, registration is separate, and retirement unlinks the scratch links only. Measured 2026-11-06 on the workstation (many cores, so parallel builders do not serialize as they do at `-n 1`; CPU seconds are the comparable number):
+
+| Run | Wall | CPU | Plan to first projection (Cam2010093) | Clip index | Digest memo | Frame maps |
+|---|---|---|---|---|---|---|
+| 45b1ac30 (live) | 439 s | 492 s | 3 min 13 s | 1 min 36 s | hits 22222, misses 2377, unsettled 1695 | not memoized |
+| this branch | 163 s | 209 s | 37 s | 6 s | hits 22218, misses 2381, unsettled 1699, 251 files, ages 0.004 to 4.999 s | hits 272, misses 16, unsettled 0 |
+
+Both runs imported and retired all four parents; the stimulus-import and finalize phases (about 1 min and 40 to 50 s) are unchanged.
+
+**What the unsettled sample says.** Every unsettled entry is a non-attested CSV/JSONL whose age is positive and under 5 s. No clock offset is involved: hard-linking a staged file into its parent directory moves the inode's ctime, and the materialization check plus every builder's opening verification run within 5 s of the last link, so about seven passes over the 251 files are refused and hashed again. The follow-up is to wait, once, until the newest linked inode has settled (at most 5 s) before the first post-link verification; it is not in this branch.
 
 ## Handoff
 
