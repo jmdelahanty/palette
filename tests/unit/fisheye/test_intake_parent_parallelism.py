@@ -391,9 +391,12 @@ def test_the_status_records_the_execution_resources_and_the_memo(tmp_path, monke
     assert workers_seen == [importing.DEFAULT_PARENT_WORKERS]
     execution = status["execution"]
     assert execution["parent_workers"] == importing.DEFAULT_PARENT_WORKERS
-    assert set(execution["digest_memo"]) == {"hits", "misses", "unsettled"}
-    assert execution["digest_memo"]["misses"] > 0  # the delivery was hashed in this job
-    assert all(isinstance(v, int) for v in execution["digest_memo"].values())
+    memo = execution["digest_memo"]
+    assert memo["misses"] > 0  # the delivery was hashed in this job
+    assert all(isinstance(memo[key], int) for key in ("hits", "misses", "unsettled", "unsettled_files"))
+    assert set(memo["frame_maps"]) == {"hits", "misses", "unsettled"}
+    assert memo["frame_maps"]["misses"] > 0 and memo["frame_maps"]["hits"] > 0
+    assert isinstance(memo["unsettled_sample"], list)
 
     shutil.rmtree(tmp_path / "run")
     assert runner.main([*arguments, "--parent-workers", "1"]) == 1
