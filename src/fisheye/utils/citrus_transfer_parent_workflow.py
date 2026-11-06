@@ -116,6 +116,9 @@ def run_transfer_parent_workflow(args) -> int:
             / ".processing_logs"
             / f"citrus_transfer_v2_{_utc_timestamp_for_path()}_{uuid.uuid4().hex[:8]}"
         )
+        execution = {}
+        if getattr(args, "parent_workers", None) is not None:
+            execution["parent_workers"] = args.parent_workers
         result = import_delivery(
             _snapshot_sha(args),
             run_dir,
@@ -123,6 +126,7 @@ def run_transfer_parent_workflow(args) -> int:
             destination_root=args.dest_root,
             session_dir=source,
             status_path=args.status_json,
+            **execution,
         )
         print(json.dumps(result.to_json(), indent=2, sort_keys=True))
         return EXIT_DONE

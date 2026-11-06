@@ -11,6 +11,7 @@ Transport verification and a parent plan are NOT scientific/media admission.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import csv
 from dataclasses import dataclass
 import datetime as dt
@@ -21,8 +22,10 @@ import json
 import os
 import re
 import stat
+import threading
+import time
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from fisheye.shared.source_recording_identity import (
     load_strict_json_object,
@@ -308,11 +311,107 @@ def source_relative(root: Path, value: Any, declared_root: str) -> str:
     return rel
 
 
-def file_ref(root: Path, relative: str) -> dict:
-    normalized_path(relative)
-    path = root / relative
-    before = path.lstat()
-    require(stat.S_ISREG(before.st_mode), f"not a regular artifact: {relative}")
+def _stat_signature(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    """The identity a verified digest is bound to: device, inode, size, mtime, ctime."""
+
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+class _DigestMemo:
+    """Digests this process already computed, each bound to a stat signature.
+
+    Verify-once within one intake job (the 2026-10-07 "option A" decision: one
+    independent Palette hash of every byte at arrival, stat identity after
+    that). An entry is keyed by (device, inode), so a hard-linked copy shares
+    the staged file's digest, and it is reused only while the file's size,
+    mtime and ctime are the ones recorded when its bytes were read. A ctime
+    cannot be set from user space, so any rewrite, truncation, replacement,
+    permission change or new hard link invalidates the entry and the file is
+    read again in full. Nothing is persisted: a new process starts empty.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: dict[tuple[int, int], tuple[tuple[int, int, int, int, int], str]] = {}
+        self.hits = 0
+        self.misses = 0
+        self.unsettled = 0
+
+    def lookup(self, info: os.stat_result) -> str | None:
+        signature = _stat_signature(info)
+        with self._lock:
+            entry = self._entries.get(signature[:2])
+            if entry is not None and entry[0] == signature:
+                self.hits += 1
+                return entry[1]
+            self.misses += 1
+            return None
+
+    def record(self, info: os.stat_result, sha256: str) -> None:
+        # Filesystem timestamps tick coarsely (milliseconds). A file whose
+        # ctime is still within the settle window of now could be rewritten in
+        # the same tick with an unchanged signature, so its digest is not kept;
+        # a later pass hashes it again and records it once it has settled.
+        if _now_ns() - info.st_ctime_ns < DIGEST_MEMO_SETTLE_NS:
+            with self._lock:
+                self.unsettled += 1
+            return
+        signature = _stat_signature(info)
+        with self._lock:
+            self._entries[signature[:2]] = (signature, sha256)
+
+
+# A file modified in the last few seconds is hashed again on the next pass; a
+# generous window also covers NFS server/client clock offsets.
+DIGEST_MEMO_SETTLE_NS = 5 * 10**9
+
+
+def _now_ns() -> int:
+    return time.time_ns()
+
+
+_digest_memo_state = threading.local()
+
+
+def active_digest_memo() -> _DigestMemo | None:
+    """The memo of the enclosing :func:`digest_memo` block, if any."""
+
+    return getattr(_digest_memo_state, "memo", None)
+
+
+@contextmanager
+def digest_memo() -> Iterator[_DigestMemo]:
+    """Hash each unchanged file once for the block; stat identity afterwards.
+
+    Opt-in and bounded to the block: every :func:`file_ref` outside it reads
+    the file's bytes as before. Threads started inside the block must enter
+    :func:`digest_memo_shared` with this memo to take part in it.
+    """
+
+    previous = active_digest_memo()
+    memo = _DigestMemo()
+    _digest_memo_state.memo = memo
+    try:
+        yield memo
+    finally:
+        _digest_memo_state.memo = previous
+
+
+@contextmanager
+def digest_memo_shared(memo: _DigestMemo | None) -> Iterator[None]:
+    """Join an existing memo from another thread (``None`` joins nothing)."""
+
+    previous = active_digest_memo()
+    _digest_memo_state.memo = memo
+    try:
+        yield
+    finally:
+        _digest_memo_state.memo = previous
+
+
+def _sha256_of_regular_file(path: Path, relative: str, before: os.stat_result) -> tuple[str, os.stat_result]:
+    """Read every byte of ``path``; refuse if the file moved under the read."""
+
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         require(
@@ -323,12 +422,27 @@ def file_ref(root: Path, relative: str) -> dict:
             digest.update(chunk)
         opened = os.fstat(stream.fileno())
     after = path.lstat()
-    signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
     require(
-        signature(before) == signature(opened) == signature(after),
+        _stat_signature(before) == _stat_signature(opened) == _stat_signature(after),
         f"artifact mutated while hashing: {relative}",
     )
-    return {"path": relative, "size_bytes": after.st_size, "sha256": digest.hexdigest()}
+    return digest.hexdigest(), after
+
+
+def file_ref(root: Path, relative: str) -> dict:
+    normalized_path(relative)
+    path = root / relative
+    before = path.lstat()
+    require(stat.S_ISREG(before.st_mode), f"not a regular artifact: {relative}")
+    memo = active_digest_memo()
+    if memo is not None:
+        known = memo.lookup(before)
+        if known is not None:
+            return {"path": relative, "size_bytes": before.st_size, "sha256": known}
+    sha256, after = _sha256_of_regular_file(path, relative, before)
+    if memo is not None:
+        memo.record(after, sha256)
+    return {"path": relative, "size_bytes": after.st_size, "sha256": sha256}
 
 
 # Video and H5 files at least this large take their sha256 from the sealed
