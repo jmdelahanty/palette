@@ -19,6 +19,7 @@ import argparse
 import json
 import re
 import sys
+import textwrap
 import uuid
 from datetime import datetime, timezone
 from html import escape
@@ -46,6 +47,30 @@ AI_DISCLOSURE = (
     "Jeremy asked for it to be sent; he is cc'd. Please reply to him with any questions."
 )
 RECORD_SCHEMA = "palette.send_email_record.v1"
+COW = (
+    "        \\   ^__^",
+    "         \\  (oo)\\_______",
+    "            (__)\\       )\\/\\",
+    "                ||----w |",
+    "                ||     ||",
+)
+COWSAY_WIDTH = 40
+
+
+def cowsay(message: str, *, width: int = COWSAY_WIDTH) -> str:
+    """The cowsay cow saying ``message``, wrapped to ``width`` columns (no dependency)."""
+
+    lines = textwrap.wrap(" ".join(message.split()), width=width) or [""]
+    inner = max(len(line) for line in lines)
+    bubble = [" " + "_" * (inner + 2)]
+    if len(lines) == 1:
+        bubble.append(f"< {lines[0]} >")
+    else:
+        for index, line in enumerate(lines):
+            left, right = ("/", "\\") if index == 0 else ("\\", "/") if index == len(lines) - 1 else ("|", "|")
+            bubble.append(f"{left} {line.ljust(inner)} {right}")
+    bubble.append(" " + "-" * (inner + 2))
+    return "\n".join([*bubble, *COW])
 
 
 def _inline(text: str) -> str:
@@ -112,6 +137,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--outbox", type=Path, default=Path(DEFAULT_OUTBOX))
     parser.add_argument("--no-ai-disclosure", action="store_true", help="Omit the AI-authorship disclosure line.")
     parser.add_argument("--no-cc-sender", action="store_true", help="Do not cc the From address.")
+    parser.add_argument("--cowsay", help="What the cow says (default: the subject).")
+    parser.add_argument("--no-cowsay", action="store_true", help="Omit the cowsay header.")
     parser.add_argument("--send", action="store_true", help="Actually send (default: preview only).")
     return parser
 
@@ -134,14 +161,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.no_cc_sender and bare_address(args.sender) not in taken | {bare_address(v) for v in cc}:
         cc.append(args.sender)
 
-    text = args.body_file.read_text(encoding="utf-8").strip("\n")
-    if not args.no_ai_disclosure:
-        text = f"{AI_DISCLOSURE}\n\n{text}"
-    text_body = text + "\n"
+    body = args.body_file.read_text(encoding="utf-8").strip("\n")
+    disclosure = None if args.no_ai_disclosure else AI_DISCLOSURE
+    cow = None if args.no_cowsay else cowsay(args.cowsay or args.subject)
+    text_body = "\n\n".join(part for part in (disclosure, cow, body) if part) + "\n"
     if args.html_file is not None:
         html_body = args.html_file.read_text(encoding="utf-8")
     elif args.body_file.suffix.lower() == ".md":
-        html_body = markdown_to_html(text)
+        header = ""
+        if disclosure:
+            header += f'<p style="color:#555"><em>{escape(disclosure)}</em></p>'
+        if cow:
+            header += (
+                '<pre style="white-space:pre;font-family:monospace;font-size:13px;line-height:1.1">'
+                f"{escape(cow)}</pre>"
+            )
+        rendered = markdown_to_html(body)
+        opening = rendered.index(">") + 1 + rendered[rendered.index(">") + 1 :].index(">") + 1
+        html_body = rendered[:opening] + header + rendered[opening:]
     else:
         html_body = None
 

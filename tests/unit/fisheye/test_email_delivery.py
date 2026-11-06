@@ -200,7 +200,7 @@ def test_relay_failure_is_recorded_not_claimed(tmp_path, monkeypatch):
 def test_flags_and_validation(tmp_path, fake_smtp, capsys):
     plain = _body(tmp_path, "note.txt", "Hello.\n")
     args = ["--to", "yurii@example.org", "--subject", "s", "--body-file", str(plain),
-            "--outbox", str(tmp_path / "o"), "--no-ai-disclosure", "--no-cc-sender", "--send"]
+            "--outbox", str(tmp_path / "o"), "--no-ai-disclosure", "--no-cc-sender", "--no-cowsay", "--send"]
     assert send_email.main(args) == 0
     (message,) = fake_smtp.instances[0].sent
     assert message["Cc"] is None
@@ -223,3 +223,31 @@ def test_address_validation():
     assert not delivery.address_is_valid("a b@c.org")
     assert not delivery.address_is_valid("nobody")
     assert not delivery.address_is_valid("")
+
+
+def test_cowsay_header_is_included_by_default(tmp_path, fake_smtp):
+    assert send_email.main([*_args(tmp_path), "--cowsay", "Fish data for you", "--send"]) == 0
+    message = fake_smtp.instances[0].sent[0]
+    text = message.get_body(("plain",)).get_content()
+    html = message.get_body(("html",)).get_content()
+    cow = send_email.cowsay("Fish data for you")
+    assert "< Fish data for you >" in cow and "(oo)" in cow
+    # Disclosure, then the cow, then the body, in both alternatives.
+    assert text.index(send_email.AI_DISCLOSURE) < text.index(cow) < text.index("Hello")
+    assert "<pre" in html and "(oo)" in html
+    assert html.index("<pre") < html.index("Hello")
+
+
+def test_cowsay_defaults_to_the_subject_and_can_be_omitted(tmp_path, fake_smtp, capsys):
+    assert send_email.main(_args(tmp_path)) == 0
+    assert send_email.cowsay("Data for you") in capsys.readouterr().out
+    assert send_email.main([*_args(tmp_path), "--no-cowsay"]) == 0
+    assert "(oo)" not in capsys.readouterr().out
+
+
+def test_cowsay_wraps_long_messages():
+    lines = send_email.cowsay("word " * 30).splitlines()
+    assert lines[1].startswith("/ ") and lines[1].endswith(" \\")
+    bubble = [line for line in lines if line[:1] in "/\\|"]
+    assert len({len(line) for line in bubble}) == 1
+    assert max(len(line) for line in bubble) <= send_email.COWSAY_WIDTH + 4
