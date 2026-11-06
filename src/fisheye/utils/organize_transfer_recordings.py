@@ -8,6 +8,7 @@ Legacy organizer/default identity and serialization contracts are unchanged.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import errno
@@ -949,16 +950,27 @@ def _materialize_file(
     _matches_file(destination.parent, destination.name, expected, identity)
 
 
-def _verify_materialized_files(plan: dict, state: dict) -> None:
-    destination = Path(plan["destination_root"])
+def _verify_materialized_files(
+    plan: dict, state: dict, *, recording_ids: frozenset[str] | None = None
+) -> None:
+    """Check every organized copy, or only the copies of the named parents.
+
+    A scoped check is a per-parent builder's own-source recheck; the whole
+    delivery is still verified before and after the per-parent work and at
+    every retirement step.
+    """
     for parent in plan["parents"]:
         key = parent["identity"]["recording_id"]
+        if recording_ids is not None and key not in recording_ids:
+            continue
         _require_directory(
             _parent_directory(plan, key), state["parent_directory_identities"][key]
         )
     identity = _SealedSourceIdentity(plan, state)
     for item in plan["files"]:
         for target in item["destinations"]:
+            if recording_ids is not None and target["recording_id"] not in recording_ids:
+                continue
             _matches_file(
                 _parent_directory(plan, target["recording_id"]),
                 target["relative_path"],
@@ -1052,10 +1064,14 @@ def resolve_materialized_parent_sources(
     require(state.get("plan") == plan, "organization state has another plan")
     _require_directory(directory, state["state_directory_identity"])
     require(state["status"] == "materialized", "parent sources are not materialized")
-    _verify_materialized_files(plan, state)
     parents = [p for p in plan["parents"] if p["identity"]["camera_id"] == camera_id]
     require(len(parents) == 1, "camera does not select one organized parent")
     parent = parents[0]
+    # The builder rechecks its own parent's copies; the whole delivery was
+    # verified when materialized and is verified again after every builder.
+    _verify_materialized_files(
+        plan, state, recording_ids=frozenset({parent["identity"]["recording_id"]})
+    )
     mapping = {
         item["source"]["path"]: target["relative_path"]
         for item in plan["files"]
@@ -1280,12 +1296,33 @@ def _set_aside_incomplete_index(plan: dict, state: dict, parent: dict, index: Pa
     )
 
 
+def run_parents_in_parallel(parents: list, work, *, workers: int) -> list:
+    """Run ``work(parent)`` for every parent; results in plan order.
+
+    One worker runs inline. With more, the threads share the caller's digest
+    memo, and the first failure propagates only after every started worker
+    has finished, so no builder is still writing when the caller refuses.
+    """
+    workers = max(1, min(int(workers), len(parents)))
+    if workers == 1:
+        return [work(parent) for parent in parents]
+    memo = _transfer_snapshot.active_digest_memo()
+
+    def in_worker(parent):
+        with _transfer_snapshot.digest_memo_shared(memo):
+            return work(parent)
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="palette-parent") as pool:
+        return list(pool.map(in_worker, parents))
+
+
 def prepare_transfer_parent_recordings(
     plan: dict,
     *,
     batch_rows: int = 65536,
     registry_path: Path | None = None,
     require_stimulus: bool = False,
+    parent_workers: int = 1,
 ) -> dict:
     """Materialize and describe exact parents, leaving actual admission pending.
 
@@ -1295,6 +1332,11 @@ def prepare_transfer_parent_recordings(
     is moved, never deleted, into this delivery's intake state directory and
     recorded in the journal, and the index is rebuilt. An index whose manifest
     exists is never replaced; if it does not verify, preparation refuses.
+
+    ``parent_workers`` is an execution resource: parents are independent, so
+    their index builds, index verification and video sync assessments may run
+    concurrently. Journal writes and parent manifests stay on the caller's
+    thread, in plan order, and the written bytes do not depend on the count.
     """
     from fisheye.utils.build_transfer_parent_frame_index import (
         build_transfer_parent_frame_index,
@@ -1321,8 +1363,7 @@ def prepare_transfer_parent_recordings(
         state["admission_contract"] = contract
         save()
         for parent in plan["parents"]:
-            directory = Path(parent["destination_dir"])
-            index = directory / INDEX_DIRECTORY
+            index = Path(parent["destination_dir"]) / INDEX_DIRECTORY
             if (
                 (index.exists() or index.is_symlink())
                 and not (index / INDEX_MANIFEST_NAME).exists()
@@ -1330,6 +1371,9 @@ def prepare_transfer_parent_recordings(
             ):
                 _set_aside_incomplete_index(plan, state, parent, index)
                 save()
+
+        def index_and_assess(parent: dict) -> dict:
+            index = Path(parent["destination_dir"]) / INDEX_DIRECTORY
             if not index.exists():
                 build_transfer_parent_frame_index(
                     Path(plan["source_dir"]),
@@ -1339,7 +1383,13 @@ def prepare_transfer_parent_recordings(
                     organization_plan=plan,
                 )
             _verify_parent_index(plan, parent)
-            assessment = _video_sync_assessment(plan, parent)
+            return _video_sync_assessment(plan, parent)
+
+        assessments = run_parents_in_parallel(
+            plan["parents"], index_and_assess, workers=parent_workers
+        )
+        for parent, assessment in zip(plan["parents"], assessments):
+            directory = Path(parent["destination_dir"])
             assessment_path = directory / VIDEO_SYNC_ASSESSMENT
             if assessment_path.exists():
                 require(
