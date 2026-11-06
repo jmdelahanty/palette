@@ -9328,3 +9328,100 @@ class RegistryMigrationMixin:
             WHERE p.declared = 1 AND p.status = 'present';
             """
         )
+
+    def _migration_077_crop_collection_consumer_readiness(self) -> None:
+        """Let clip collections pass crop readiness on their ledger proof.
+
+        A rolling clip collection has no single crop video or metadata file, so
+        its video/metadata path, existence and row-count columns are truthfully
+        NULL. The collection ledger already refused any clip whose crop video or
+        metadata was missing, or whose metadata rows differ from its frame
+        count, and it binds every member by digest. Single-file streams keep
+        their existing predicate. Only this view changes; no row is rewritten.
+        """
+
+        cur = self.conn.cursor()
+        cur.execute("DROP VIEW IF EXISTS recording_crop_video_available_current;")
+        cur.execute(
+            """
+            CREATE VIEW recording_crop_video_available_current AS
+            SELECT
+                recording_id,
+                dataset_id,
+                zarr_path,
+                stream_key,
+                stream_id,
+                camera_id,
+                CASE
+                    WHEN output_kind = 'crop'
+                     AND availability_status = 'ok'
+                     AND (COALESCE(video_exists, 0) = 1 OR collection_members_declared = 1)
+                    THEN 1
+                    ELSE 0
+                END AS crop_stream_available,
+                CASE
+                    WHEN output_kind = 'crop'
+                     AND availability_status <> 'missing_required_file'
+                     AND canonical_ledger_status = 'complete'
+                     AND canonical_ledger_record_sha256 IS NOT NULL
+                     AND canonical_ledger_row_count = frame_count
+                     AND (
+                        (
+                            COALESCE(video_exists, 0) = 1
+                            AND COALESCE(metadata_exists, 0) = 1
+                            AND canonical_ledger_row_count = metadata_row_count
+                        )
+                        OR collection_members_declared = 1
+                     )
+                    THEN 1
+                    ELSE 0
+                END AS crop_stream_consumer_ready,
+                availability_status,
+                inventory_status,
+                video_path,
+                metadata_path,
+                width,
+                height,
+                frame_count,
+                frame_rate,
+                codec,
+                encoded_format,
+                pixel_source_format,
+                color_range,
+                color_space,
+                color_transfer,
+                color_primaries,
+                video_pixel_coordinate_space,
+                source_geometry_coordinate_space,
+                blank_frame_policy,
+                selection_policy,
+                metadata_row_count,
+                frames_encoded,
+                frames_dropped,
+                canonical_ledger_status,
+                canonical_ledger_run,
+                canonical_ledger_path,
+                canonical_ledger_record_sha256,
+                canonical_ledger_source_metadata_sha256,
+                canonical_ledger_source_video_fingerprint,
+                canonical_ledger_row_count,
+                canonical_ledger_detected_row_count,
+                canonical_ledger_blank_row_count,
+                canonical_ledger_imported_at_utc,
+                updated_utc
+            FROM (
+                SELECT
+                    streams.*,
+                    CASE
+                        WHEN NOT json_valid(contract_json) OR NOT json_valid(files_json) THEN 0
+                        WHEN json_extract(contract_json, '$.source_profile') = 'rolling_clip_collection_v1'
+                         AND COALESCE(json_extract(contract_json, '$.member_count'), 0) >= 1
+                         AND json_extract(files_json, '$.recording_clip_index.exists') = 1
+                        THEN 1
+                        ELSE 0
+                    END AS collection_members_declared
+                FROM recording_acquisition_video_streams_current AS streams
+                WHERE output_kind = 'crop'
+            );
+            """
+        )

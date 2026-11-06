@@ -26,10 +26,10 @@ def _root_with_record(tmp_path: Path, **kwargs) -> zarr.Group:
     return root
 
 
-def test_migration_076_is_registered_last() -> None:
-    assert MIGRATION_METHODS[-1] == (
+def test_migration_076_is_registered() -> None:
+    assert (
         76, "recording_realtime_products", "_migration_076_recording_realtime_products"
-    )
+    ) in MIGRATION_METHODS
 
 
 def test_rows_mirror_the_record_and_the_view_joins_training_runs(tmp_path: Path) -> None:
@@ -41,7 +41,7 @@ def test_rows_mirror_the_record_and_the_view_joins_training_runs(tmp_path: Path)
 
     registry = Registry(tmp_path / "registry.sqlite")
     try:
-        assert registry._current_schema_version() == 76
+        assert registry._current_schema_version() == MIGRATION_METHODS[-1][0]
         registry.conn.execute(
             "INSERT INTO training_runs (run_id, set_id, status, model_sha256) VALUES (?, ?, 'success', ?);",
             (detections["engine_manifest_run_id"], "set", detections["weights_sha256"]),
