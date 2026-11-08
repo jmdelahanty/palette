@@ -1338,6 +1338,7 @@ def test_a_parent_without_a_subject_record_names_no_fish(tmp_path) -> None:
     assert importing._individual_fish(tmp_path / "a.zarr") is None
 
 
+@needs_media_tools
 def test_one_fish_in_two_arenas_is_refused_before_retiring_or_registering(
     tmp_path, monkeypatch
 ) -> None:
@@ -1358,6 +1359,7 @@ def test_one_fish_in_two_arenas_is_refused_before_retiring_or_registering(
     assert status["status"] == "failed" and status["import_complete"] is False
 
 
+@needs_media_tools
 def test_distinct_fish_in_every_arena_imports(tmp_path, monkeypatch) -> None:
     from fisheye.intake import importing
 
@@ -1365,3 +1367,25 @@ def test_distinct_fish_in_every_arena_imports(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(importing, "_individual_fish", lambda zarr_path: next(fish))
     _, _, _, result = _import(tmp_path, monkeypatch)
     assert result.verdict
+
+
+def test_the_refusal_names_each_repeated_fish_and_its_arenas(monkeypatch) -> None:
+    """Runs without media tools: the plan-level check on its own."""
+
+    from fisheye.intake import importing
+    from fisheye.utils import organize_transfer_recordings
+
+    parents = [{"identity": {"recording_id": f"rec_{i}"}} for i in range(4)]
+    fish = {"a0": "z5", "a1": "z5", "a2": None, "a3": "z7"}
+    monkeypatch.setattr(
+        organize_transfer_recordings, "parent_zarr_paths",
+        lambda plan: [Path(f"a{i}") for i in range(4)],
+    )
+    monkeypatch.setattr(importing, "_individual_fish", lambda zarr_path: fish[str(zarr_path)])
+    with pytest.raises(IntakeRefused) as refused:
+        importing._require_distinct_individual_fish({"parents": parents})
+    assert refused.value.code == "delivery_duplicate_individual_fish"
+    assert refused.value.details == {"repeated_fish": {"z5": ["rec_0", "rec_1"]}}
+
+    fish["a1"] = "z6"
+    importing._require_distinct_individual_fish({"parents": parents})  # distinct: admitted
