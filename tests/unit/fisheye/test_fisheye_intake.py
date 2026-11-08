@@ -1285,3 +1285,83 @@ def test_registry_newer_than_this_code_is_refused_65_before_any_backup(tmp_path,
     # The gateway may create its backup directory, but refuses before copying a backup.
     backups = registry.parent / ".palette-registry-backups"
     assert not backups.exists() or not any(backups.iterdir())
+
+
+# ------------------------------------------------- one fish in two arenas
+
+
+def _resolved_subject(subject: dict, subject_ids: tuple[str, ...]):
+    from fisheye.shared.subject_metadata import ResolvedSubjectMetadata
+
+    return ResolvedSubjectMetadata(
+        metadata={}, subject_ids=subject_ids, subject_identity_kind="explicit",
+        subject_identity_source_field="subject_id", record={}, record_sha256="",
+        group_path="analysis/subject_metadata_runs/run", run_name="run", legacy=False,
+        subject=subject,
+    )
+
+
+@pytest.mark.parametrize(
+    "subject,subject_ids,expected",
+    [
+        # v4 individual: subject_id is the MetaZebrobot fish
+        ({"subject_type": "individual", "mzb_fish_id": "fish-a"}, ("fish-a",), "fish-a"),
+        # v3: Citrus-local subject id beside the MetaZebrobot fish
+        ({"subject_type": "individual", "mzb_fish_id": "fish-a"}, ("citrus-local-1",), "fish-a"),
+        ({"subject_type": "individual"}, ("citrus-local-1",), "citrus-local-1"),
+        ({"subject_type": "dish_group", "subject_count": 3}, (), None),
+        ({"subject_type": "individual", "identity_scope": "recording_local_placeholder"}, ("p",), None),
+    ],
+)
+def test_the_fish_a_parent_names_comes_from_its_published_subject_record(
+    tmp_path, monkeypatch, subject, subject_ids, expected
+) -> None:
+    import zarr
+
+    from fisheye.intake import importing
+    from fisheye.shared import subject_metadata
+
+    zarr.open_group(str(tmp_path / "a.zarr"), mode="w")
+    monkeypatch.setattr(
+        subject_metadata, "resolve_subject_metadata",
+        lambda root, allow_legacy: _resolved_subject(subject, subject_ids),
+    )
+    assert importing._individual_fish(tmp_path / "a.zarr") == expected
+
+
+def test_a_parent_without_a_subject_record_names_no_fish(tmp_path) -> None:
+    import zarr
+
+    from fisheye.intake import importing
+
+    zarr.open_group(str(tmp_path / "a.zarr"), mode="w")
+    assert importing._individual_fish(tmp_path / "a.zarr") is None
+
+
+def test_one_fish_in_two_arenas_is_refused_before_retiring_or_registering(
+    tmp_path, monkeypatch
+) -> None:
+    from fisheye.intake import importing
+
+    _stub_checkout(monkeypatch)
+    session, sha = _delivery(tmp_path)
+    destination = _destination(tmp_path)
+    monkeypatch.setattr(importing, "_individual_fish", lambda zarr_path: "fish-z5")
+    with pytest.raises(IntakeRefused) as refused:
+        import_delivery(sha, tmp_path / "runs" / "a1", destination_root=destination, session_dir=session)
+    assert refused.value.code == "delivery_duplicate_individual_fish"
+    [(fish, recordings)] = refused.value.details["repeated_fish"].items()
+    assert fish == "fish-z5" and len(recordings) == 2
+    assert (session / MARKER_NAME).exists()  # nothing retired
+    assert not probe_import(sha, destination_root=destination).verdict
+    status = json.loads((tmp_path / "runs" / "a1" / "citrus_session_import.status.json").read_text())
+    assert status["status"] == "failed" and status["import_complete"] is False
+
+
+def test_distinct_fish_in_every_arena_imports(tmp_path, monkeypatch) -> None:
+    from fisheye.intake import importing
+
+    fish = iter(["fish-1", "fish-2"])
+    monkeypatch.setattr(importing, "_individual_fish", lambda zarr_path: next(fish))
+    _, _, _, result = _import(tmp_path, monkeypatch)
+    assert result.verdict
