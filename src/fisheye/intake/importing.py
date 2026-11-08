@@ -289,6 +289,64 @@ def _require_one_producer_commit(plan: Mapping[str, Any]) -> None:
         )
 
 
+def _individual_fish(zarr_path: Path) -> str | None:
+    """The one individual fish a parent's published subject record names, or None.
+
+    The MetaZebrobot ``mzb_fish_id`` when the record carries one (snapshot v3
+    keeps a Citrus-local ``subject_id`` beside it); otherwise the single
+    explicit subject id of an ``individual``. Groups, placeholders and parents
+    with no subject record name no fish.
+    """
+
+    import zarr
+
+    from fisheye.shared.subject_metadata import (
+        MissingSubjectMetadataError,
+        resolve_subject_metadata,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    try:
+        resolved = resolve_subject_metadata(root, allow_legacy=False)
+    except MissingSubjectMetadataError:
+        return None
+    subject = resolved.subject
+    if subject.get("identity_scope") == "recording_local_placeholder":
+        return None
+    if subject.get("mzb_fish_id"):
+        return str(subject["mzb_fish_id"])
+    if subject.get("subject_type") == "individual" and len(resolved.subject_ids) == 1:
+        return resolved.subject_ids[0]
+    return None
+
+
+def _require_distinct_individual_fish(plan: Mapping[str, Any]) -> None:
+    """Refuse a delivery that records one individual fish in two arenas.
+
+    One fish cannot be in two arenas at once, so a repeat is an operator
+    mis-pick (the 2026-10-16, 10-17 and 11-06 deliveries), never a valid
+    recording. Checked after the parents are imported and before staging is
+    retired or anything is registered: the as-recorded archives stay for a
+    correction to bind to, and the staged session stays in place.
+    """
+
+    from fisheye.utils.organize_transfer_recordings import parent_zarr_paths
+
+    arenas: dict[str, list[str]] = {}
+    for parent, zarr_path in zip(plan["parents"], parent_zarr_paths(plan)):
+        fish = _individual_fish(zarr_path)
+        if fish is not None:
+            arenas.setdefault(fish, []).append(parent["identity"]["recording_id"])
+    repeated = {fish: ids for fish, ids in sorted(arenas.items()) if len(ids) > 1}
+    if repeated:
+        raise IntakeRefused(
+            "one individual fish is recorded in more than one arena of this delivery: "
+            + "; ".join(f"{fish} in {', '.join(ids)}" for fish, ids in repeated.items()),
+            code="delivery_duplicate_individual_fish",
+            details={"repeated_fish": repeated},
+        )
+
+
 def _find_session(staging_dir: Path, snapshot_sha: str) -> Path | None:
     from fisheye.intake.discovery import MarkerRefusal, check_marker
 
@@ -571,6 +629,7 @@ def _import_under_lock(
             if all(_deterministic(parent) for parent in failed):
                 raise IntakeRefused(message, code="parent_import_refused")
             raise _ImportFailed(message)
+        _require_distinct_individual_fish(plan)
         payload["import_complete"] = True
         verify_lock()
         final = finalize_transfer_staging(
