@@ -44,6 +44,22 @@
   `GIT_SSH_COMMAND='ssh -i /home/delahantyj@hhmi.org/.ssh/delahantyj-ws1-git-id_ed25519 -o IdentitiesOnly=yes' git -C /home/delahantyj@hhmi.org/gitrepos/palette push`
 - Do not rely on plain `git push` for Palette; it may fail with `Permission denied (publickey)` or sandbox DNS errors.
 - The `/groups` fast-forward must fail closed: do not use merge commits, rebase, reset, or dirty-checkout workarounds unless the user explicitly approves.
+- Before pushing a change to `src/**/*.py` or `scripts/**/*.py`, regenerate
+  the Zarr census and commit any changed `docs/diagnostics/zarr_*` files:
+  `scripts/py -m fisheye.diagnostics.zarr_storage_census --write`.
+  CI's `generated artifacts` job fails on a stale census and then skips every
+  test shard.
+- `scripts/git-hooks/pre-push` enforces this once enabled. It checks the
+  pushed commit (~25 s) only when the branch changes census inputs relative to
+  `origin/main`; otherwise it exits immediately. On a stale census it
+  regenerates the files into the working tree (when the pushed commit is
+  `HEAD`) and refuses the push; it never commits. Bypass one push with
+  `PALETTE_SKIP_PRE_PUSH=1`.
+- Enabling the hook is a workstation config change that needs user approval:
+  `git config core.hooksPath scripts/git-hooks`. Keep the path relative so
+  each worktree runs its own branch's hook. An absolute path pins every
+  worktree to one checkout, and if that checkout's branch predates the hook,
+  git silently runs no hook at all.
 
 ## Required CI and Integration Rule
 
