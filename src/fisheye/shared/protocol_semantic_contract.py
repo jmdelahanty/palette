@@ -77,9 +77,20 @@ PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY = "citrus.protocol.semantic.v2"
 # chaser has an ``appearance_drive``. Every protocol hash differs between v2
 # and v3; pool across them only through ``semantic_v2_relabels_to_v3``.
 PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY = "citrus.protocol.semantic.v3"
+# Semantic recipe v4 (pairing revision 3, semantic_policy_pairing_v3.json;
+# Citrus #102): v3 plus one session-level ``identity.stimulus_render_rate_hz``,
+# a positive JSON integer present on every v4 identity (120 included), because
+# the chaser draws per update tick and one hash must never name a 120 Hz and a
+# 240 Hz stimulus. Every v1-v3 recording ran at 120 Hz. Trial index stays v3.
+# Pool v3 into v4 only through ``semantic_v3_relabels_to_v4``.
+PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY = "citrus.protocol.semantic.v4"
+STIMULUS_RENDER_RATE_KEY = "stimulus_render_rate_hz"
+ADMITTED_STIMULUS_RENDER_RATES_HZ = frozenset({120, 240})
+PRE_V4_STIMULUS_RENDER_RATE_HZ = 120
 PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICIES = (
     PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY,
     PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY,
+    PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY,
 )
 CHASER_STIMULUS_MODE_ID = 12
 PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION = 3
@@ -473,6 +484,16 @@ class ProtocolSemanticSnapshot:
     trial_index_payload: Mapping[str, Any]
 
     @property
+    def stimulus_render_rate_hz(self) -> int | None:
+        """The v4 identity's render rate; None before v4 (those ran at 120 Hz)."""
+
+        identity = self.semantic_payload.get("identity")
+        if not isinstance(identity, Mapping):
+            return None
+        rate = identity.get(STIMULUS_RENDER_RATE_KEY)
+        return rate if type(rate) is int else None
+
+    @property
     def mode_sequence(self) -> tuple[str, ...]:
         return tuple(step.stimulus_mode for step in self.steps)
 
@@ -730,6 +751,16 @@ _RELABEL_V2 = (
 _RELABEL_V3 = (
     '"normalization_policy":"' + PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY + '"'
 ).encode("utf-8")
+_RELABEL_V3_IDENTITY_CLOSE = b"}," + _RELABEL_V3
+_RELABEL_V4_IDENTITY_CLOSE = (
+    ',"'
+    + STIMULUS_RENDER_RATE_KEY
+    + '":'
+    + str(PRE_V4_STIMULUS_RENDER_RATE_HZ)
+    + '},"normalization_policy":"'
+    + PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY
+    + '"'
+).encode("utf-8")
 
 
 def semantic_v2_relabels_to_v3(
@@ -761,6 +792,46 @@ def semantic_v2_relabels_to_v3(
     return "sha256:" + sha256(relabeled).hexdigest() == v3_semantic_hash
 
 
+def semantic_v3_relabels_to_v4(
+    v3_semantic_json_bytes: bytes, v3_semantic_hash: str, v4_semantic_hash: str
+) -> bool:
+    """Whether a v3 recording may join a v4 protocol_semantic_hash group.
+
+    Pairing revision 3's rule, over the recorded bytes only: the bytes hash to
+    the recorded v3 hash, ``},"normalization_policy":"...semantic.v3"`` occurs
+    exactly once, and inserting ``"stimulus_render_rate_hz":120`` as the
+    identity's last key with the v4 label yields exactly the v4 hash. Only 120
+    is ever inserted (every v3 recording ran at 120 Hz), so a v3 recording
+    never joins a 240 Hz group. A v2 recording reaches v4 only through
+    ``semantic_v2_relabels_to_v3`` first. Semantic hash only.
+    """
+
+    if type(v3_semantic_json_bytes) is not bytes:
+        raise TypeError("semantic_v3_relabels_to_v4 takes the recorded bytes.")
+    for value in (v3_semantic_hash, v4_semantic_hash):
+        if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
+            raise ProtocolSemanticContractError(
+                "protocol_semantic_hash must be 'sha256:' plus 64 lowercase hex digits."
+            )
+    if "sha256:" + sha256(v3_semantic_json_bytes).hexdigest() != v3_semantic_hash:
+        return False
+    if v3_semantic_json_bytes.count(_RELABEL_V3_IDENTITY_CLOSE) != 1:
+        return False
+    relabeled = v3_semantic_json_bytes.replace(
+        _RELABEL_V3_IDENTITY_CLOSE, _RELABEL_V4_IDENTITY_CLOSE
+    )
+    return "sha256:" + sha256(relabeled).hexdigest() == v4_semantic_hash
+
+
+def _validate_recipe_v4_render_rate(identity: object) -> None:
+    rate = identity.get(STIMULUS_RENDER_RATE_KEY) if isinstance(identity, Mapping) else None
+    if type(rate) is not int or rate not in ADMITTED_STIMULUS_RENDER_RATES_HZ:
+        raise ProtocolSemanticContractError(
+            f"identity.{STIMULUS_RENDER_RATE_KEY} must be one JSON integer in "
+            f"{sorted(ADMITTED_STIMULUS_RENDER_RATES_HZ)} under recipe v4."
+        )
+
+
 def validate_protocol_semantic_snapshot(
     *,
     semantic_hash: str,
@@ -777,8 +848,9 @@ def validate_protocol_semantic_snapshot(
     ``stimulus_angle_convention`` is the convention the recording's admitted
     binding fixed (never read from the payloads). Under
     ``STIMULUS_ANGLE_CONVENTION`` the snapshot must be v2 with semantic policy
-    v2 or recipe v3 and trial index v3, each declaring that id (recipe v3
-    also requires its well-formed chaser fields); under the legacy default
+    v2, recipe v3 or recipe v4 and trial index v3, each declaring that id
+    (recipes v3 and v4 also require their well-formed chaser fields, and v4
+    its integer ``identity.stimulus_render_rate_hz``); under the legacy default
     the historical contract applies unchanged. ``admits_heading_split`` is
     likewise fixed by the admitted binding: only admission revision 6 admits a
     reactive heading-split step, and no binding sets it yet.
@@ -828,7 +900,11 @@ def validate_protocol_semantic_snapshot(
         name="protocol_semantic_json.schema_version",
     )
     semantic_policy = semantic.get("normalization_policy")
-    if angle_v1 and semantic_policy == PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY:
+    # Recipe v4 hashes everything v3 does, so it carries v3's chaser checks.
+    recipe_v4 = angle_v1 and semantic_policy == PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY
+    if recipe_v4 or (
+        angle_v1 and semantic_policy == PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY
+    ):
         recipe_v3 = True
     else:
         recipe_v3 = False
@@ -894,6 +970,12 @@ def validate_protocol_semantic_snapshot(
     )
 
     identity = semantic.get("identity")
+    if recipe_v4:
+        _validate_recipe_v4_render_rate(identity)
+    elif isinstance(identity, Mapping) and STIMULUS_RENDER_RATE_KEY in identity:
+        raise ProtocolSemanticContractError(
+            f"identity.{STIMULUS_RENDER_RATE_KEY} is allowed only under recipe v4."
+        )
     semantic_steps = identity.get("steps") if isinstance(identity, Mapping) else None
     trial_steps = trial.get("steps")
     if not isinstance(semantic_steps, list) or not isinstance(trial_steps, list):
@@ -1428,6 +1510,9 @@ __all__ = [
     "PROTOCOL_SEMANTIC_HASH_H5_PATH",
     "PROTOCOL_SEMANTIC_JSON_H5_PATH",
     "PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY",
+    "PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY",
+    "ADMITTED_STIMULUS_RENDER_RATES_HZ",
+    "PRE_V4_STIMULUS_RENDER_RATE_HZ",
     "PROTOCOL_TRIAL_INDEX_JSON_H5_PATH",
     "PROTOCOL_TRIAL_INDEX_HASH_H5_PATH",
     "TRIAL_INDEX_INTEGRITY_LOCAL",
@@ -1438,5 +1523,6 @@ __all__ = [
     "read_materialized_protocol_semantic_snapshot",
     "read_protocol_semantic_snapshot",
     "semantic_v2_relabels_to_v3",
+    "semantic_v3_relabels_to_v4",
     "validate_protocol_semantic_snapshot",
 ]
