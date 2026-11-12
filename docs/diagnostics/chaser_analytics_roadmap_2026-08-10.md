@@ -379,6 +379,11 @@ above (threat onset = realized `CHASER_CHASE_MOTION_START`). Consequences:
 - the 1 s freeze window is on average 56% pre-chase, and entirely pre-chase
   in 23% of episodes.
 
+Status as of 2026-11-12: still unfixed. On Palette `main` (e0c60e16),
+`analysis_workflows/escape_freeze_successor.py:356` still reads
+`trials["trigger_acquisition_frame_id"]` as the trial trigger, which is
+positioning start, not chase-motion start.
+
 **The 20 mm/s escape threshold does not isolate escapes (definition defect).**
 The successor's default `escape_speed_threshold_mm_s = 20.0` admits ordinary
 swim bouts. Canonical-bout rates per minute:
@@ -421,10 +426,12 @@ audit.
 
 Citrus follow-up status (2026-10-06, from the Citrus agent):
 - Outside/returned chatter: fixed (branch
-  `agent/citrus/chaser-area-event-debounce-20261006`, cb45958). As of
-  2026-10-06 this and the counter/event-detail fixes below are on local
-  Citrus main at 46794a7, not yet pushed; recordings from builds at or
-  after that commit carry them. Events require ≥ 0.5 mm outside (2 px uncalibrated) for
+  `agent/citrus/chaser-area-event-debounce-20261006`, cb45958). This and
+  the counter/event-detail fixes below are in Citrus commit 46794a7
+  (committed 2026-10-07 UTC). As of 2026-11-12 that commit is pushed: it is
+  on the first-parent history of `JohnsonLabJanelia/citrus` `main`, which
+  is 286 commits ahead of it (checked with `gh api` compare). Recordings
+  from builds at or after that commit carry these fixes. Events require ≥ 0.5 mm outside (2 px uncalibrated) for
   100 ms, and 100 ms inside to return. Event details gain
   `outside_onset_time_s` / `return_onset_time_s`,
   `max_distance_outside_px`, `debounce_enter_distance_px` and
@@ -440,7 +447,8 @@ Citrus follow-up status (2026-10-06, from the Citrus agent):
   new value, and must keep treating `behavior_program_active = false` as
   "not applicable" for older recordings.
 - Summary counters, stale `chase_probability_per_second` and
-  `in_danger_zone` ambiguity: fixed on the same Citrus branch (46794a7),
+  `in_danger_zone` ambiguity: fixed in the same Citrus commit (46794a7,
+  on Citrus `main` as of 2026-11-12),
   additive keys only. Counters are session totals marked
   `chaser_counters_scope = "session_total"` (absent = old per-window
   values; ignore). `CHASER_TRAINING_START` gains `schedule_mode`;
