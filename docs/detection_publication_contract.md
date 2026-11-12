@@ -16,10 +16,11 @@ see [recording_analysis_pipeline_contract.md](recording_analysis_pipeline_contra
 
 ## Construction boundary
 
-`fisheye.shared.detection_candidate.build_detection_candidate` is the shared
+`fisheye.detection.candidate_builder.build_detection_candidate` is the shared
 entry point for creating a complete disposable detection candidate. It invokes
 the low-level YOLO implementation but does not promote selectors or update the
-registry.
+registry. `fisheye.shared.detection_candidate` holds the candidate build
+authority marker and the default shard sizes.
 
 The low-level writer refuses an existing canonical analysis Zarr before any
 model loading or output mutation. A full-recording candidate may write only to
@@ -54,10 +55,13 @@ Failure before activation leaves the previous canonical selectors and registry
 success state unchanged. Consolidation or visibility-validation failure after
 the direct selector write restores the prior selectors, retains the attempted
 run as an immutable failed and selector-ineligible tombstone, and reconsolidates
-that fail-closed state. Failed local scratch is retained only when explicitly
-requested.
+that fail-closed state. Local scratch is removed after a successful
+publication unless `--keep-scratch` is given; a failed attempt's local scratch
+is always retained.
 
-This direct adapter is retained as an explicit compatibility surface. New
+This direct adapter is retained as an explicit compatibility surface and
+refuses to run unless `legacy_compatibility_publish=True`
+(`--legacy-compatibility-publish`) is passed. New
 production recipes must not route through it because its detector-local layout
 is published directly below `detect_runs` before canonical assembly.
 
