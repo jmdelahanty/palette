@@ -23,10 +23,15 @@ include:
 
 ## Implementation Status
 
-The video-backed reviewer implements the complete video-review discovery and
+The video-backed reviewer implements the video-review discovery order and
 required-column path described below, including the root
-`recording_frame_index_path` authority and required `video_path`. The
-standalone `resolve_clipped_refined_detect_collection` utility currently
+`recording_frame_index_path` authority and required `video_path`. It does not
+yet reject duplicate selected `(camera_serial, clip_id)` pairs (a later entry
+silently replaces an earlier one), and when `parent_frame_index` is absent it
+treats the frame-index row position as the parent frame without deriving or
+logging `recording_frame_id - 1`. Its source-geometry lookup takes the first
+positive `width`/`source_video_width` value without the conflict check below.
+The standalone `resolve_clipped_refined_detect_collection` utility currently
 implements explicit-path and collection-plan discovery only, treats
 `video_path` as optional in its generic frame/run mapping, and does not itself
 materialize the `recording_frame_id - 1` compatibility projection. Callers
