@@ -3,7 +3,7 @@
 version: 2
 status: active
 implementation: implemented
-last_verified: 2026-08-07
+last_verified: 2026-10-28
 -->
 
 Purpose: define a canonical, reproducible summary payload for keypoint (pose)

@@ -850,6 +850,15 @@ def _backfill_recording_entities(
                 recording_dir=recording_dir,
             )
         )
+        if verified_import is None:
+            # B7: a sibling artifact inside a recording directory whose
+            # recording is bound to a verified current-source import uses that
+            # bound identity, not the legacy session_uuid fallback.
+            bound_for_dir = registry.verified_source_recording_at_directory(
+                recording_dir
+            )
+            if bound_for_dir is not None:
+                recording_id = str(bound_for_dir["recording_id"])
         now = registry.conn.execute("SELECT datetime('now') AS now;").fetchone()["now"]
         recording_name = manifest.get("recording_name") or recording_dir.name
         started_utc = manifest.get("session_start_iso8601_utc")
@@ -912,7 +921,13 @@ def _backfill_recording_entities(
         if existing_recording is None:
             recordings_upserted += 1
 
-        if not dry_run and verified_import is None:
+        # B7: a recording bound to a verified current-source import (via this
+        # dataset or a sibling) is written only by the identity authority.
+        recording_owned_by_authority = (
+            verified_import is not None
+            or registry.verified_source_recording_binding(recording_id) is not None
+        )
+        if not dry_run and not recording_owned_by_authority:
             registry.conn.execute(
                 """
                 INSERT INTO recordings (

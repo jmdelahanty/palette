@@ -21,6 +21,7 @@ import h5py
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
+from fisheye.shared.recording_manifest_seal import require_unsealed_recording_manifest
 from fisheye.shared.recording_preflight import (
     PRECHECK_FAIL,
     PRECHECK_NOT_RUN,
@@ -821,6 +822,9 @@ def _persist_preflight_to_manifest(
     )
 
     try:
+        require_unsealed_recording_manifest(
+            manifest_path, tool="fisheye.utils.organize_recordings preflight persistence"
+        )
         manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except Exception as exc:
         return f"Failed to update preflight manifest for {plan.name}: {exc}"

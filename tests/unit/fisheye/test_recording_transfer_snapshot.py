@@ -395,3 +395,15 @@ def test_inspection_cli_does_not_downgrade_failed_proof(
     captured = capsys.readouterr()
     assert not captured.out
     assert "frame_identity_proof" in json.loads(captured.err)["error"]
+
+
+@pytest.mark.parametrize("key", ["source_dir", "destination_dir"])
+@pytest.mark.parametrize("char", ["\x1f", "\x7f", "\x85", "\x9f"])
+def test_delivery_dirs_refuse_c0_c1_controls_like_the_sealer(tmp_path: Path, key: str, char: str) -> None:
+    # citrus-recording-transfer 1.0.1 refuses U+0000-U+001F and U+007F-U+009F here.
+    root = copy_bundle(tmp_path)
+    marker = json.loads((root / MARKER_NAME).read_bytes())
+    marker["delivery"][key] = f"/fixtures/bad{char}dir"
+    write_json(root / MARKER_NAME, marker)
+    with pytest.raises(TransferSnapshotError, match=f"delivery {key}"):
+        verify_transfer_snapshot(root)

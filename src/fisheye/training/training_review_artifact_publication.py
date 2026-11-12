@@ -20,7 +20,7 @@ import numpy as np
 from fisheye.shared.atomic_run_publisher import (
     tree_inventory,
 )
-from fisheye.refinement.finalize_subject_masks import finalize_subject_masks
+from fisheye.refinement.finalize_subject_masks import EDITABLE_REVIEW_METRIC_LEVEL, finalize_subject_masks
 from fisheye.shared.json_safety import json_attr_safe, write_json_atomic
 from fisheye.shared.keypoint_manual_review_qc import (
     build_default_manual_keypoint_qc_policy,
@@ -1046,7 +1046,7 @@ def publish_training_review_artifact(
             target_crop_run=run_ids["crop"],
             refined_run=run_ids["editable_refined_subject_masks"],
             components=("subject_body", "eyes_union", "swim_bladder"),
-            metric_level="cheap",
+            metric_level=EDITABLE_REVIEW_METRIC_LEVEL,
             write_eye_geometry=False,
             write_component_contours=False,
             write_sampled_component_contours=False,

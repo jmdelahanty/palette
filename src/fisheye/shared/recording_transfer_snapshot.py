@@ -11,6 +11,7 @@ Transport verification and a parent plan are NOT scientific/media admission.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import csv
 from dataclasses import dataclass
 import datetime as dt
@@ -21,8 +22,10 @@ import json
 import os
 import re
 import stat
+import threading
+import time
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from fisheye.shared.source_recording_identity import (
     load_strict_json_object,
@@ -39,7 +42,85 @@ CONTEXT_FIELDS = (
 )
 OBSERVATION_BINDING_DIR = "recording_observation_bindings"
 OBSERVATION_FINALIZATION_PATH = f"{OBSERVATION_BINDING_DIR}/finalized_collection.json"
+# Sealer 3.1.0 (agent-contracts citrus-recording-transfer-3.1): Citrus receipt
+# v2 declares every per-session file Citrus writes under citrus/. Sealer 3.2.0:
+# receipt v3 is v2 plus contract.subject_reference (the MetaZebrobot-confirmed
+# subject Citrus recorded; agent-contracts citrus-orange subject_declaration_v1).
+# It changes nothing on disk, so a v3 head seals exactly like a v2 head
+# (snapshot v3, marker v4); the sealer checks subject_reference structurally
+# and leaves its semantics to Citrus (writer) and Orange/Palette (readers).
+# Sealer 3.3.0: receipt v4 is v3 with contract.subject_reference
+# citrus.subject_reference v2 (subject identity v4; agent-contracts #105).
+# Receipt v3 pairs only with reference v1 and receipt v4 only with v2. A head
+# of v4 receipts seals like v2 and v3 heads (snapshot v3, marker v4); a
+# collection whose revisions mix v3 and v4 receipts is refused, and a v4 head's
+# earlier revisions must be v4 as well.
+SNAPSHOT_VERSION_CITRUS_ARTIFACTS = 3  # head receipts all v2, all v3 or all v4
+MARKER_SCHEMA_V4 = "citrus.transfer_completion_marker.v4"  # pairs with snapshot v3
+MARKER_VERSION_V4 = 4
+CITRUS_DIR = "citrus"
+RECEIPT_VERSIONS = (1, 2, 3, 4)
+RECEIPT_VERSIONS_CITRUS_ARTIFACTS = (2, 3, 4)
+RECEIPT_KEYS = {"schema_id", "schema_version", "canonicalization", "receipt_id",
+                "contract_sha256", "contract"}
+RECEIPT_V2_CONTRACT_KEYS = {
+    "schema_id", "schema_version", "request_id", "request_contract_sha256",
+    "acceptance_id", "acceptance_contract_sha256", "observation_context_id",
+    "finalized_at_utc", "citrus_experiment_id", "citrus_session_uuid", "target",
+    "h5_artifact", "session_status", "runtime_geometry_contract_sha256",
+    "protocol_semantic", "citrus_artifacts"}
+RECEIPT_V3_CONTRACT_KEYS = RECEIPT_V2_CONTRACT_KEYS | {"subject_reference"}
+RECEIPT_V4_CONTRACT_KEYS = RECEIPT_V3_CONTRACT_KEYS
+RECEIPT_CONTRACT_KEYS = {2: RECEIPT_V2_CONTRACT_KEYS, 3: RECEIPT_V3_CONTRACT_KEYS,
+                         4: RECEIPT_V4_CONTRACT_KEYS}
+# citrus.subject_reference version each receipt version carries (strict pairing).
+SUBJECT_REFERENCE_VERSION = {3: 1, 4: 2}
+# citrus.subject_reference v1 (agent-contracts citrus-orange/; the receipt v3
+# schema that embeds it is pinned by digest in the tests): key sets only, the
+# schema's allOf conditionals are the readers' business.
+SUBJECT_REFERENCE_SCHEMA = "citrus.subject_reference"
+SUBJECT_REFERENCE_KEYS = {
+    "schema_id", "schema_version", "dish_id", "lookup_status", "lookup_reason",
+    "lookup_http_status", "queried_at_utc", "dish", "fish_status", "fish_reason", "fish",
+    "subject_id", "subject_type", "subject_count", "zebrobot_version", "source"}
+SUBJECT_REFERENCE_OBJECT_KEYS = {
+    "dish": {"dish_id", "dish_uuid", "dish_revision", "dish_updated_at", "fish_count",
+             "cross_id"},
+    "fish": {"fish_id", "revision", "updated_at"},
+    "zebrobot_version": {"base_url", "api_schema_version", "service_commit",
+                         "service_commit_dirty", "consumer_schema_sha256", "http_status",
+                         "error"}}
+CITRUS_ROLE_ORDER = ("stimulus_video", "stimulus_video_container_finalization",
+                     "update_timing", "process_diagnostic")
+CITRUS_ROLE_SUFFIX = {"stimulus_video": ".mp4",
+                      "stimulus_video_container_finalization": ".mp4.finalization.json",
+                      "update_timing": "_update_timing.csv",
+                      "process_diagnostic": "_threading_startup.json"}
+CITRUS_ARTIFACT_KEYS = {"role", "relative_path", "size_bytes", "sha256"}
+# Recordings made before Citrus wrote per-session diagnostics (rule 8).
+PRE310_DIAGNOSTIC = re.compile(
+    r"citrus/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z"
+    r"_threading_startup_[0-9]+\.json")
+STIMULUS_FINALIZATION_SCHEMA = "citrus.stimulus_video_container_finalization"
+STIMULUS_FINALIZATION_FACTS = {"schema_id", "schema_version", "status", "terminal",
+                               "trailer_written", "output_closed",
+                               "container_file_size_bytes"}
+REVISION_REASON = "citrus_receipt_v2_upgrade"
+REVISION_FIXED_CONTEXT_FIELDS = (
+    "observation_context_id", "observation_identity_sha256", "observation_identity",
+    "request", "acceptance", "citrus_h5", "status")
+VIDEO_SUFFIXES = (".mp4", ".mkv", ".avi", ".h265", ".hevc")
 MARKER_SCHEMA = "citrus.transfer_completion_marker.v2"
+# Sealer >= 2.0.0 writes v3: v2 plus a provenance-only "sealer" record.
+MARKER_SCHEMA_V3 = "citrus.transfer_completion_marker.v3"
+# schema_id -> (schema_version, envelope schema definition). Sealer 3.1.0 writes
+# v4 for snapshot v3 (declared Citrus artifacts); v2/v3 seal snapshot v2 only.
+MARKER_SCHEMAS = {
+    MARKER_SCHEMA: (2, "marker"),
+    MARKER_SCHEMA_V3: (3, "marker_v3"),
+    MARKER_SCHEMA_V4: (MARKER_VERSION_V4, "marker_v4"),
+}
+SNAPSHOT_DEFINITIONS = {SNAPSHOT_VERSION: "snapshot", SNAPSHOT_VERSION_CITRUS_ARTIFACTS: "snapshot_v3"}
 CONTROL_DIR = "_citrus_transfer"
 SNAPSHOT_PATH = f"{CONTROL_DIR}/snapshot.json"
 MAX_JSON_BYTES = 64 * 1024 * 1024
@@ -53,12 +134,13 @@ class TransferSnapshotError(ValueError):
     pass
 
 
-# Citrus's transfer-v2 envelope grammar, byte-identical to
-# citrus-recording-transfer 1.0.0 (tag recording-transfer-v1.0.0, citrus 7528b2c)
-# python/citrus_recording_transfer/src/citrus_recording_transfer/schemas/;
-# Palette's reliance is in agent-contracts citrus-recording-transfer-consumers.
+# Citrus's transfer envelope grammar, byte-identical to citrus-recording-transfer
+# 3.1.0 (JohnsonLabJanelia/pancake-plate tag recording-transfer-v3.1.0, 456d7fe;
+# src/citrus_recording_transfer/schemas/; = agent-contracts
+# citrus-recording-transfer-3.1). It is the 2.0.0-3.0.0 envelope (c12832b3…) with
+# snapshot_v3 and marker_v4 added; every earlier definition is byte-identical.
 ENVELOPE_SCHEMA_FILE = "recording_transfer_v2.schema.json"
-ENVELOPE_SCHEMA_SHA256 = "4cf611312e911e165e2a9bbfeb0eb8ce0efb62b68cf3672239055e1c58ab22f1"
+ENVELOPE_SCHEMA_SHA256 = "4865374c44debc0067207053863b2520331b3decd4360520cb7175dc3f5ee6a0"
 
 
 @lru_cache(maxsize=None)
@@ -229,11 +311,107 @@ def source_relative(root: Path, value: Any, declared_root: str) -> str:
     return rel
 
 
-def file_ref(root: Path, relative: str) -> dict:
-    normalized_path(relative)
-    path = root / relative
-    before = path.lstat()
-    require(stat.S_ISREG(before.st_mode), f"not a regular artifact: {relative}")
+def _stat_signature(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    """The identity a verified digest is bound to: device, inode, size, mtime, ctime."""
+
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+class _DigestMemo:
+    """Digests this process already computed, each bound to a stat signature.
+
+    Verify-once within one intake job (the 2026-10-07 "option A" decision: one
+    independent Palette hash of every byte at arrival, stat identity after
+    that). An entry is keyed by (device, inode), so a hard-linked copy shares
+    the staged file's digest, and it is reused only while the file's size,
+    mtime and ctime are the ones recorded when its bytes were read. A ctime
+    cannot be set from user space, so any rewrite, truncation, replacement,
+    permission change or new hard link invalidates the entry and the file is
+    read again in full. Nothing is persisted: a new process starts empty.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: dict[tuple[int, int], tuple[tuple[int, int, int, int, int], str]] = {}
+        self.hits = 0
+        self.misses = 0
+        self.unsettled = 0
+
+    def lookup(self, info: os.stat_result) -> str | None:
+        signature = _stat_signature(info)
+        with self._lock:
+            entry = self._entries.get(signature[:2])
+            if entry is not None and entry[0] == signature:
+                self.hits += 1
+                return entry[1]
+            self.misses += 1
+            return None
+
+    def record(self, info: os.stat_result, sha256: str) -> None:
+        # Filesystem timestamps tick coarsely (milliseconds). A file whose
+        # ctime is still within the settle window of now could be rewritten in
+        # the same tick with an unchanged signature, so its digest is not kept;
+        # a later pass hashes it again and records it once it has settled.
+        if _now_ns() - info.st_ctime_ns < DIGEST_MEMO_SETTLE_NS:
+            with self._lock:
+                self.unsettled += 1
+            return
+        signature = _stat_signature(info)
+        with self._lock:
+            self._entries[signature[:2]] = (signature, sha256)
+
+
+# A file modified in the last few seconds is hashed again on the next pass; a
+# generous window also covers NFS server/client clock offsets.
+DIGEST_MEMO_SETTLE_NS = 5 * 10**9
+
+
+def _now_ns() -> int:
+    return time.time_ns()
+
+
+_digest_memo_state = threading.local()
+
+
+def active_digest_memo() -> _DigestMemo | None:
+    """The memo of the enclosing :func:`digest_memo` block, if any."""
+
+    return getattr(_digest_memo_state, "memo", None)
+
+
+@contextmanager
+def digest_memo() -> Iterator[_DigestMemo]:
+    """Hash each unchanged file once for the block; stat identity afterwards.
+
+    Opt-in and bounded to the block: every :func:`file_ref` outside it reads
+    the file's bytes as before. Threads started inside the block must enter
+    :func:`digest_memo_shared` with this memo to take part in it.
+    """
+
+    previous = active_digest_memo()
+    memo = _DigestMemo()
+    _digest_memo_state.memo = memo
+    try:
+        yield memo
+    finally:
+        _digest_memo_state.memo = previous
+
+
+@contextmanager
+def digest_memo_shared(memo: _DigestMemo | None) -> Iterator[None]:
+    """Join an existing memo from another thread (``None`` joins nothing)."""
+
+    previous = active_digest_memo()
+    _digest_memo_state.memo = memo
+    try:
+        yield
+    finally:
+        _digest_memo_state.memo = previous
+
+
+def _sha256_of_regular_file(path: Path, relative: str, before: os.stat_result) -> tuple[str, os.stat_result]:
+    """Read every byte of ``path``; refuse if the file moved under the read."""
+
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         require(
@@ -244,12 +422,62 @@ def file_ref(root: Path, relative: str) -> dict:
             digest.update(chunk)
         opened = os.fstat(stream.fileno())
     after = path.lstat()
-    signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
     require(
-        signature(before) == signature(opened) == signature(after),
+        _stat_signature(before) == _stat_signature(opened) == _stat_signature(after),
         f"artifact mutated while hashing: {relative}",
     )
-    return {"path": relative, "size_bytes": after.st_size, "sha256": digest.hexdigest()}
+    return digest.hexdigest(), after
+
+
+def file_ref(root: Path, relative: str) -> dict:
+    normalized_path(relative)
+    path = root / relative
+    before = path.lstat()
+    require(stat.S_ISREG(before.st_mode), f"not a regular artifact: {relative}")
+    memo = active_digest_memo()
+    if memo is not None:
+        known = memo.lookup(before)
+        if known is not None:
+            return {"path": relative, "size_bytes": before.st_size, "sha256": known}
+    sha256, after = _sha256_of_regular_file(path, relative, before)
+    if memo is not None:
+        memo.record(after, sha256)
+    return {"path": relative, "size_bytes": after.st_size, "sha256": sha256}
+
+
+# Video and H5 files at least this large take their sha256 from the sealed
+# snapshot when the Citrus sealer attests the destination (see
+# sealer_attested_inventory). Every other file, including each JSON, CSV and
+# JSONL document Palette parses, is always hashed here.
+SEALER_ATTESTED_MIN_BYTES = 16 * 1024 * 1024
+SEALER_ATTESTED_SUFFIXES = frozenset(
+    {".mp4", ".mkv", ".avi", ".h265", ".hevc", ".h5", ".hdf5"}
+)
+SEALER_VERIFICATION = "sha256_all_inventory_bytes"
+
+
+def _attested_file_ref(
+    root: Path, relative: str, sealed: dict, marker_mtime_ns: int
+) -> dict:
+    """Stat-only reference that reuses the sealer's digest for a large file.
+
+    The sealer hashed this exact destination file before writing the marker.
+    Here it must still be a regular file of the sealed size that was last
+    modified no later than the marker was written.
+    """
+
+    normalized_path(relative)
+    info = (root / relative).lstat()
+    require(stat.S_ISREG(info.st_mode), f"not a regular artifact: {relative}")
+    require(
+        info.st_size == sealed["size_bytes"],
+        f"artifact size differs from the sealed snapshot: {relative}",
+    )
+    require(
+        info.st_mtime_ns <= marker_mtime_ns,
+        f"artifact modified after the delivery was sealed: {relative}",
+    )
+    return {"path": relative, "size_bytes": info.st_size, "sha256": sealed["sha256"]}
 
 
 def _sha256_prefixed(value: bytes) -> str:
@@ -341,149 +569,381 @@ def parent_contexts(manifest: dict, cameras: list[str]) -> dict:
     return contexts
 
 
+# Ported from citrus-recording-transfer 3.3.0 snapshot.py (9f6816e7; 3.2.0 was 00787e7c, 3.1.0 was
+# 456d7fe) so Palette's independent rebuild applies the sealer's exact rules.
 def require_observation_binding_transfer_admission(
-    root: Path, manifest: dict, refs: dict[str, dict]
-) -> None:
-    """Rebuild the producer's transfer gate for bound sessions.
+        root: Path, manifest: dict, refs: dict[str, dict], *,
+        video_digests_pending: bool = False) -> dict | None:
+    """Require immutable post-close evidence when this recording was bound.
 
-    Transfer safety only, not Palette admission: a bound session must carry
-    Orange's finalized collection, each H5 and its post-close receipt with
-    matching bytes. Organization re-reads these for Palette's own checks.
+    This is a transfer-safety gate, not Palette scientific admission. The
+    Citrus whole-file receipt can only be minted after H5 close; Orange has
+    already verified those bytes before publishing the finalized collection.
+    Rechecking the collection, receipt and H5 digests here prevents a pending,
+    failed or subsequently mutated bound session from entering the transfer
+    snapshot.
+
+    Returns None for an unbound recording, otherwise the head collection's
+    receipt version, its declared Citrus artifacts and the revision chain
+    (agent-contracts citrus-recording-transfer-3.1). video_digests_pending:
+    the structure-only pre-check, whose video digests are placeholders; a
+    declared video's size is still compared, and its digest at the real seal.
     """
     binding_paths = {
-        path
-        for path in refs
+        path for path in refs
         if PurePosixPath(path).parts[:1] == (OBSERVATION_BINDING_DIR,)
     }
     projected = manifest.get("recording_observation_bindings")
     if projected is None:
-        require(
-            not binding_paths,
-            "observation binding exists without finalized manifest projection",
-        )
-        return
-    require(isinstance(projected, dict), "invalid recording-observation finalization projection")
-    require(
-        OBSERVATION_FINALIZATION_PATH in refs,
-        "bound recording lacks finalized observation collection",
-    )
-    collection = strict_json(root / OBSERVATION_FINALIZATION_PATH)
-    require(
-        collection == projected,
-        "recording manifest observation projection differs from finalized collection",
-    )
-    require(
-        collection.get("schema_id") == "orange.recording.observation_binding_finalization"
-        and type(collection.get("schema_version")) is int
-        and collection["schema_version"] == 1
-        and collection.get("status") == "finalized"
-        and collection.get("binding_status") == "bound",
-        "recording observation binding is not finalized and bound",
-    )
-    require(
-        collection.get("recording_id") == manifest.get("session_id"),
-        "observation finalization recording identity mismatch",
-    )
+        require(not binding_paths,
+                "observation binding exists without finalized manifest projection")
+        return None
+
+    require(isinstance(projected, dict),
+            "invalid recording-observation finalization projection")
+    require(OBSERVATION_FINALIZATION_PATH in refs,
+            "bound recording lacks finalized observation collection")
+    chain = observation_binding_revision_chain(root, refs)
+    revision, collection_path, collection = chain[-1]
+    expected_projection = dict(collection)
+    if len(chain) > 1:
+        expected_projection["revision_chain"] = [
+            {"revision": number, "relative_path": path,
+             "sha256": "sha256:" + refs[path]["sha256"]}
+            for number, path, _ in chain]
+    require(projected == expected_projection,
+            "recording manifest observation projection differs from finalized collection")
+    require(collection.get("schema_id") ==
+            "orange.recording.observation_binding_finalization" and
+            type(collection.get("schema_version")) is int and
+            collection["schema_version"] == (1 if revision == 1 else 2) and
+            collection.get("status") == "finalized" and
+            collection.get("binding_status") == "bound",
+            "recording observation binding is not finalized and bound")
+    require(collection.get("recording_id") == manifest.get("session_id"),
+            "observation finalization recording identity mismatch")
     contexts = collection.get("observation_contexts")
-    require(
-        isinstance(contexts, list)
-        and bool(contexts)
-        and type(collection.get("context_count")) is int
-        and collection["context_count"] == len(contexts),
-        "invalid finalized observation context set",
-    )
-    require(
-        manifest.get("observation_contexts") == contexts,
-        "recording manifest observation contexts differ from finalization",
-    )
+    require(isinstance(contexts, list) and bool(contexts) and
+            type(collection.get("context_count")) is int and
+            collection["context_count"] == len(contexts),
+            "invalid finalized observation context set")
+    require(manifest.get("observation_contexts") == contexts,
+            "recording manifest observation contexts differ from finalization")
+
     seen_contexts: set[str] = set()
     seen_h5: set[str] = set()
+    declared: list[dict] = []
+    versions: set[int] = set()
+    pre310_contexts: list[str] = []
     experiment_id = identifier(
-        collection.get("citrus_experiment_id"), "Citrus experiment identity"
-    )
+        collection.get("citrus_experiment_id"), "Citrus experiment identity")
     for context in contexts:
-        require(
-            isinstance(context, dict) and context.get("status") == "bound",
-            "observation context is not bound",
-        )
+        require(isinstance(context, dict) and context.get("status") == "bound",
+                "observation context is not bound")
         context_id = identifier(
-            context.get("observation_context_id"), "observation context identity"
-        )
-        require(context_id not in seen_contexts, "duplicate observation context identity")
+            context.get("observation_context_id"), "observation context identity")
+        require(context_id not in seen_contexts,
+                "duplicate observation context identity")
         seen_contexts.add(context_id)
+
         h5 = context.get("citrus_h5")
         require(isinstance(h5, dict), "missing finalized Citrus H5 reference")
         h5_relative = normalized_path(h5.get("relative_path"))
-        require(
-            h5_relative in refs and Path(h5_relative).suffix.lower() in (".h5", ".hdf5"),
-            "finalized Citrus H5 is absent from transfer inventory",
-        )
-        require(h5_relative not in seen_h5, "duplicate finalized Citrus H5 reference")
+        require(h5_relative in refs and
+                Path(h5_relative).suffix.lower() in (".h5", ".hdf5"),
+                "finalized Citrus H5 is absent from transfer inventory")
+        require(h5_relative not in seen_h5,
+                "duplicate finalized Citrus H5 reference")
         seen_h5.add(h5_relative)
         h5_ref = refs[h5_relative]
-        require(
-            type(h5.get("size_bytes")) is int
-            and h5["size_bytes"] == h5_ref["size_bytes"]
-            and h5.get("sha256") == "sha256:" + h5_ref["sha256"],
-            "finalized Citrus H5 size or SHA-256 mismatch",
-        )
+        require(type(h5.get("size_bytes")) is int and
+                h5["size_bytes"] == h5_ref["size_bytes"] and
+                h5.get("sha256") == "sha256:" + h5_ref["sha256"],
+                "finalized Citrus H5 size or SHA-256 mismatch")
+
         receipt_ref = context.get("finalized_receipt")
-        require(isinstance(receipt_ref, dict), "missing finalized Citrus H5 receipt reference")
+        require(isinstance(receipt_ref, dict),
+                "missing finalized Citrus H5 receipt reference")
         receipt_relative = normalized_path(receipt_ref.get("relative_path"))
-        require(
-            receipt_relative in refs
-            and PurePosixPath(receipt_relative).parts[:2]
-            == (OBSERVATION_BINDING_DIR, "receipts"),
-            "finalized receipt is absent from transfer inventory",
-        )
+        require(receipt_relative in refs and
+                PurePosixPath(receipt_relative).parts[:2] ==
+                    (OBSERVATION_BINDING_DIR, "receipts"),
+                "finalized receipt is absent from transfer inventory")
+        if revision > 1:
+            require(receipt_relative ==
+                    f"{OBSERVATION_BINDING_DIR}/receipts/r{revision}/{context_id}.json",
+                    "upgraded collection receipt is not in its revision directory")
         receipt_inventory = refs[receipt_relative]
-        declared_size = receipt_ref.get("size_bytes", receipt_inventory["size_bytes"])
-        require(
-            type(declared_size) is int
-            and declared_size == receipt_inventory["size_bytes"]
-            and receipt_ref.get("sha256") == "sha256:" + receipt_inventory["sha256"],
-            "finalized receipt byte binding mismatch",
-        )
+        require(type(receipt_ref.get("size_bytes", receipt_inventory["size_bytes"]))
+                    is int and
+                receipt_ref.get("size_bytes", receipt_inventory["size_bytes"]) ==
+                    receipt_inventory["size_bytes"] and
+                receipt_ref.get("sha256") ==
+                    "sha256:" + receipt_inventory["sha256"],
+                "finalized receipt byte binding mismatch")
         receipt = strict_json(root / receipt_relative)
         contract = receipt.get("contract")
-        require(
-            receipt.get("schema_id") == "citrus.recording_observation_finalized_receipt"
-            and type(receipt.get("schema_version")) is int
-            and receipt["schema_version"] == 1
-            and receipt.get("canonicalization") == "canonical_json_utf8_sort_keys_compact_v1"
-            and isinstance(contract, dict),
-            "unsupported finalized Citrus H5 receipt",
-        )
+        version = receipt.get("schema_version") if type(receipt.get("schema_version")) is int else 0
+        require(receipt.get("schema_id") ==
+                    "citrus.recording_observation_finalized_receipt" and
+                version in RECEIPT_VERSIONS and
+                receipt.get("canonicalization") ==
+                    "canonical_json_utf8_sort_keys_compact_v1" and
+                isinstance(contract, dict),
+                "unsupported finalized Citrus H5 receipt")
+        versions.add(version)
         contract_sha = _canonical_contract_sha256(contract)
-        require(
-            receipt.get("contract_sha256") == contract_sha
-            and receipt.get("receipt_id") == "obsbindfin_" + contract_sha.removeprefix("sha256:")
-            and receipt_ref.get("contract_sha256") == contract_sha
-            and receipt_ref.get("receipt_id") == receipt.get("receipt_id"),
-            "finalized Citrus H5 receipt envelope mismatch",
-        )
-        require(
-            contract.get("schema_id") == "citrus.recording_observation_finalized_receipt"
-            and type(contract.get("schema_version")) is int
-            and contract["schema_version"] == 1
-            and contract.get("session_status") == "COMPLETE"
-            and contract.get("observation_context_id") == context_id
-            and contract.get("citrus_experiment_id") == experiment_id
-            and contract.get("h5_artifact") == h5,
-            "finalized Citrus H5 receipt contract mismatch",
-        )
+        require(receipt.get("contract_sha256") == contract_sha and
+                receipt.get("receipt_id") ==
+                    "obsbindfin_" + contract_sha.removeprefix("sha256:") and
+                receipt_ref.get("contract_sha256") == contract_sha and
+                receipt_ref.get("receipt_id") == receipt.get("receipt_id"),
+                "finalized Citrus H5 receipt envelope mismatch")
+        require(contract.get("schema_id") ==
+                    "citrus.recording_observation_finalized_receipt" and
+                type(contract.get("schema_version")) is int and
+                contract["schema_version"] == version and
+                contract.get("session_status") == "COMPLETE" and
+                contract.get("observation_context_id") == context_id and
+                contract.get("citrus_experiment_id") == experiment_id and
+                contract.get("h5_artifact") == h5,
+                "finalized Citrus H5 receipt contract mismatch")
         identity_camera = context["observation_identity"]["identity"]["camera"]
         target = contract.get("target")
-        require(
-            type(target) is dict
-            and target.get("source_camera_stream_id")
-            == identity_camera.get("source_camera_stream_id")
-            and target.get("camera_id") == identity_camera.get("camera_id"),
-            "finalized receipt camera differs from observation context",
-        )
+        require(type(target) is dict and
+                target.get("source_camera_stream_id") == identity_camera.get("source_camera_stream_id") and
+                target.get("camera_id") == identity_camera.get("camera_id"),
+                "finalized receipt camera differs from observation context")
+        if version == 1:
+            require("citrus_artifacts" not in contract,
+                    "receipt v1 carries citrus_artifacts")
+            continue
+        require(set(receipt) == RECEIPT_KEYS and
+                set(contract) == RECEIPT_CONTRACT_KEYS[version],
+                f"receipt v{version} keys are not exact")
+        if version in SUBJECT_REFERENCE_VERSION:
+            check_subject_reference(contract["subject_reference"], receipt_version=version)
+        session_uuid = contract.get("citrus_session_uuid")
+        require(isinstance(session_uuid, str) and
+                re.fullmatch(r"citsess_[0-9a-f]{64}", session_uuid) is not None and
+                re.fullmatch(r"obsctx_[0-9a-f]{64}", context_id) is not None and
+                session_uuid.removeprefix("citsess_") == context_id.removeprefix("obsctx_"),
+                "receipt v2 citrus_session_uuid is not citsess_ + the context hex")
+        for row in citrus_artifacts(root, refs, contract.get("citrus_artifacts"),
+                                    h5_relative, session_uuid,
+                                    video_digests_pending=video_digests_pending):
+            if PRE310_DIAGNOSTIC.fullmatch(row["path"]):
+                pre310_contexts.append(context_id)
+            declared.append({"observation_context_id": context_id,
+                             "citrus_session_uuid": session_uuid, **row})
+
+    require(len(versions) == 1, "the head collection mixes receipt versions")
+    receipt_version = versions.pop()
+    # 3.3.0, for v3 and v4 heads only (v1 and v2 heads behave exactly as in
+    # 3.2.0 and read no superseded receipt): no revision may carry v3 receipts
+    # while another carries v4, and a v4 head's earlier revisions must be v4
+    # too (the contract defines no upgrade to v4; Orange's
+    # citrus_receipt_v2_upgrade produces v2 only).
+    if receipt_version in SUBJECT_REFERENCE_VERSION:
+        earlier = earlier_revision_receipt_versions(root, refs, chain)
+        require(not {3, 4} <= ({receipt_version} | earlier),
+                "the collection revision chain mixes receipt v3 and v4")
+        require(receipt_version != 4 or earlier <= {4},
+                "a receipt v4 head has an earlier revision with another receipt version "
+                "(the contract defines no upgrade to v4)")
+    paths = [row["path"] for row in declared]
+    require(len(paths) == len(set(paths)) and not set(paths) & seen_h5,
+            "Citrus artifact declared twice in the collection")
+    if pre310_contexts:
+        require(len(pre310_contexts) == 1 and pre310_contexts[0] == min(seen_contexts),
+                "a pre-3.1.0 process diagnostic must appear once, in the lowest "
+                "observation_context_id")
+    if receipt_version in RECEIPT_VERSIONS_CITRUS_ARTIFACTS:
+        # Closed citrus/: every file is a context's H5 or declared in its receipt.
+        admitted = seen_h5 | set(paths)
+        for path in refs:
+            parts = PurePosixPath(path).parts
+            if parts[:1] != (CITRUS_DIR,):
+                continue
+            require(len(parts) == 2, f"subdirectory under {CITRUS_DIR}/: {path}")
+            require(path in admitted, f"undeclared Citrus artifact: {path}")
+    declared.sort(key=lambda row: (row["observation_context_id"],
+                                   CITRUS_ROLE_ORDER.index(row["role"]), row["path"]))
+    return {"receipt_version": receipt_version, "citrus_artifacts": declared,
+            "revisions": [refs[path] for _, path, _ in chain]}
 
 
-def inventory(root: Path, marker_name: str, *, destination: bool = False) -> list[dict]:
+def check_subject_reference(reference, *, receipt_version: int = 3) -> None:
+    """Structural check of contract.subject_reference (key sets and the two
+    consts): receipt v3 carries citrus.subject_reference v1, receipt v4 carries
+    v2 (same key sets). Its semantics (status/reason pairing, subject_type vs
+    count, a null subject_id for a dish group) are the writer's and the
+    readers' contract, not transfer integrity."""
+    expected = SUBJECT_REFERENCE_VERSION[receipt_version]
+    require(type(reference) is dict and set(reference) == SUBJECT_REFERENCE_KEYS and
+            reference["schema_id"] == SUBJECT_REFERENCE_SCHEMA and
+            type(reference["schema_version"]) is int and reference["schema_version"] == expected,
+            f"receipt v{receipt_version} subject_reference is not citrus.subject_reference v{expected}")
+    for key, keys in SUBJECT_REFERENCE_OBJECT_KEYS.items():
+        value = reference[key]
+        require(value is None or (type(value) is dict and set(value) == keys),
+                f"receipt v{receipt_version} subject_reference.{key} keys are not exact")
+
+
+def earlier_revision_receipt_versions(root: Path, refs: dict[str, dict],
+                                      chain: list[tuple[int, str, dict]]) -> set[int]:
+    """Receipt schema_versions of every revision before the head, for the
+    3.3.0 v3/v4 mixing rule. Receipts absent from the inventory are skipped:
+    the chain rules (3.1.0) do not require superseded receipts to be delivered."""
+    found: set[int] = set()
+    for _, _, collection in chain[:-1]:
+        for context in collection.get("observation_contexts") or []:
+            receipt_ref = context.get("finalized_receipt") if isinstance(context, dict) else None
+            if not isinstance(receipt_ref, dict):
+                continue
+            relative = normalized_path(receipt_ref.get("relative_path"))
+            if relative not in refs:
+                continue
+            try:
+                receipt = strict_json(root / relative)
+            except TransferSnapshotError:
+                raise
+            except (ValueError, OSError):
+                require(False, f"superseded finalized receipt is not readable JSON: {relative}")
+            require(isinstance(receipt, dict) and type(receipt.get("schema_version")) is int,
+                    f"superseded finalized receipt has no integer schema_version: {relative}")
+            found.add(receipt["schema_version"])
+    return found
+
+
+def observation_binding_revision_chain(
+        root: Path, refs: dict[str, dict]) -> list[tuple[int, str, dict]]:
+    """Orange's finalized collection, revision 1 and any upgrades, oldest first.
+
+    Linear and gap-free from finalized_collection.json; only receipts may change
+    between revisions, and H5 bytes never do (Orange's chain rules).
+    """
+    numbered: dict[int, str] = {}
+    for path in refs:
+        parts = PurePosixPath(path).parts
+        if parts[:1] != (OBSERVATION_BINDING_DIR,) or len(parts) != 2 or \
+                not parts[-1].startswith("finalized_collection.r"):
+            continue
+        match = re.fullmatch(
+            rf"{OBSERVATION_BINDING_DIR}/finalized_collection\.r([1-9][0-9]{{0,5}})\.json", path)
+        require(match is not None and int(match.group(1)) >= 2,
+                f"unexpected collection revision file: {path}")
+        numbered[int(match.group(1))] = path
+    head = max(numbered, default=1)
+    require(set(numbered) == set(range(2, head + 1)),
+            "collection revision chain has a gap")
+    chain = [(1, OBSERVATION_FINALIZATION_PATH,
+              strict_json(root / OBSERVATION_FINALIZATION_PATH))]
+    require(isinstance(chain[0][2], dict) and "revision" not in chain[0][2] and
+            "supersedes" not in chain[0][2],
+            "revision 1 must be the schema_version 1 collection")
+    for number in range(2, head + 1):
+        path = numbered[number]
+        collection = strict_json(root / path)
+        _, previous_path, previous = chain[-1]
+        supersedes = collection.get("supersedes") if isinstance(collection, dict) else None
+        require(isinstance(collection, dict) and
+                type(collection.get("schema_version")) is int and
+                collection["schema_version"] == 2 and
+                type(collection.get("revision")) is int and collection["revision"] == number and
+                collection.get("revision_reason") == REVISION_REASON and
+                isinstance(collection.get("revised_at_utc"), str) and
+                type(supersedes) is dict and set(supersedes) == {"relative_path", "sha256"} and
+                supersedes["relative_path"] == previous_path and
+                supersedes["sha256"] == "sha256:" + refs[previous_path]["sha256"],
+                f"collection r{number} does not supersede r{number - 1} exactly")
+        for field in ("citrus_experiment_id", "recording_id", "binding_mode", "context_count"):
+            require(collection.get(field) == previous.get(field),
+                    f"collection r{number} changes {field}")
+        old, new = previous.get("observation_contexts"), collection.get("observation_contexts")
+        require(isinstance(old, list) and isinstance(new, list) and len(old) == len(new),
+                f"collection r{number} changes its observation contexts")
+        for before, after in zip(old, new):
+            require(isinstance(before, dict) and isinstance(after, dict) and all(
+                before.get(field) == after.get(field) for field in REVISION_FIXED_CONTEXT_FIELDS),
+                f"collection r{number} changes a context beyond its receipt")
+        chain.append((number, path, collection))
+    return chain
+
+
+def citrus_artifacts(root: Path, refs: dict[str, dict], artifacts: Any,
+                     h5_relative: str, session_uuid: str, *,
+                     video_digests_pending: bool = False) -> list[dict]:
+    """One receipt's declared Citrus files (receipt v2 rules 1-6 and 8)."""
+    require(isinstance(artifacts, list), "citrus_artifacts is not a list")
+    require(re.fullmatch(rf"{CITRUS_DIR}/{re.escape(session_uuid)}_[^/]+\.h5", h5_relative)
+            is not None, "receipt v2 H5 is not named for its Citrus session")
+    stem = h5_relative.removesuffix(".h5")
+    rows: list[dict] = []
+    by_role: dict[str, dict] = {}
+    previous: tuple[int, str] | None = None
+    for item in artifacts:
+        require(isinstance(item, dict), "citrus artifact is not an object")
+        role = item.get("role")
+        require(role in CITRUS_ROLE_ORDER, f"unknown Citrus artifact role: {role!r}")
+        require(set(item) == CITRUS_ARTIFACT_KEYS | (
+                    {"finalization"} if role == "stimulus_video_container_finalization" else set()),
+                f"citrus artifact keys are not exact ({role})")
+        path = normalized_path(item.get("relative_path"))
+        require(path == stem + CITRUS_ROLE_SUFFIX[role] or (
+                    role == "process_diagnostic" and PRE310_DIAGNOSTIC.fullmatch(path)),
+                f"{role} is not at its required name: {path}")
+        require(role not in by_role, f"{role} appears more than once in a receipt")
+        key = (CITRUS_ROLE_ORDER.index(role), path)
+        require(previous is None or previous < key, "citrus_artifacts are not in role order")
+        previous = key
+        require(path in refs, f"declared Citrus artifact is absent from inventory: {path}")
+        inventory_ref = refs[path]
+        digest_pending = video_digests_pending and Path(path).suffix.lower() in VIDEO_SUFFIXES
+        require(type(item.get("size_bytes")) is int and item["size_bytes"] >= 1 and
+                item["size_bytes"] == inventory_ref["size_bytes"] and
+                isinstance(item.get("sha256"), str) and
+                re.fullmatch(r"sha256:[0-9a-f]{64}", item["sha256"]) is not None and
+                (digest_pending or item["sha256"] == "sha256:" + inventory_ref["sha256"]),
+                f"declared Citrus artifact size or SHA-256 mismatch: {path}")
+        by_role[role] = item
+        rows.append({"role": role, "path": path, "size_bytes": inventory_ref["size_bytes"],
+                     "sha256": inventory_ref["sha256"]})
+    require(("stimulus_video" in by_role) == ("stimulus_video_container_finalization" in by_role),
+            "stimulus video and its finalization must be declared together")
+    if "stimulus_video" in by_role:
+        entry = by_role["stimulus_video_container_finalization"]
+        facts = entry["finalization"]
+        require(type(facts) is dict and set(facts) == STIMULUS_FINALIZATION_FACTS and
+                facts.get("schema_id") == STIMULUS_FINALIZATION_SCHEMA and
+                type(facts.get("schema_version")) is int and facts["schema_version"] == 1 and
+                facts.get("status") == "complete" and facts.get("terminal") is True and
+                facts.get("trailer_written") is True and facts.get("output_closed") is True and
+                type(facts.get("container_file_size_bytes")) is int and
+                facts["container_file_size_bytes"] == by_role["stimulus_video"]["size_bytes"],
+                "stimulus video finalization is not complete or not the video's size")
+        on_disk = strict_json(root / entry["relative_path"])
+        container = on_disk.get("container") if isinstance(on_disk, dict) else None
+        require(type(container) is dict and
+                on_disk.get("schema_id") == facts["schema_id"] and
+                on_disk.get("schema_version") == facts["schema_version"] and
+                on_disk.get("status") == facts["status"] and
+                on_disk.get("terminal") is facts["terminal"] and
+                container.get("trailer_written") is facts["trailer_written"] and
+                container.get("output_closed") is facts["output_closed"] and
+                container.get("file_size_bytes") == facts["container_file_size_bytes"],
+                "stimulus video finalization file disagrees with the receipt")
+    return rows
+
+
+
+def inventory(
+    root: Path,
+    marker_name: str,
+    *,
+    destination: bool = False,
+    attested: "SealerAttestation | None" = None,
+) -> list[dict]:
     result = []
     for directory, dirs, files in os.walk(root, followlinks=False):
         for name in list(dirs):
@@ -503,7 +963,17 @@ def inventory(root: Path, marker_name: str, *, destination: bool = False) -> lis
                 name != marker_name and name != "_citrus_transfer_complete.json",
                 f"nested or source completion marker: {rel}",
             )
-            result.append(file_ref(root, rel))
+            sealed = attested.items.get(rel) if attested is not None else None
+            if (
+                sealed is not None
+                and sealed["size_bytes"] >= SEALER_ATTESTED_MIN_BYTES
+                and Path(name).suffix.lower() in SEALER_ATTESTED_SUFFIXES
+            ):
+                result.append(
+                    _attested_file_ref(root, rel, sealed, attested.marker_mtime_ns)
+                )
+            else:
+                result.append(file_ref(root, rel))
     return sorted(result, key=lambda entry: entry["path"])
 
 
@@ -610,7 +1080,13 @@ def frame_map(
     }
 
 
-def build_snapshot(root: Path, marker_name: str, *, destination: bool = False) -> dict:
+def build_snapshot(
+    root: Path,
+    marker_name: str,
+    *,
+    destination: bool = False,
+    attested: "SealerAttestation | None" = None,
+) -> dict:
     root = root.resolve(strict=True)
     require(root != Path("/") and root.is_dir(), "invalid recording root")
     normalized_path(marker_name)
@@ -620,7 +1096,7 @@ def build_snapshot(root: Path, marker_name: str, *, destination: bool = False) -
         "marker must be a filename",
     )
     # Hash before parsing, then verify these same bytes again before publication.
-    items = inventory(root, marker_name, destination=destination)
+    items = inventory(root, marker_name, destination=destination, attested=attested)
     refs = {item["path"]: item for item in items}
     require(
         "recording_session.json" in refs, "v2 requires Orange recording_session.json"
@@ -648,7 +1124,7 @@ def build_snapshot(root: Path, marker_name: str, *, destination: bool = False) -
     require(len(cameras) == len(set(cameras)), "duplicate camera serial")
     contexts = parent_contexts(manifest, cameras)
     declared_root = manifest.get("recording_folder", "")
-    require_observation_binding_transfer_admission(root, manifest, refs)
+    binding = require_observation_binding_transfer_admission(root, manifest, refs)
     clips = manifest.get("clips")
     require(
         isinstance(clips, list) and clips and (rolling or len(clips) == 1),
@@ -894,12 +1370,21 @@ def build_snapshot(root: Path, marker_name: str, *, destination: bool = False) -
             )
     # Current supported envelope has only declared full/crop media. A retained
     # shard/preview needs an explicit future auxiliary-media profile, not guessing.
-    videos = {
-        p
-        for p in refs
-        if Path(p).suffix.lower() in (".mp4", ".mkv", ".avi", ".h265", ".hevc")
-    }
-    require(videos == used_media, "extra/undeclared or unsupported video artifact")
+    # Sealer 3.1.0: a bound session's receipt-v2-declared Citrus stimulus videos
+    # are admitted too (receipt v3 declares them the same way); any other video
+    # is still refused.
+    v2_binding = (binding is not None and
+                  binding["receipt_version"] in RECEIPT_VERSIONS_CITRUS_ARTIFACTS)
+    stimulus_videos = (
+        {row["path"] for row in binding["citrus_artifacts"] if row["role"] == "stimulus_video"}
+        if v2_binding
+        else set()
+    )
+    videos = {p for p in refs if Path(p).suffix.lower() in VIDEO_SUFFIXES}
+    require(
+        videos == used_media | stimulus_videos,
+        "extra/undeclared or unsupported video artifact",
+    )
     child_manifests = {p for p in refs if PurePosixPath(p).name == "clip_manifest.json"}
     expected_children = (
         {f"{d}/clip_manifest.json" for d in used_dirs}
@@ -912,7 +1397,7 @@ def build_snapshot(root: Path, marker_name: str, *, destination: bool = False) -
         if any(Path(p).suffix.lower() in (".h5", ".hdf5") for p in refs)
         else "video_only"
     )
-    return {
+    snapshot = {
         "schema_id": SNAPSHOT_SCHEMA,
         "schema_version": SNAPSHOT_VERSION,
         "canonicalization": "json_sort_keys_ascii_compact_lf_v1",
@@ -933,6 +1418,11 @@ def build_snapshot(root: Path, marker_name: str, *, destination: bool = False) -
         "parents": list(parents.values()),
         "inventory": items,
     }
+    if v2_binding:
+        snapshot["schema_version"] = SNAPSHOT_VERSION_CITRUS_ARTIFACTS
+        snapshot["citrus_artifacts"] = binding["citrus_artifacts"]
+        snapshot["observation_binding_revisions"] = binding["revisions"]
+    return snapshot
 
 
 def snapshot_bytes_and_id(snapshot: dict) -> tuple[bytes, str]:
@@ -941,11 +1431,70 @@ def snapshot_bytes_and_id(snapshot: dict) -> tuple[bytes, str]:
 
 
 def verify_inventory(
-    root: Path, snapshot: dict, marker_name: str, *, destination: bool
+    root: Path,
+    snapshot: dict,
+    marker_name: str,
+    *,
+    destination: bool,
+    attested: "SealerAttestation | None" = None,
 ) -> None:
     require(
-        inventory(root, marker_name, destination=destination) == snapshot["inventory"],
+        inventory(root, marker_name, destination=destination, attested=attested)
+        == snapshot["inventory"],
         "snapshot inventory mismatch (missing, extra, changed, or replaced artifact)",
+    )
+
+
+@dataclass(frozen=True)
+class SealerAttestation:
+    """The sealed inventory a v3 marker attests, and when the marker was written."""
+
+    items: dict
+    marker_mtime_ns: int
+
+
+SEALER_PACKAGE = "citrus-recording-transfer"
+# 2.0.1 is the first sealer whose destination hash reads storage: each file is
+# fsynced, then read with O_DIRECT (on /groups NFS this bypasses the copying
+# host's page cache). 2.0.0 read the destination back through that cache.
+SEALER_STORAGE_READ_MIN_VERSION = (2, 0, 1)
+_SEALER_VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+
+
+def sealer_reads_storage(sealer: Any) -> bool:
+    """Whether a marker v3 sealer record names a sealer that hashed storage."""
+
+    if not isinstance(sealer, dict) or sealer.get("package") != SEALER_PACKAGE:
+        return False
+    match = _SEALER_VERSION.fullmatch(str(sealer.get("version", "")))
+    if match is None:
+        return False
+    return tuple(int(part) for part in match.groups()) >= SEALER_STORAGE_READ_MIN_VERSION
+
+
+def sealer_attested_inventory(
+    marker: dict, snapshot: dict, marker_mtime_ns: int
+) -> SealerAttestation | None:
+    """Trust the sealer's destination hashes only when it read them from storage.
+
+    Citrus's sealer (marker v3 or v4) rebuilds the snapshot from the destination copy,
+    hashing every file, and writes the marker only when it matches. From
+    citrus-recording-transfer 2.0.1 that hash reads storage rather than the
+    copying host's page cache (sealer_reads_storage). A v2 marker, or a sealer
+    before 2.0.1, gets no shortcut: Palette hashes every byte itself.
+    """
+
+    if marker.get("schema_id") not in (MARKER_SCHEMA_V3, MARKER_SCHEMA_V4):
+        return None
+    if not sealer_reads_storage(marker.get("sealer")):
+        return None
+    require(
+        marker["delivery"]["verification"] == SEALER_VERIFICATION,
+        "sealer verification policy is not sha256_all_inventory_bytes",
+    )
+    return SealerAttestation(
+        items={item["path"]: item for item in snapshot["inventory"]},
+        marker_mtime_ns=marker_mtime_ns,
     )
 
 
@@ -959,6 +1508,11 @@ class VerifiedTransferSnapshot:
     recording_layout: str
     recording_payload_kind: str
     snapshot: dict
+    # Marker v3 provenance ({"package", "version"}); None for a v2 marker.
+    sealer: dict | None = None
+    # "palette_sha256_all_bytes", or "sealer_attested_large_files" when large
+    # video/H5 files may reuse the sealer's digests (marker v3).
+    content_verification: str = "palette_sha256_all_bytes"
 
 
 @dataclass(frozen=True)
@@ -1006,11 +1560,28 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
     )
     marker = strict_json(marker_path)
     snapshot = strict_json(snapshot_path)
-    require_envelope_schema(marker, "marker")
-    require_envelope_schema(snapshot, "snapshot")
+    marker_schema = marker.get("schema_id") if isinstance(marker, dict) else None
+    require(marker_schema in MARKER_SCHEMAS, f"unsupported completion marker {marker_schema!r}")
+    marker_version, marker_definition = MARKER_SCHEMAS[marker_schema]
+    require_envelope_schema(marker, marker_definition)
+    snapshot_version = snapshot.get("schema_version") if isinstance(snapshot, dict) else None
+    require(
+        snapshot_version in SNAPSHOT_DEFINITIONS,
+        f"unsupported transfer snapshot version {snapshot_version!r}",
+    )
+    # Marker v4 seals snapshot v3 only; markers v2/v3 seal snapshot v2 only.
+    require(
+        (marker_version == MARKER_VERSION_V4)
+        == (snapshot_version == SNAPSHOT_VERSION_CITRUS_ARTIFACTS),
+        "completion marker version does not match the snapshot version",
+    )
+    require_envelope_schema(snapshot, SNAPSHOT_DEFINITIONS[snapshot_version])
     marker_bytes = marker_path.read_bytes()
     snapshot_bytes = snapshot_path.read_bytes()
-    rebuilt = build_snapshot(root, MARKER_NAME, destination=True)
+    attested = sealer_attested_inventory(
+        marker, snapshot, marker_path.lstat().st_mtime_ns
+    )
+    rebuilt = build_snapshot(root, MARKER_NAME, destination=True, attested=attested)
     require(
         canonical_bytes(snapshot) == canonical_bytes(rebuilt),
         "snapshot schema, membership or source semantics mismatch",
@@ -1018,8 +1589,8 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
     data, identity = snapshot_bytes_and_id(snapshot)
     require(snapshot_bytes == data, "noncanonical snapshot bytes")
     expected = {
-        "schema_id": MARKER_SCHEMA,
-        "schema_version": 2,
+        "schema_id": marker_schema,
+        "schema_version": marker_version,
         "status": "transfer_complete",
         "required_consumer_profile": CONSUMER_PROFILE,
         "snapshot_id": identity,
@@ -1028,7 +1599,7 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
             "size_bytes": len(data),
             "sha256": hashlib.sha256(data).hexdigest(),
             "schema_id": SNAPSHOT_SCHEMA,
-            "schema_version": SNAPSHOT_VERSION,
+            "schema_version": snapshot_version,
         },
         "recording_layout": snapshot["recording_layout"],
         "recording_payload_kind": snapshot["recording_payload_kind"],
@@ -1045,7 +1616,13 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
         )
     delivery = marker["delivery"]
     for key in ("source_dir", "destination_dir"):
-        identifier(delivery[key], f"delivery {key}")  # no control characters, <= 1024
+        identifier(delivery[key], f"delivery {key}")  # <= 1024, no C0 controls
+        # The sealer's own rule (citrus-recording-transfer >= 1.0.1): no C0 or
+        # C1 controls, DEL included (U+0000-U+001F, U+007F-U+009F).
+        require(
+            not any(0x7F <= ord(c) <= 0x9F for c in delivery[key]),
+            f"invalid delivery {key}: control character",
+        )
     require(
         dt.datetime.fromisoformat(delivery["created_utc"].upper()).utcoffset()
         == dt.timedelta(0),
@@ -1053,7 +1630,7 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
     )
     # Close the parse/hash observation window. The storage contract still
     # requires immutable deliveries throughout subsequent execution.
-    verify_inventory(root, snapshot, MARKER_NAME, destination=True)
+    verify_inventory(root, snapshot, MARKER_NAME, destination=True, attested=attested)
     require(
         marker_path.read_bytes() == marker_bytes and snapshot_path.read_bytes() == data,
         "transfer control bytes changed during validation",
@@ -1069,6 +1646,12 @@ def _verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
         snapshot["recording_layout"],
         snapshot["recording_payload_kind"],
         snapshot,
+        marker.get("sealer"),
+        (
+            "palette_sha256_all_bytes"
+            if attested is None
+            else "sealer_attested_large_files"
+        ),
     )
 
 
@@ -1097,25 +1680,111 @@ def verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
         raise TransferSnapshotError(f"invalid transfer-v2 delivery: {error}") from error
 
 
-def _require_optional_proofs(root: Path, output: dict) -> None:
+# Orange's frame-identity proof grammar, byte-identical to Orange docs/schemas/
+# (producer: tools/external_recorder_ipc_probe.cpp frame_identity_proof_json).
+# v2: Orange 8b359de. v3: Orange 2ef8840 (agent-contracts #87 frame_identity_v1:
+# legacy_aliases removed; every other field and check unchanged). Older
+# recordings keep their v2 proofs.
+FRAME_IDENTITY_PROOF_SCHEMA_ID = "orange.external_recorder.frame_identity_proof"
+FRAME_IDENTITY_PROOF_SCHEMAS = {
+    2: (
+        "orange_external_recorder_frame_identity_proof_v2.schema.json",
+        "c9c2544526044bc1a934ab90a0dbe3fca24f34230a27ec280e58b6afc2ffed8d",
+    ),
+    3: (
+        "orange_external_recorder_frame_identity_proof_v3.schema.json",
+        "269fe0b6c8857928f9bc4d93646a45a9d37bc2fd88d1968b466f0d5ae73b06c8",
+    ),
+}
+# Counters that must all equal the stream's encoded frame count (Orange's
+# "verified" condition plus the packet submission counters).
+_PROOF_EQUAL_COUNTERS = (
+    "submitted_frame_identities",
+    "returned_identity_matches",
+    "encoded_video_frames",
+    "packets_written",
+    "metadata_rows",
+    "packet_submissions_accepted",
+    "packet_write_attempts",
+)
+
+
+@lru_cache(maxsize=None)
+def _frame_identity_proof_validator(version: int):
+    from jsonschema import Draft202012Validator
+
+    file_name, digest = FRAME_IDENTITY_PROOF_SCHEMAS[version]
+    data = resource_files("fisheye.shared").joinpath("contracts").joinpath(file_name).read_bytes()
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise TransferSnapshotError("packaged_contract_drift:" + file_name)
+    return Draft202012Validator(json.loads(data))
+
+
+def _stream_proofs(root: Path, output: dict) -> list[tuple[str, dict]]:
+    """The output's summary sidecars that carry a frame_identity_proof.
+
+    A failed proof refuses here, before its grammar is checked, so a failed
+    proof of any version is reported as failed.
+    """
+
+    proofs = []
     for sidecar in output["sidecars"]:
         if sidecar["role"] != "summary":
             continue
-        summary = strict_json(root / sidecar["artifact"]["path"])
+        path = sidecar["artifact"]["path"]
+        summary = strict_json(root / path)
         if "frame_identity_proof" not in summary:
             continue
         proof = summary["frame_identity_proof"]
         status = proof.get("status") if type(proof) is dict else None
         require(
             status not in ("failed", "fail", "error", "rejected"),
-            f"frame_identity_proof is failed: {sidecar['artifact']['path']}",
+            f"frame_identity_proof is failed: {path}",
         )
-        # The transfer contract defines a negative-proof fixture, not a
-        # positive semantic proof schema. Do not invent one from a status word.
-        raise TransferSnapshotError(
-            "present frame_identity_proof needs a supported semantic proof validator: "
-            + sidecar["artifact"]["path"]
-        )
+        proofs.append((path, proof))
+    return proofs
+
+
+def _require_frame_identity_proof(
+    path: str, proof: Any, *, output_kind: str, frame_count: int
+) -> None:
+    """Accept only Orange's v2/v3 proof, passed, binding exactly this stream's frames.
+
+    The proof covers one recording session and camera stream (all of its
+    clips), so ``frame_count`` is the stream's total over the parent's clips.
+    Any other schema or version has no validator and is refused.
+    """
+
+    from jsonschema.exceptions import best_match
+
+    version = proof.get("schema_version") if type(proof) is dict else None
+    require(
+        type(proof) is dict
+        and proof.get("schema_id") == FRAME_IDENTITY_PROOF_SCHEMA_ID
+        and type(version) is int
+        and version in FRAME_IDENTITY_PROOF_SCHEMAS,
+        "present frame_identity_proof needs a supported semantic proof validator: " + path,
+    )
+    error = best_match(_frame_identity_proof_validator(version).iter_errors(proof))
+    require(error is None, f"frame_identity_proof grammar: {path}: {error and error.message}")
+    binding = proof["video_binding"]
+    require(
+        proof["status"] == "passed" and binding["verified"] is True,
+        f"frame_identity_proof is not passed: {path}",
+    )
+    counts = {name: binding[name] for name in _PROOF_EQUAL_COUNTERS}
+    require(
+        set(counts.values()) == {frame_count},
+        f"frame_identity_proof does not bind the stream's {frame_count} frames: {path}: {counts}",
+    )
+    require(
+        proof["source_frames_dropped"] == 0,
+        f"frame_identity_proof reports dropped source frames: {path}",
+    )
+    require(
+        output_kind != "full" or proof["source_frames_skipped_by_policy"] == 0,
+        f"full-frame stream skipped source frames by policy: {path}",
+    )
 
 
 def plan_parent_recordings(
@@ -1140,12 +1809,20 @@ def plan_parent_recordings(
         camera = parent["parent_key"]["camera_serial"]
         total_frames = 0
         clips = []
+        # summary path -> (proof, output kinds, frames over the parent's clips)
+        stream_proofs: dict[str, tuple[Any, set[str], int]] = {}
         for clip in parent["clips"]:
             outputs = []
             full = None
             for output in clip["outputs"]:
-                _require_optional_proofs(current.root, output)
                 mapping = output["frame_map"]
+                for path, proof in _stream_proofs(current.root, output):
+                    _, kinds, frames = stream_proofs.get(path, (proof, set(), 0))
+                    stream_proofs[path] = (
+                        proof,
+                        kinds | {output["output_kind"]},
+                        frames + mapping["frame_count"],
+                    )
                 if output["output_kind"] == "full":
                     full = mapping
                 outputs.append(
@@ -1181,6 +1858,14 @@ def plan_parent_recordings(
                     clip["directory"],
                     tuple(outputs),
                 )
+            )
+        for path, (proof, kinds, frames) in sorted(stream_proofs.items()):
+            require(
+                len(kinds) == 1,
+                f"one frame_identity_proof shared by different output kinds: {path}",
+            )
+            _require_frame_identity_proof(
+                path, proof, output_kind=next(iter(kinds)), frame_count=frames
             )
         plans.append(
             ParentRecordingIntakePlan(

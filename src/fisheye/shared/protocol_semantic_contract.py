@@ -36,6 +36,10 @@ import h5py
 import numpy as np
 
 from fisheye.shared.citrus_enums import STIMULUS_MODE
+from fisheye.shared.heading_convention import (
+    LEGACY_CANVAS_ANGLE,
+    STIMULUS_ANGLE_CONVENTION,
+)
 
 
 PROTOCOL_SEMANTIC_HASH_H5_PATH = "/protocol_snapshot/protocol_semantic_hash"
@@ -57,6 +61,101 @@ PROTOCOL_TRIAL_INDEX_NORMALIZATION_POLICIES = MappingProxyType(
         1: "citrus.protocol.trial_index.v1",
         2: "citrus.protocol.trial_index.v2",
     }
+)
+
+# Stimulus angle convention v1 (agent-contracts citrus-palette/angles, unified
+# H5 admission revision 5 / catalog angle_v1): the protocol carries a top-level
+# ``stimulus_angle_convention`` under semantic policy v2 and trial index v3.
+# Accepted only when the caller passes the convention its admitted binding
+# fixed; the default (legacy) keeps the historical v1/v2 contract unchanged.
+PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY = "citrus.protocol.semantic.v2"
+# Semantic recipe v3 (agent-contracts citrus-palette/angles pairing revision 2,
+# semantic_policy_pairing_v2.json; Citrus #86, recipe 2e870c8): admitted
+# alongside v2 under the same angle_v1 binding and trial index v3. v3 also
+# hashes, on every chaser step, ``z_eff`` (null when the authored value is 0),
+# ``target_radius``, chase-phase ``target_reference`` and ``loom`` whenever a
+# chaser has an ``appearance_drive``. Every protocol hash differs between v2
+# and v3; pool across them only through ``semantic_v2_relabels_to_v3``.
+PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY = "citrus.protocol.semantic.v3"
+# Semantic recipe v4 (pairing revision 3, semantic_policy_pairing_v3.json;
+# Citrus #102): v3 plus one session-level ``identity.stimulus_render_rate_hz``,
+# a positive JSON integer present on every v4 identity (120 included), because
+# the chaser draws per update tick and one hash must never name a 120 Hz and a
+# 240 Hz stimulus. Every v1-v3 recording ran at 120 Hz. Trial index stays v3.
+# Pool v3 into v4 only through ``semantic_v3_relabels_to_v4``.
+PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY = "citrus.protocol.semantic.v4"
+STIMULUS_RENDER_RATE_KEY = "stimulus_render_rate_hz"
+ADMITTED_STIMULUS_RENDER_RATES_HZ = frozenset({120, 240})
+PRE_V4_STIMULUS_RENDER_RATE_HZ = 120
+PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICIES = (
+    PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY,
+    PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY,
+    PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY,
+)
+CHASER_STIMULUS_MODE_ID = 12
+PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION = 3
+PROTOCOL_TRIAL_INDEX_ANGLE_V1_NORMALIZATION_POLICY = "citrus.protocol.trial_index.v3"
+
+# Reactive phototaxis v1 (agent-contracts #98 revision 5): a PHOTOTAXIS step
+# whose two-tone split follows the fish's midline declares
+# ``features.fill.type == "heading_split"`` with ``features.fill.style`` and a
+# ``features.reactive`` block, each present exactly when that fill type is.
+# Only unified admission revision 6 admits such a step; every earlier
+# revision refuses it. ``gradient`` is reserved: revision 6 refuses it too.
+HEADING_SPLIT_FILL_TYPE = "heading_split"
+HEADING_SPLIT_STIMULUS_MODE_ID = 18
+HEADING_SPLIT_ADMITTED_FILL_STYLES = frozenset({"two_tone"})
+HEADING_SPLIT_RESERVED_FILL_STYLES = frozenset({"gradient"})
+HEADING_SPLIT_REACTIVE_CONSTANTS = MappingProxyType(
+    {
+        "module": "PhototaxisHeadingSplit",
+        "heading_definition_ref": (
+            "agent-contracts:citrus-palette/heading/heading_convention_v1.json"
+        ),
+        "camera_view_assumed": "dorsal_unmirrored",
+        "side_rule_id": "projected_left_axis_v1",
+        "hysteresis_frame": "camera",
+    }
+)
+HEADING_SPLIT_REACTIVE_KEYS = frozenset(HEADING_SPLIT_REACTIVE_CONSTANTS) | frozenset(
+    {
+        "fill_style",
+        "minimum_keypoint_confidence",
+        "minimum_heading_displacement_degrees",
+        "maximum_held_heading_updates",
+        "unknown_heading_fallback",
+        "left_side",
+    }
+)
+HEADING_SPLIT_FALLBACKS = frozenset({"static_fill", "uniform_side_a", "uniform_side_b"})
+HEADING_SPLIT_LEFT_SIDES = frozenset({"side_a", "side_b"})
+HEADING_SPLIT_FILL_CONSTANTS = MappingProxyType(
+    {"domain": "experimental_area", "outside_area_policy": "side_b_v1"}
+)
+# The semantic identity's phototaxis parameters (Citrus protocol_semantic_hash
+# Phototaxis(), c0c0607): fill_type_id 2 with a nested heading_split object of
+# enum ids and scaled numbers, mirrored by name in the trial index.
+HEADING_SPLIT_SEMANTIC_FILL_TYPE_ID = 2
+HEADING_SPLIT_SEMANTIC_IDS = MappingProxyType(
+    {
+        "fill_style": ("fill_style_id", ("two_tone", "gradient")),
+        "left_side": ("left_side_id", ("side_a", "side_b")),
+        "unknown_heading_fallback": (
+            "unknown_heading_fallback_id",
+            ("static_fill", "uniform_side_a", "uniform_side_b"),
+        ),
+    }
+)
+HEADING_SPLIT_SEMANTIC_SCALED = MappingProxyType(
+    {
+        "minimum_keypoint_confidence": "fraction",
+        "minimum_heading_displacement_degrees": "scalar",
+    }
+)
+HEADING_SPLIT_SEMANTIC_KEYS = frozenset(
+    [field for field, _names in HEADING_SPLIT_SEMANTIC_IDS.values()]
+    + list(HEADING_SPLIT_SEMANTIC_SCALED)
+    + ["maximum_held_heading_updates", "module"]
 )
 
 PROTOCOL_SNAPSHOT_SCHEMA_ID = "citrus.protocol.snapshot"
@@ -203,6 +302,90 @@ def _optional_rgba8(features: Mapping[str, Any]) -> tuple[int, int, int, int] | 
     return tuple(rgba)  # type: ignore[return-value]
 
 
+# SOLID_COLOR (mode 22, agent-contracts stimulus vocabulary): a uniform
+# authored colour, opaque, with no brightness. The trial index always records
+# the displayed code and names it only by CitrusColor::SolidColorName. Never
+# "solid_black": the standalone SOLID_BLACK baseline stays mode 4 only.
+SOLID_COLOR_STIMULUS_MODE_ID = 22
+SOLID_COLOR_CUSTOM_COLOR_TYPE_ID = 2
+SOLID_COLOR_BACKGROUND_ELEMENT = MappingProxyType(
+    {
+        "brightness": 1,
+        "derivation": "plain_v1",
+        "quantization": "rgba8_round_half_up_v1",
+        "contrast_profile_digest": None,
+    }
+)
+
+
+def _json_equal(value: object) -> object:
+    """Plain JSON value for exact comparison; bool never equals an integer."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _json_equal(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_equal(item) for item in value]
+    if isinstance(value, bool):
+        return ("bool", value)
+    return value
+
+
+def _solid_color_name(rgba8: tuple[int, int, int, int]) -> str | None:
+    if rgba8 == (0, 0, 0, 255):
+        return "black"
+    if rgba8 == (255, 255, 255, 255):
+        return "white"
+    red, green, blue, alpha = rgba8
+    if red == green == blue and alpha == 255:
+        return "gray"
+    return None
+
+
+def _validate_solid_color_features(
+    features: Mapping[str, Any], *, parameters: object, step_index: int
+) -> None:
+    name = f"trial step {step_index} SOLID_COLOR"
+    rgba8 = _optional_rgba8(features)
+    if rgba8 is None:
+        raise ProtocolSemanticContractError(f"{name} requires features.resolved_color.")
+    # The semantic identity carries the authored colour's recorded form; with
+    # no brightness it is exactly the displayed code.
+    expected_parameters = {
+        "color": {"color_space": "srgb", "rgba8": list(rgba8)},
+        "color_type_id": SOLID_COLOR_CUSTOM_COLOR_TYPE_ID,
+        "type": "ProtocolSolidColorParams",
+    }
+    if not isinstance(parameters, Mapping) or _json_equal(parameters) != expected_parameters:
+        raise ProtocolSemanticContractError(
+            f"semantic step {step_index} SOLID_COLOR parameters must be exactly "
+            f"{expected_parameters!r}."
+        )
+    if rgba8[3] != 255:
+        raise ProtocolSemanticContractError(
+            f"{name} resolved_color must be opaque (alpha 255), got {list(rgba8)}."
+        )
+    _require_exact(
+        features.get("color_name"),
+        _solid_color_name(rgba8),
+        name=f"{name} features.color_name for rgba8 {list(rgba8)}",
+    )
+    appearance = features.get("appearance")
+    if appearance is None:
+        return
+    elements = appearance.get("elements") if isinstance(appearance, Mapping) else None
+    background = elements.get("background") if isinstance(elements, Mapping) else None
+    if not isinstance(background, Mapping) or _optional_rgba8(background) != rgba8:
+        raise ProtocolSemanticContractError(
+            f"{name} features.appearance.elements.background.resolved_color "
+            "must equal features.resolved_color."
+        )
+    for key, expected in SOLID_COLOR_BACKGROUND_ELEMENT.items():
+        if key not in background or background[key] != expected or type(background[key]) is bool:
+            raise ProtocolSemanticContractError(
+                f"{name} features.appearance.elements.background.{key} must be {expected!r}."
+            )
+
+
 def _display_context(
     *,
     stimulus_family: str,
@@ -301,6 +484,16 @@ class ProtocolSemanticSnapshot:
     trial_index_payload: Mapping[str, Any]
 
     @property
+    def stimulus_render_rate_hz(self) -> int | None:
+        """The v4 identity's render rate; None before v4 (those ran at 120 Hz)."""
+
+        identity = self.semantic_payload.get("identity")
+        if not isinstance(identity, Mapping):
+            return None
+        rate = identity.get(STIMULUS_RENDER_RATE_KEY)
+        return rate if type(rate) is int else None
+
+    @property
     def mode_sequence(self) -> tuple[str, ...]:
         return tuple(step.stimulus_mode for step in self.steps)
 
@@ -324,6 +517,321 @@ class ProtocolSemanticSnapshot:
         }
 
 
+def _validate_heading_split_step(
+    features: Mapping[str, Any],
+    *,
+    step_index: int,
+    stimulus_mode_id: int,
+    trial_schema_version: int,
+    admits_heading_split: bool,
+    semantic_parameters: object = None,
+) -> None:
+    """Refuse or check a reactive heading-split step (agent-contracts #98 r5).
+
+    A step is reactive when ``features.fill.type`` is ``heading_split`` or when it
+    carries either reactive-only field (``features.reactive``,
+    ``features.fill.style``); each must accompany the others, so a static step
+    can never carry half of a reactive declaration unnoticed.
+    """
+
+    name = f"trial step {step_index}"
+    fill = features.get("fill")
+    fill_type = fill.get("type") if isinstance(fill, Mapping) else None
+    has_style = isinstance(fill, Mapping) and "style" in fill
+    has_reactive = "reactive" in features
+    parameters = semantic_parameters if isinstance(semantic_parameters, Mapping) else {}
+    semantic_reactive = stimulus_mode_id == HEADING_SPLIT_STIMULUS_MODE_ID and (
+        parameters.get("fill_type_id") == HEADING_SPLIT_SEMANTIC_FILL_TYPE_ID
+        or "heading_split" in parameters
+    )
+    if (
+        fill_type != HEADING_SPLIT_FILL_TYPE
+        and not has_style
+        and not has_reactive
+        and not semantic_reactive
+    ):
+        return
+    if not admits_heading_split:
+        raise ProtocolSemanticContractError(
+            f"{name} declares a heading_split reactive fill, which no admission "
+            "revision before 6 admits."
+        )
+    if fill_type != HEADING_SPLIT_FILL_TYPE:
+        raise ProtocolSemanticContractError(
+            f"{name}.features.reactive and features.fill.style are allowed only "
+            "when features.fill.type is 'heading_split'."
+        )
+    if not has_style or not has_reactive:
+        raise ProtocolSemanticContractError(
+            f"{name} with fill type heading_split requires features.fill.style "
+            "and features.reactive."
+        )
+    _require_exact(
+        trial_schema_version,
+        PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION,
+        name=f"{name} trial index schema_version for fill type heading_split",
+    )
+    _require_exact(
+        stimulus_mode_id,
+        HEADING_SPLIT_STIMULUS_MODE_ID,
+        name=f"{name}.stimulus_mode_id for fill type heading_split",
+    )
+    style = fill.get("style")
+    if style in HEADING_SPLIT_RESERVED_FILL_STYLES:
+        raise ProtocolSemanticContractError(
+            f"{name}.features.fill.style {style!r} is reserved and not admitted "
+            "by admission revision 6."
+        )
+    if style not in HEADING_SPLIT_ADMITTED_FILL_STYLES:
+        raise ProtocolSemanticContractError(
+            f"{name}.features.fill.style must be one of "
+            f"{sorted(HEADING_SPLIT_ADMITTED_FILL_STYLES)}, got {style!r}."
+        )
+    for key, expected in HEADING_SPLIT_FILL_CONSTANTS.items():
+        _require_exact(fill.get(key), expected, name=f"{name}.features.fill.{key}")
+
+    reactive = features.get("reactive")
+    if not isinstance(reactive, Mapping):
+        raise ProtocolSemanticContractError(
+            f"{name}.features.reactive must be one object."
+        )
+    if set(reactive) != HEADING_SPLIT_REACTIVE_KEYS:
+        raise ProtocolSemanticContractError(
+            f"{name}.features.reactive must have exactly the keys "
+            f"{sorted(HEADING_SPLIT_REACTIVE_KEYS)}."
+        )
+    for key, expected in HEADING_SPLIT_REACTIVE_CONSTANTS.items():
+        _require_exact(reactive[key], expected, name=f"{name}.features.reactive.{key}")
+    _require_exact(
+        reactive["fill_style"], style, name=f"{name}.features.reactive.fill_style"
+    )
+    for key, upper in (
+        ("minimum_keypoint_confidence", 1.0),
+        ("minimum_heading_displacement_degrees", 180.0),
+    ):
+        value = _require_number(reactive[key], name=f"{name}.features.reactive.{key}")
+        if not 0.0 <= value <= upper:
+            raise ProtocolSemanticContractError(
+                f"{name}.features.reactive.{key} must lie in [0, {upper:g}]."
+            )
+    held = reactive["maximum_held_heading_updates"]
+    if held != "never":
+        _require_int(
+            held,
+            name=f"{name}.features.reactive.maximum_held_heading_updates",
+            minimum=1,
+        )
+    for key, allowed in (
+        ("unknown_heading_fallback", HEADING_SPLIT_FALLBACKS),
+        ("left_side", HEADING_SPLIT_LEFT_SIDES),
+    ):
+        if type(reactive[key]) is not str or reactive[key] not in allowed:
+            raise ProtocolSemanticContractError(
+                f"{name}.features.reactive.{key} must be one of {sorted(allowed)}."
+            )
+    _validate_heading_split_semantic(parameters, reactive, step_index=step_index)
+
+
+def _validate_heading_split_semantic(
+    parameters: Mapping[str, Any], reactive: Mapping[str, Any], *, step_index: int
+) -> None:
+    """The semantic identity must declare exactly what the trial index names."""
+
+    name = f"semantic step {step_index}.parameters"
+    _require_exact(
+        parameters.get("fill_type_id"),
+        HEADING_SPLIT_SEMANTIC_FILL_TYPE_ID,
+        name=f"{name}.fill_type_id",
+    )
+    semantic = parameters.get("heading_split")
+    if not isinstance(semantic, Mapping) or set(semantic) != HEADING_SPLIT_SEMANTIC_KEYS:
+        raise ProtocolSemanticContractError(
+            f"{name}.heading_split must have exactly the keys "
+            f"{sorted(HEADING_SPLIT_SEMANTIC_KEYS)}."
+        )
+    _require_exact(
+        semantic["module"], reactive["module"], name=f"{name}.heading_split.module"
+    )
+    _require_exact(
+        semantic["maximum_held_heading_updates"],
+        reactive["maximum_held_heading_updates"],
+        name=f"{name}.heading_split.maximum_held_heading_updates",
+    )
+    for key, (field, names) in HEADING_SPLIT_SEMANTIC_IDS.items():
+        _require_exact(
+            semantic[field],
+            names.index(reactive[key]),
+            name=f"{name}.heading_split.{field} for {reactive[key]!r}",
+        )
+    for key, unit in HEADING_SPLIT_SEMANTIC_SCALED.items():
+        scaled = semantic[key]
+        if (
+            not isinstance(scaled, Mapping)
+            or set(scaled) != {"scale", "unit", "value"}
+            or scaled["scale"] != "1e-6"
+            or scaled["unit"] != unit
+            or type(scaled["value"]) is not int
+        ):
+            raise ProtocolSemanticContractError(
+                f"{name}.heading_split.{key} must be one 1e-6 {unit} scaled integer."
+            )
+        if scaled["value"] / 10**6 != reactive[key]:
+            raise ProtocolSemanticContractError(
+                f"{name}.heading_split.{key} differs from the trial index."
+            )
+
+
+def _scaled_mm(value: object, *, name: str, positive: bool) -> None:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {"scale", "unit", "value"}
+        or type(value["scale"]) is not str
+        or value["unit"] != "mm"
+        or type(value["value"]) is not int
+        or (value["value"] <= 0 if positive else value["value"] < 0)
+    ):
+        raise ProtocolSemanticContractError(
+            f"{name} must be one {'positive' if positive else 'non-negative'} "
+            "mm scaled integer."
+        )
+
+
+def _validate_recipe_v3_chaser_parameters(
+    parameters: object, *, step_index: int
+) -> None:
+    """The four chaser fields semantic recipe v3 newly hashes are well formed."""
+
+    name = f"semantic step {step_index}.parameters"
+    if not isinstance(parameters, Mapping):
+        raise ProtocolSemanticContractError(f"{name} must be one object.")
+    if "z_eff" not in parameters:
+        raise ProtocolSemanticContractError(f"{name}.z_eff is required by recipe v3.")
+    if parameters["z_eff"] is not None:
+        _scaled_mm(parameters["z_eff"], name=f"{name}.z_eff", positive=True)
+    _scaled_mm(
+        parameters.get("target_radius"), name=f"{name}.target_radius", positive=False
+    )
+    chasers = parameters.get("chasers", [])
+    if not isinstance(chasers, list):
+        raise ProtocolSemanticContractError(f"{name}.chasers must be a list.")
+    for chaser_index, chaser in enumerate(chasers):
+        label = f"{name}.chasers[{chaser_index}]"
+        if not isinstance(chaser, Mapping):
+            raise ProtocolSemanticContractError(f"{label} must be one object.")
+        if "appearance_drive" in chaser and not isinstance(chaser.get("loom"), Mapping):
+            raise ProtocolSemanticContractError(
+                f"{label}.loom is required with an appearance_drive under recipe v3."
+            )
+        program = chaser.get("behavior_program")
+        if program is None:
+            continue
+        phases = program.get("phases") if isinstance(program, Mapping) else None
+        if not isinstance(phases, list):
+            raise ProtocolSemanticContractError(
+                f"{label}.behavior_program.phases must be a list."
+            )
+        for phase_index, phase in enumerate(phases):
+            if not isinstance(phase, Mapping):
+                raise ProtocolSemanticContractError(
+                    f"{label}.behavior_program.phases[{phase_index}] must be one object."
+                )
+            reference = phase.get("target_reference")
+            if phase.get("type") == "chase" and (
+                type(reference) is not str or not reference
+            ):
+                raise ProtocolSemanticContractError(
+                    f"{label}.behavior_program.phases[{phase_index}].target_reference "
+                    "is required on a chase phase under recipe v3."
+                )
+
+
+_RELABEL_V2 = (
+    '"normalization_policy":"' + PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY + '"'
+).encode("utf-8")
+_RELABEL_V3 = (
+    '"normalization_policy":"' + PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY + '"'
+).encode("utf-8")
+_RELABEL_V3_IDENTITY_CLOSE = b"}," + _RELABEL_V3
+_RELABEL_V4_IDENTITY_CLOSE = (
+    ',"'
+    + STIMULUS_RENDER_RATE_KEY
+    + '":'
+    + str(PRE_V4_STIMULUS_RENDER_RATE_HZ)
+    + '},"normalization_policy":"'
+    + PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY
+    + '"'
+).encode("utf-8")
+
+
+def semantic_v2_relabels_to_v3(
+    v2_semantic_json_bytes: bytes, v2_semantic_hash: str, v3_semantic_hash: str
+) -> bool:
+    """Whether a v2 recording may join a v3 protocol_semantic_hash group.
+
+    The relabel pooling rule of agent-contracts pairing revision 2 (Jeremy,
+    2026-11-03), over the recorded bytes only, never a re-serialisation: the
+    bytes hash to the recorded v2 hash, the v2 policy member occurs exactly
+    once, and swapping it for the v3 member yields exactly the v3 hash. It
+    holds for label-only protocols and never for a protocol whose v3 identity
+    adds chaser fields. Semantic hash only; trial-index and execution-index
+    hashes are never joined across policies.
+    """
+
+    if type(v2_semantic_json_bytes) is not bytes:
+        raise TypeError("semantic_v2_relabels_to_v3 takes the recorded bytes.")
+    for value in (v2_semantic_hash, v3_semantic_hash):
+        if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
+            raise ProtocolSemanticContractError(
+                "protocol_semantic_hash must be 'sha256:' plus 64 lowercase hex digits."
+            )
+    if "sha256:" + sha256(v2_semantic_json_bytes).hexdigest() != v2_semantic_hash:
+        return False
+    if v2_semantic_json_bytes.count(_RELABEL_V2) != 1:
+        return False
+    relabeled = v2_semantic_json_bytes.replace(_RELABEL_V2, _RELABEL_V3)
+    return "sha256:" + sha256(relabeled).hexdigest() == v3_semantic_hash
+
+
+def semantic_v3_relabels_to_v4(
+    v3_semantic_json_bytes: bytes, v3_semantic_hash: str, v4_semantic_hash: str
+) -> bool:
+    """Whether a v3 recording may join a v4 protocol_semantic_hash group.
+
+    Pairing revision 3's rule, over the recorded bytes only: the bytes hash to
+    the recorded v3 hash, ``},"normalization_policy":"...semantic.v3"`` occurs
+    exactly once, and inserting ``"stimulus_render_rate_hz":120`` as the
+    identity's last key with the v4 label yields exactly the v4 hash. Only 120
+    is ever inserted (every v3 recording ran at 120 Hz), so a v3 recording
+    never joins a 240 Hz group. A v2 recording reaches v4 only through
+    ``semantic_v2_relabels_to_v3`` first. Semantic hash only.
+    """
+
+    if type(v3_semantic_json_bytes) is not bytes:
+        raise TypeError("semantic_v3_relabels_to_v4 takes the recorded bytes.")
+    for value in (v3_semantic_hash, v4_semantic_hash):
+        if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
+            raise ProtocolSemanticContractError(
+                "protocol_semantic_hash must be 'sha256:' plus 64 lowercase hex digits."
+            )
+    if "sha256:" + sha256(v3_semantic_json_bytes).hexdigest() != v3_semantic_hash:
+        return False
+    if v3_semantic_json_bytes.count(_RELABEL_V3_IDENTITY_CLOSE) != 1:
+        return False
+    relabeled = v3_semantic_json_bytes.replace(
+        _RELABEL_V3_IDENTITY_CLOSE, _RELABEL_V4_IDENTITY_CLOSE
+    )
+    return "sha256:" + sha256(relabeled).hexdigest() == v4_semantic_hash
+
+
+def _validate_recipe_v4_render_rate(identity: object) -> None:
+    rate = identity.get(STIMULUS_RENDER_RATE_KEY) if isinstance(identity, Mapping) else None
+    if type(rate) is not int or rate not in ADMITTED_STIMULUS_RENDER_RATES_HZ:
+        raise ProtocolSemanticContractError(
+            f"identity.{STIMULUS_RENDER_RATE_KEY} must be one JSON integer in "
+            f"{sorted(ADMITTED_STIMULUS_RENDER_RATES_HZ)} under recipe v4."
+        )
+
+
 def validate_protocol_semantic_snapshot(
     *,
     semantic_hash: str,
@@ -332,8 +840,31 @@ def validate_protocol_semantic_snapshot(
     trial_index_hash: str | None = None,
     snapshot_schema_version: int = 1,
     snapshot_policy_id: str = "citrus.protocol.snapshot.legacy_v1",
+    stimulus_angle_convention: str = LEGACY_CANVAS_ANGLE,
+    admits_heading_split: bool = False,
 ) -> ProtocolSemanticSnapshot:
-    """Validate exact producer bytes and return a typed immutable snapshot."""
+    """Validate exact producer bytes and return a typed immutable snapshot.
+
+    ``stimulus_angle_convention`` is the convention the recording's admitted
+    binding fixed (never read from the payloads). Under
+    ``STIMULUS_ANGLE_CONVENTION`` the snapshot must be v2 with semantic policy
+    v2, recipe v3 or recipe v4 and trial index v3, each declaring that id
+    (recipes v3 and v4 also require their well-formed chaser fields, and v4
+    its integer ``identity.stimulus_render_rate_hz``); under the legacy default
+    the historical contract applies unchanged. ``admits_heading_split`` is
+    likewise fixed by the admitted binding: only admission revision 6 admits a
+    reactive heading-split step, and no binding sets it yet.
+    """
+
+    angle_v1 = stimulus_angle_convention == STIMULUS_ANGLE_CONVENTION
+    if not angle_v1 and stimulus_angle_convention != LEGACY_CANVAS_ANGLE:
+        raise ProtocolSemanticContractError(
+            "stimulus_angle_convention must be a registered convention id."
+        )
+    if angle_v1 and snapshot_schema_version != PROTOCOL_SNAPSHOT_SCHEMA_VERSION:
+        raise ProtocolSemanticContractError(
+            "stimulus angle convention v1 requires Citrus snapshot v2."
+        )
 
     if type(snapshot_schema_version) is not int or snapshot_schema_version not in (1, 2):
         raise ProtocolSemanticContractError(
@@ -368,11 +899,22 @@ def validate_protocol_semantic_snapshot(
         PROTOCOL_SEMANTIC_SCHEMA_VERSION,
         name="protocol_semantic_json.schema_version",
     )
-    _require_exact(
-        semantic.get("normalization_policy"),
-        PROTOCOL_SEMANTIC_NORMALIZATION_POLICY,
-        name="protocol_semantic_json.normalization_policy",
-    )
+    semantic_policy = semantic.get("normalization_policy")
+    # Recipe v4 hashes everything v3 does, so it carries v3's chaser checks.
+    recipe_v4 = angle_v1 and semantic_policy == PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY
+    if recipe_v4 or (
+        angle_v1 and semantic_policy == PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY
+    ):
+        recipe_v3 = True
+    else:
+        recipe_v3 = False
+        _require_exact(
+            semantic_policy,
+            PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY
+            if angle_v1
+            else PROTOCOL_SEMANTIC_NORMALIZATION_POLICY,
+            name="protocol_semantic_json.normalization_policy",
+        )
 
     trial = _parse_object(trial_index_json, name="protocol_trial_index_json")
     _require_exact(
@@ -385,21 +927,42 @@ def validate_protocol_semantic_snapshot(
         name="protocol_trial_index_json.schema_version",
         minimum=1,
     )
-    if trial_schema_version not in PROTOCOL_TRIAL_INDEX_SCHEMA_VERSIONS:
-        raise ProtocolSemanticContractError(
-            "protocol_trial_index_json.schema_version is unsupported."
+    if angle_v1:
+        _require_exact(
+            trial_schema_version,
+            PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION,
+            name="protocol_trial_index_json.schema_version",
         )
-    expected_trial_schema_version = 2 if snapshot_schema_version == 2 else 1
-    _require_exact(
-        trial_schema_version,
-        expected_trial_schema_version,
-        name="protocol_trial_index_json.schema_version",
-    )
-    _require_exact(
-        trial.get("normalization_policy"),
-        PROTOCOL_TRIAL_INDEX_NORMALIZATION_POLICIES[trial_schema_version],
-        name="protocol_trial_index_json.normalization_policy",
-    )
+        _require_exact(
+            trial.get("normalization_policy"),
+            PROTOCOL_TRIAL_INDEX_ANGLE_V1_NORMALIZATION_POLICY,
+            name="protocol_trial_index_json.normalization_policy",
+        )
+        for name, payload in (
+            ("protocol_semantic_json", semantic),
+            ("protocol_trial_index_json", trial),
+        ):
+            _require_exact(
+                payload.get("stimulus_angle_convention"),
+                STIMULUS_ANGLE_CONVENTION,
+                name=f"{name}.stimulus_angle_convention",
+            )
+    else:
+        if trial_schema_version not in PROTOCOL_TRIAL_INDEX_SCHEMA_VERSIONS:
+            raise ProtocolSemanticContractError(
+                "protocol_trial_index_json.schema_version is unsupported."
+            )
+        expected_trial_schema_version = 2 if snapshot_schema_version == 2 else 1
+        _require_exact(
+            trial_schema_version,
+            expected_trial_schema_version,
+            name="protocol_trial_index_json.schema_version",
+        )
+        _require_exact(
+            trial.get("normalization_policy"),
+            PROTOCOL_TRIAL_INDEX_NORMALIZATION_POLICIES[trial_schema_version],
+            name="protocol_trial_index_json.normalization_policy",
+        )
     _require_exact(
         trial.get("protocol_semantic_hash"),
         semantic_hash,
@@ -407,6 +970,12 @@ def validate_protocol_semantic_snapshot(
     )
 
     identity = semantic.get("identity")
+    if recipe_v4:
+        _validate_recipe_v4_render_rate(identity)
+    elif isinstance(identity, Mapping) and STIMULUS_RENDER_RATE_KEY in identity:
+        raise ProtocolSemanticContractError(
+            f"identity.{STIMULUS_RENDER_RATE_KEY} is allowed only under recipe v4."
+        )
     semantic_steps = identity.get("steps") if isinstance(identity, Mapping) else None
     trial_steps = trial.get("steps")
     if not isinstance(semantic_steps, list) or not isinstance(trial_steps, list):
@@ -505,7 +1074,9 @@ def validate_protocol_semantic_snapshot(
             expected_mode,
             name=f"trial step {expected_index}.stimulus_mode",
         )
-        expected_family = {4: "solid_color", 12: "chaser"}.get(semantic_mode_id)
+        expected_family = {4: "solid_color", 12: "chaser", 22: "solid_color"}.get(
+            semantic_mode_id
+        )
         if expected_family is not None:
             _require_exact(
                 stimulus_family,
@@ -517,6 +1088,18 @@ def validate_protocol_semantic_snapshot(
             raise ProtocolSemanticContractError(
                 f"trial step {expected_index}.features must be one object."
             )
+        _validate_heading_split_step(
+            features,
+            step_index=expected_index,
+            stimulus_mode_id=semantic_mode_id,
+            trial_schema_version=trial_schema_version,
+            admits_heading_split=admits_heading_split,
+            semantic_parameters=semantic_step.get("parameters"),
+        )
+        if recipe_v3 and semantic_mode_id == CHASER_STIMULUS_MODE_ID:
+            _validate_recipe_v3_chaser_parameters(
+                semantic_step.get("parameters"), step_index=expected_index
+            )
         if semantic_mode_id == 4:
             parameters = semantic_step.get("parameters")
             if not isinstance(parameters, Mapping):
@@ -527,6 +1110,12 @@ def validate_protocol_semantic_snapshot(
                 parameters.get("color_type_id"),
                 0,
                 name=f"semantic step {expected_index}.parameters.color_type_id",
+            )
+        if semantic_mode_id == SOLID_COLOR_STIMULUS_MODE_ID:
+            _validate_solid_color_features(
+                features,
+                parameters=semantic_step.get("parameters"),
+                step_index=expected_index,
             )
         display_context = _display_context(
             stimulus_family=stimulus_family,
@@ -920,6 +1509,10 @@ __all__ = [
     "PALETTE_PROTOCOL_SNAPSHOT_SCHEMA_VERSION",
     "PROTOCOL_SEMANTIC_HASH_H5_PATH",
     "PROTOCOL_SEMANTIC_JSON_H5_PATH",
+    "PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY",
+    "PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY",
+    "ADMITTED_STIMULUS_RENDER_RATES_HZ",
+    "PRE_V4_STIMULUS_RENDER_RATE_HZ",
     "PROTOCOL_TRIAL_INDEX_JSON_H5_PATH",
     "PROTOCOL_TRIAL_INDEX_HASH_H5_PATH",
     "TRIAL_INDEX_INTEGRITY_LOCAL",
@@ -929,5 +1522,7 @@ __all__ = [
     "ProtocolStepIdentity",
     "read_materialized_protocol_semantic_snapshot",
     "read_protocol_semantic_snapshot",
+    "semantic_v2_relabels_to_v3",
+    "semantic_v3_relabels_to_v4",
     "validate_protocol_semantic_snapshot",
 ]

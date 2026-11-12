@@ -38,6 +38,7 @@ from fisheye.shared.zarr.body_frame_schema import (
 )
 from fisheye.shared.zarr.keypoint_schema import derive_frame_row_offsets
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.heading_convention import heading_degrees, left_axis
 
 MASK_BODY_FRAME_RECIPE_SCHEMA_ID = "palette.body_frame.mask_heading_recipe"
 MASK_BODY_FRAME_RECIPE_SCHEMA_VERSION = 1
@@ -650,10 +651,11 @@ def derive_mask_body_frame_geometry(
         forward[axis_valid] = (
             forward_raw[axis_valid] / norms[axis_valid, None]
         ).astype(np.float32)
-        left[axis_valid, 0] = forward[axis_valid, 1]
-        left[axis_valid, 1] = -forward[axis_valid, 0]
-        heading[axis_valid] = np.rad2deg(
-            np.arctan2(-forward[axis_valid, 1], forward[axis_valid, 0])
+        left[axis_valid, 0], left[axis_valid, 1] = left_axis(
+            forward[axis_valid, 0], forward[axis_valid, 1], dtype=np.float32
+        )
+        heading[axis_valid] = heading_degrees(
+            forward[axis_valid, 0], forward[axis_valid, 1], dtype=np.float32
         ).astype(np.float32)
     return {
         "origin_xy": origin,

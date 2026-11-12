@@ -1,0 +1,300 @@
+{
+ "2010093": {
+  "detect": {
+   "enabled": true,
+   "runtime": {
+    "backend": "tensorrt",
+    "engine_bytes": 6773940,
+    "engine_manifest": {
+     "build_id": "a16_gpu5_trt100_int8mm_bo5_avg32",
+     "canonical_manifest": {
+      "path": "",
+      "sha256": ""
+     },
+     "created_at_utc": "2026-09-18T05:29:54Z",
+     "engine_sha256_declared": "479e82d2bbd127703437765b36ebcf33d6095c03224531453334128539f5d007",
+     "engine_sha256_matches": true,
+     "error": "",
+     "onnx": {
+      "path": "/home/jeremy/orange_data/model_sources/detect/detect_all_available_detect_training_v004_yolo11n_trt_20260520/source.onnx",
+      "sha256": "d9bbeebd09ef7a30bc15759b0a149e0de51508735b5c32d9abc247514d950536"
+     },
+     "onnx_manifest": {
+      "path": "/home/jeremy/orange_data/model_sources/detect/detect_all_available_detect_training_v004_yolo11n_trt_20260520/source.onnx.manifest.json",
+      "sha256": "4d9c573b3b47fa4e69a1f60b76f5931393c15ded32e9206ed3e820efac35a88e"
+     },
+     "path": "/home/jeremy/orange_data/detect/detect_all_available_detect_training_v004_yolo11n_trt_20260520_a16_gpu5_trt100_int8mm_bo5_avg32.manifest.json",
+     "precision": "int8",
+     "present": true,
+     "run_id": "detect_all_available_detect_training_v004_yolo11n_trt_20260520",
+     "schema_id": "orange.tensorrt_engine_manifest",
+     "schema_version": 1,
+     "set_id": "",
+     "sha256": "1ad86ffce71f8f5cd7a909dd44143e2571342a12b83b1b6d1d740d9515566d29",
+     "status": "candidate",
+     "target_hardware_class": "A16",
+     "task": "",
+     "weights": {
+      "path": "/nvme1/models/detect/detect_all_available_detect_training_v004/detect_all_available_detect_training_v004_yolo11n_trt_20260520/weights/best.pt",
+      "sha256": "74458dc7a91b93d70edd7974617b8ad920d30ee78084a56161bcad57dd62ac58"
+     }
+    },
+    "engine_path": "/home/jeremy/orange_data/detect/detect_all_available_detect_training_v004_yolo11n_trt_20260520_a16_gpu5_trt100_int8mm_bo5_avg32.engine",
+    "engine_sha256": "479e82d2bbd127703437765b36ebcf33d6095c03224531453334128539f5d007",
+    "gpu_id": 3,
+    "model_id": "detect_all_available_detect_training_v004_yolo11n_trt_20260520_a16_gpu5_trt100_int8mm_bo5_avg32",
+    "onnx_sha256": "d9bbeebd09ef7a30bc15759b0a149e0de51508735b5c32d9abc247514d950536",
+    "weights_sha256": "74458dc7a91b93d70edd7974617b8ad920d30ee78084a56161bcad57dd62ac58",
+    "worker": "YoloWorker"
+   },
+   "source": {
+    "camera_config_path": "/tmp/orange_recorder_config_a16/2010093.json",
+    "ui_selected": true
+   }
+  },
+  "pose": {
+   "enabled": true,
+   "runtime": {
+    "backend": "tensorrt",
+    "engine_bytes": 8337836,
+    "engine_manifest": {
+     "build_id": "a16_gpu5_trt100_fp16_bo5_avg32",
+     "canonical_manifest": {
+      "path": "/home/jeremy/orange_data/pose/pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915/pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915.canonical.manifest.json",
+      "sha256": "72a8c2a80b2659e624bf02a4c9093fe44c0c1ec24af6e2fca2eedf3c98c3c6ab"
+     },
+     "created_at_utc": "2026-09-16T22:01:27.610023+00:00",
+     "engine_sha256_declared": "ee404b245620ccdcc4297a65513e4bf64e87d288af1a6fa9ca479a8a8ad0e944",
+     "engine_sha256_matches": true,
+     "error": "",
+     "onnx": {
+      "path": "/home/jeremy/orange_data/pose/pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915/pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915.onnx",
+      "sha256": "db5c8c3305b71c52f147152507dd8cd890d42396162adf74b1b8afbafe84f12f"
+     },
+     "onnx_manifest": {
+      "path": "",
+      "sha256": ""
+     },
+     "path": "/home/jeremy/orange_data/pose/pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915/engines/pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915_a16_gpu5_trt100_fp16_bo5_avg32.manifest.json",
+     "precision": "fp16",
+     "present": true,
+     "run_id": "pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915",
+     "schema_id": "orange.tensorrt_engine_manifest",
+     "schema_version": 1,
+     "set_id": "pose_head_192_recovered_reviewed_v001",
+     "sha256": "c5feb7ec6ff667d23828e91cfacd9cc817f8d77d4b369b17a13c3e6324c5363e",
+     "status": "candidate",
+     "target_hardware_class": "A16",
+     "task": "pose",
+     "weights": {
+      "path": "weights/best.pt",
+      "sha256": "2edf67ad1fd97b5ac3835c2423a8d54775402c7d97a17c2a99a45e9e11d7b191"
+     }
+    },
+    "engine_path": "/home/jeremy/orange_data/pose/pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915/engines/pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915_a16_gpu5_trt100_fp16_bo5_avg32.engine",
+    "engine_sha256": "ee404b245620ccdcc4297a65513e4bf64e87d288af1a6fa9ca479a8a8ad0e944",
+    "files": {
+     "events": "Cam2010093_pose_events.jsonl",
+     "perf": "Cam2010093_pose_perf.csv"
+    },
+    "gpu_id": 3,
+    "ipc_model_id_hash": 17167804398972226780,
+    "mode": "real",
+    "model_id": "pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915_a16_gpu5_trt100_fp16_bo5_avg32",
+    "onnx_sha256": "db5c8c3305b71c52f147152507dd8cd890d42396162adf74b1b8afbafe84f12f",
+    "onnx_sha256_matches_skeleton_sidecar": true,
+    "pose_crop_size_px": 192,
+    "queue_size": 32,
+    "skeleton": {
+     "edges": [
+      [
+       0,
+       1
+      ],
+      [
+       0,
+       2
+      ],
+      [
+       1,
+       2
+      ]
+     ],
+     "ipc_skeleton_id_hash": 13995128734323424025,
+     "kpt_shape": [
+      3,
+      3
+     ],
+     "labels": [
+      "swim_bladder",
+      "eye_left",
+      "eye_right"
+     ],
+     "schema_id": "palette.pose_model_skeleton",
+     "schema_version": 1,
+     "sidecar_document": {
+      "edges": [
+       [
+        0,
+        1
+       ],
+       [
+        0,
+        2
+       ],
+       [
+        1,
+        2
+       ]
+      ],
+      "kpt_shape": [
+       3,
+       3
+      ],
+      "model_schema_binding": {
+       "authority": {
+        "assertion_id": null,
+        "consistency_policy": "manifest_primary_all_populated_registry_fields_must_agree_v1",
+        "registry_skeleton_id": "pose_skel_d93663a59179",
+        "registry_skeleton_spec_sha256": "d93663a59179b6af14a90903a1ede792db6b49eef1d26341a197444506ab31a0",
+        "training_manifest_path": "/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/training/pose_head_merged_v1/pose_head_192_recovered_reviewed_v001/pose_head_192_recovered_reviewed_v001.manifest.json",
+        "training_manifest_sha256": "0f9fc36b8b992f4537c1cdac68a598471467546734722f8a16ecc002a4712807"
+       },
+       "binding_kind": "registered_training_manifest_v1",
+       "binding_sha256": "6c843bd1387ba65c503c352b8a04cd9945d59ad07f47f21b236dd43cc4c53ff7",
+       "canonicalization": "canonical_json_sort_keys_v1",
+       "model": {
+        "registry_run_id": "pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915",
+        "registry_set_id": "pose_head_192_recovered_reviewed_v001",
+        "role": "keypoint_model",
+        "sha256": "2edf67ad1fd97b5ac3835c2423a8d54775402c7d97a17c2a99a45e9e11d7b191"
+       },
+       "pose_schema": {
+        "edges": [
+         [
+          0,
+          1
+         ],
+         [
+          0,
+          2
+         ],
+         [
+          1,
+          2
+         ]
+        ],
+        "keypoint_labels": [
+         "swim_bladder",
+         "eye_left",
+         "eye_right"
+        ],
+        "kpt_shape": [
+         3,
+         2
+        ],
+        "metadata": {
+         "heading_computation": {
+          "dependent_keypoints": [
+           "swim_bladder",
+           "eye_left",
+           "eye_right"
+          ],
+          "direction_from": {
+           "label": "swim_bladder",
+           "op": "keypoint"
+          },
+          "direction_to": {
+           "labels": [
+            "eye_left",
+            "eye_right"
+           ],
+           "op": "midpoint"
+          },
+          "enabled": true,
+          "origin": {
+           "labels": [
+            "eye_left",
+            "eye_right"
+           ],
+           "op": "midpoint"
+          },
+          "version": 1
+         },
+         "heading_computation_source": "authoritative_ordered_labels_controlled_policy_v1",
+         "model_kpt_shape": [
+          3,
+          3
+         ],
+         "registry_skeleton_id": "pose_skel_d93663a59179",
+         "registry_skeleton_spec_sha256": "d93663a59179b6af14a90903a1ede792db6b49eef1d26341a197444506ab31a0",
+         "training_manifest_skeleton_id": "pose_schema:traditional_v1"
+        },
+        "name": "pose_schema:traditional_v1",
+        "nodes": [
+         {
+          "id": 0,
+          "name": "swim_bladder"
+         },
+         {
+          "id": 1,
+          "name": "eye_left"
+         },
+         {
+          "id": 2,
+          "name": "eye_right"
+         }
+        ],
+        "skeleton_id": "pose_schema:traditional_v1",
+        "source": "training_manifest_sha256:0f9fc36b8b992f4537c1cdac68a598471467546734722f8a16ecc002a4712807"
+       },
+       "schema_id": "palette.pose_model_schema_binding",
+       "schema_version": 1
+      },
+      "nodes": [
+       {
+        "id": 0,
+        "name": "swim_bladder"
+       },
+       {
+        "id": 1,
+        "name": "eye_left"
+       },
+       {
+        "id": 2,
+        "name": "eye_right"
+       }
+      ],
+      "schema_id": "palette.pose_model_skeleton",
+      "schema_version": 1,
+      "skeleton_id": "pose_schema:traditional_v1",
+      "source": {
+       "onnx_sha256": "db5c8c3305b71c52f147152507dd8cd890d42396162adf74b1b8afbafe84f12f",
+       "run_id": "pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915",
+       "set_id": "pose_head_192_recovered_reviewed_v001",
+       "training_manifest_sha256": "0f9fc36b8b992f4537c1cdac68a598471467546734722f8a16ecc002a4712807",
+       "weights_sha256": "2edf67ad1fd97b5ac3835c2423a8d54775402c7d97a17c2a99a45e9e11d7b191"
+      }
+     },
+     "sidecar_path": "/home/jeremy/orange_data/pose/pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915/engines/pose_model_skeleton.json",
+     "sidecar_sha256": "c238af6f3b35bb19c1b9dfeb5b1d5d9ffe2086f5f1fd1c4ca73e2766f51c3f11",
+     "sidecar_text": "{\n  \"edges\": [\n    [\n      0,\n      1\n    ],\n    [\n      0,\n      2\n    ],\n    [\n      1,\n      2\n    ]\n  ],\n  \"kpt_shape\": [\n    3,\n    3\n  ],\n  \"model_schema_binding\": {\n    \"authority\": {\n      \"assertion_id\": null,\n      \"consistency_policy\": \"manifest_primary_all_populated_registry_fields_must_agree_v1\",\n      \"registry_skeleton_id\": \"pose_skel_d93663a59179\",\n      \"registry_skeleton_spec_sha256\": \"d93663a59179b6af14a90903a1ede792db6b49eef1d26341a197444506ab31a0\",\n      \"training_manifest_path\": \"/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/training/pose_head_merged_v1/pose_head_192_recovered_reviewed_v001/pose_head_192_recovered_reviewed_v001.manifest.json\",\n      \"training_manifest_sha256\": \"0f9fc36b8b992f4537c1cdac68a598471467546734722f8a16ecc002a4712807\"\n    },\n    \"binding_kind\": \"registered_training_manifest_v1\",\n    \"binding_sha256\": \"6c843bd1387ba65c503c352b8a04cd9945d59ad07f47f21b236dd43cc4c53ff7\",\n    \"canonicalization\": \"canonical_json_sort_keys_v1\",\n    \"model\": {\n      \"registry_run_id\": \"pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915\",\n      \"registry_set_id\": \"pose_head_192_recovered_reviewed_v001\",\n      \"role\": \"keypoint_model\",\n      \"sha256\": \"2edf67ad1fd97b5ac3835c2423a8d54775402c7d97a17c2a99a45e9e11d7b191\"\n    },\n    \"pose_schema\": {\n      \"edges\": [\n        [\n          0,\n          1\n        ],\n        [\n          0,\n          2\n        ],\n        [\n          1,\n          2\n        ]\n      ],\n      \"keypoint_labels\": [\n        \"swim_bladder\",\n        \"eye_left\",\n        \"eye_right\"\n      ],\n      \"kpt_shape\": [\n        3,\n        2\n      ],\n      \"metadata\": {\n        \"heading_computation\": {\n          \"dependent_keypoints\": [\n            \"swim_bladder\",\n            \"eye_left\",\n            \"eye_right\"\n          ],\n          \"direction_from\": {\n            \"label\": \"swim_bladder\",\n            \"op\": \"keypoint\"\n          },\n          \"direction_to\": {\n            \"labels\": [\n              \"eye_left\",\n              \"eye_right\"\n            ],\n            \"op\": \"midpoint\"\n          },\n          \"enabled\": true,\n          \"origin\": {\n            \"labels\": [\n              \"eye_left\",\n              \"eye_right\"\n            ],\n            \"op\": \"midpoint\"\n          },\n          \"version\": 1\n        },\n        \"heading_computation_source\": \"authoritative_ordered_labels_controlled_policy_v1\",\n        \"model_kpt_shape\": [\n          3,\n          3\n        ],\n        \"registry_skeleton_id\": \"pose_skel_d93663a59179\",\n        \"registry_skeleton_spec_sha256\": \"d93663a59179b6af14a90903a1ede792db6b49eef1d26341a197444506ab31a0\",\n        \"training_manifest_skeleton_id\": \"pose_schema:traditional_v1\"\n      },\n      \"name\": \"pose_schema:traditional_v1\",\n      \"nodes\": [\n        {\n          \"id\": 0,\n          \"name\": \"swim_bladder\"\n        },\n        {\n          \"id\": 1,\n          \"name\": \"eye_left\"\n        },\n        {\n          \"id\": 2,\n          \"name\": \"eye_right\"\n        }\n      ],\n      \"skeleton_id\": \"pose_schema:traditional_v1\",\n      \"source\": \"training_manifest_sha256:0f9fc36b8b992f4537c1cdac68a598471467546734722f8a16ecc002a4712807\"\n    },\n    \"schema_id\": \"palette.pose_model_schema_binding\",\n    \"schema_version\": 1\n  },\n  \"nodes\": [\n    {\n      \"id\": 0,\n      \"name\": \"swim_bladder\"\n    },\n    {\n      \"id\": 1,\n      \"name\": \"eye_left\"\n    },\n    {\n      \"id\": 2,\n      \"name\": \"eye_right\"\n    }\n  ],\n  \"schema_id\": \"palette.pose_model_skeleton\",\n  \"schema_version\": 1,\n  \"skeleton_id\": \"pose_schema:traditional_v1\",\n  \"source\": {\n    \"onnx_sha256\": \"db5c8c3305b71c52f147152507dd8cd890d42396162adf74b1b8afbafe84f12f\",\n    \"run_id\": \"pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915\",\n    \"set_id\": \"pose_head_192_recovered_reviewed_v001\",\n    \"training_manifest_sha256\": \"0f9fc36b8b992f4537c1cdac68a598471467546734722f8a16ecc002a4712807\",\n    \"weights_sha256\": \"2edf67ad1fd97b5ac3835c2423a8d54775402c7d97a17c2a99a45e9e11d7b191\"\n  }\n}\n",
+     "skeleton_id": "pose_schema:traditional_v1",
+     "source": "palette_sidecar",
+     "source_onnx_sha256": "db5c8c3305b71c52f147152507dd8cd890d42396162adf74b1b8afbafe84f12f",
+     "source_run_id": "pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915"
+    },
+    "skeleton_id": "pose_schema:traditional_v1",
+    "skeleton_path": "/home/jeremy/orange_data/pose/pose_head_192_recovered_reviewed_v001_yolo11n_100e_20260915/engines/pose_model_skeleton.json",
+    "weights_sha256": "2edf67ad1fd97b5ac3835c2423a8d54775402c7d97a17c2a99a45e9e11d7b191",
+    "worker": "PoseWorker"
+   },
+   "source": {
+    "camera_config_path": "/tmp/orange_recorder_config_a16/2010093.json",
+    "requires_crop_output": true,
+    "requires_yolo": true,
+    "ui_selected": true
+   }
+  }
+ }
+}

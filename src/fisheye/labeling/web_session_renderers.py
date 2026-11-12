@@ -10,7 +10,6 @@ from .admin_registry import _task_title
 from .template_assets import read_labeling_asset, render_labeling_template
 from .web_auth import (
     DASHBOARD_PATH,
-    PERSONAL_DATASET_QUEUE_PATH,
     _dashboard_url_for_expected_user,
 )
 from .web_policy import LABELER_QUEUE_PAGE_PATH, PERSONAL_WORK_PATH
@@ -44,7 +43,6 @@ def _session_status_banner(session: Mapping[str, object]) -> str:
     expires_at = html.escape(str(session.get("expires_at_utc") or "unknown"))
     task_id = html.escape(str(session.get("task_id") or ""))
     recording_id = html.escape(str(session.get("recording_id") or ""))
-    personal_queue_url = html.escape(_session_return_url(session, PERSONAL_DATASET_QUEUE_PATH))
     personal_work_url = html.escape(_session_return_url(session, PERSONAL_WORK_PATH))
     queue_url = html.escape(_session_return_url(session, LABELER_QUEUE_PAGE_PATH))
     closed_at = str(session.get("closed_at_utc") or "").strip()
@@ -54,7 +52,7 @@ def _session_status_banner(session: Mapping[str, object]) -> str:
     <section class="session-banner">
       <b>Session {state_text}</b>
       <span>Task <code>{task_id}</code> for recording <code>{recording_id}</code> expires at <code>{expires_at}</code>.{closed_bits}</span>
-      <span>If this tab reports a superseded session, expired session, or completed task, return to <a href="{queue_url}">your queue</a>, <a href="{personal_queue_url}">your personalized dataset queue</a> or <a href="{personal_work_url}">your personalized work dashboard</a> and reopen the task.</span>
+      <span>If this tab reports a superseded session, expired session, or completed task, return to <a href="{queue_url}">your queue</a> or <a href="{personal_work_url}">your personalized work dashboard</a> and reopen the task.</span>
       <span class="session-banner-id">Session <code>{session_id}</code></span>
     </section>
 """
@@ -71,12 +69,10 @@ def _session_return_url(session: Mapping[str, object], path: str) -> str:
 
 
 def _session_return_links_html(session: Mapping[str, object]) -> str:
-    personal_queue_url = html.escape(_session_return_url(session, PERSONAL_DATASET_QUEUE_PATH))
     personal_work_url = html.escape(_session_return_url(session, PERSONAL_WORK_PATH))
     queue_url = html.escape(_session_return_url(session, LABELER_QUEUE_PAGE_PATH))
     return (
-        f'<a href="{queue_url}" class="meta" data-session-return="queue">Queue</a> '
-        f'<a href="{personal_queue_url}" class="meta" data-session-return="dataset-queue">Personalized dataset queue</a> - '
+        f'<a href="{queue_url}" class="meta" data-session-return="queue">Queue</a> - '
         f'<a href="{personal_work_url}" class="meta" data-session-return="work-dashboard">Personalized work dashboard</a>'
     )
 
@@ -206,7 +202,7 @@ def _session_html(session: Mapping[str, object]) -> bytes:
     title = _task_title(session)
     safe_title = html.escape(title)
     status_banner = _session_status_banner(session)
-    personal_queue_url = html.escape(_session_return_url(session, PERSONAL_DATASET_QUEUE_PATH))
+    queue_url = html.escape(_session_return_url(session, LABELER_QUEUE_PAGE_PATH))
     personal_work_url = html.escape(_session_return_url(session, PERSONAL_WORK_PATH))
     body = f"""<!doctype html>
 <html lang="en">
@@ -249,7 +245,7 @@ def _session_html(session: Mapping[str, object]) -> bytes:
   <article>
     <h1>{safe_title}</h1>
     {status_banner}
-    <p><b>No browser editor is configured for this workflow.</b> Return to <a href="{personal_queue_url}">your personalized dataset queue</a> or <a href="{personal_work_url}">your personalized work dashboard</a> and ask the operator to inspect this task definition before doing any work.</p>
+    <p><b>No browser editor is configured for this workflow.</b> Return to <a href="{queue_url}">your queue</a> or <a href="{personal_work_url}">your personalized work dashboard</a> and ask the operator to inspect this task definition before doing any work.</p>
     <p><a href="/">Return to your labeling landing page</a></p>
     <p><a href="{html.escape(DASHBOARD_PATH)}">Return to the work dashboard</a></p>
     <p><b>Recording:</b> <code>{html.escape(str(session.get("recording_id") or ""))}</code></p>

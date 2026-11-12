@@ -92,3 +92,4 @@
 - 2026-09-27, framework: native ES modules plus vendored Preact + htm, with no build step. Canvas editing stays in plain JS modules. The user accepted this; Vite was not chosen.
 - 2026-09-27, campus-launch code (P6): leave it as is. The campus admin said this code may be needed for multi-user hosting, so it is neither deleted nor extracted.
 - Open: CSP tightening (P5).
+- 2026-10-14, `/my-datasets` retired: `/queue` replaces it. `/`, `/me`, `/labeling`, `/datasets` and `/my-datasets` redirect to `/queue` with the query kept; `/my-work` stays until `/queue` has failed-promotion retry and per-recording detail. `/api/me/datasets` stays (queue diagnostics link, campus-launch evidence).

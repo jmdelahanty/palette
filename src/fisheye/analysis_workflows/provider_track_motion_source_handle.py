@@ -49,9 +49,8 @@ from fisheye.analysis_workflows.chaser_relative_frame_validation_receipt import 
 from fisheye.shared.acquisition_frame_clock import (
     ACQUISITION_FRAME_CLOCK_RECORD_ATTR,
     ACQUISITION_FRAME_CLOCK_RUNS_PATH,
-    ACQUISITION_FRAME_CLOCK_SCHEMA_ID,
-    ACQUISITION_FRAME_CLOCK_SCHEMA_VERSION,
     ACQUISITION_FRAME_CLOCK_SHA256_ATTR,
+    is_supported_acquisition_frame_clock_schema,
 )
 from fisheye.shared.atomic_run_publisher import (
     ATOMIC_PUBLICATION_OWNER_ATTR,
@@ -1319,8 +1318,9 @@ def _receipt_bound_temporal_authority(
     if (
         run_document.get("node_type") != "group"
         or not isinstance(run_attrs, Mapping)
-        or run_attrs.get("schema_id") != ACQUISITION_FRAME_CLOCK_SCHEMA_ID
-        or run_attrs.get("schema_version") != ACQUISITION_FRAME_CLOCK_SCHEMA_VERSION
+        or not is_supported_acquisition_frame_clock_schema(
+            run_attrs.get("schema_id"), run_attrs.get("schema_version")
+        )
         or run_attrs.get("immutable") is not True
         or run_attrs.get("stage_selector_eligible") is not True
         or run_attrs.get(RUN_COMPLETION_CONTRACT_ATTR) != RUN_COMPLETION_CONTRACT
@@ -1337,9 +1337,8 @@ def _receipt_bound_temporal_authority(
     )
     if (
         canonical_json_sha256(_thaw(live_clock_record)) != clock_digest
-        or live_clock_record.get("schema_id") != ACQUISITION_FRAME_CLOCK_SCHEMA_ID
-        or live_clock_record.get("schema_version")
-        != ACQUISITION_FRAME_CLOCK_SCHEMA_VERSION
+        or live_clock_record.get("schema_id") != run_attrs.get("schema_id")
+        or live_clock_record.get("schema_version") != run_attrs.get("schema_version")
         or live_clock_record.get("camera_id") != record.get("camera_id")
         or live_clock_record.get("row_count") != record.get("frame_count")
         or _thaw(live_clock_record.get("array_sha256")) != _thaw(bound_arrays)

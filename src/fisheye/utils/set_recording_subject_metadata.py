@@ -31,6 +31,7 @@ from fisheye.shared.experiment_setup import (
 )
 from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
 from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.recording_manifest_seal import require_unsealed_recording_manifest
 from fisheye.shared.subject_metadata import (
     MissingSubjectMetadataError,
     build_subject_metadata_record,
@@ -234,6 +235,7 @@ def _patch_manifest(plan: Mapping[str, Any], *, repair_id: str, reason: str) -> 
             "updated": dict(fields),
         }
     )
+    require_unsealed_recording_manifest(manifest_path, tool=TOOL_NAME)
     write_json_atomic(manifest_path, payload)
 
 

@@ -444,8 +444,6 @@ def _build_row_index(
                 "clip_local_frame_index": cache_frame_indices.astype(np.int64, copy=False),
                 "recording_frame_id": clip_mapping["recording_frame_id"],
                 "parent_frame_index": clip_mapping["parent_frame_index"],
-                "timestamp": clip_mapping["timestamp"],
-                "timestamp_sys": clip_mapping["timestamp_sys"],
                 "refined_group_path": _repeat_str(refined_path, row_count),
                 "refined_detect_run": _repeat_str(selected.get("refined_detect_run"), row_count),
                 "refined_instance_row_index": source_row_indices,
@@ -561,28 +559,18 @@ def _frame_lookup_by_pair(frame_map: pa.Table) -> dict[tuple[str, str], dict[int
         if "parent_frame_index" in table.column_names
         else [None] * table.num_rows
     )
-    timestamp_values = (
-        table["timestamp"].to_pylist() if "timestamp" in table.column_names else [None] * table.num_rows
-    )
-    timestamp_sys_values = (
-        table["timestamp_sys"].to_pylist() if "timestamp_sys" in table.column_names else [None] * table.num_rows
-    )
     out: dict[tuple[str, str], dict[int, Mapping[str, Any]]] = {}
-    for camera, clip, local, recording, parent, timestamp, timestamp_sys in zip(
+    for camera, clip, local, recording, parent in zip(
         camera_values,
         clip_values,
         local_values,
         recording_values,
         parent_values,
-        timestamp_values,
-        timestamp_sys_values,
     ):
         key = (str(camera), str(clip))
         out.setdefault(key, {})[int(local)] = {
             "recording_frame_id": int(recording),
             "parent_frame_index": int(parent) if parent is not None else int(recording) - 1,
-            "timestamp": None if timestamp is None else float(timestamp),
-            "timestamp_sys": None if timestamp_sys is None else float(timestamp_sys),
         }
     return out
 
@@ -594,26 +582,18 @@ def _lookup_frame_map_rows(
     row_count = int(frame_indices.shape[0])
     recording = np.full(row_count, -1, dtype=np.int64)
     parent = np.full(row_count, -1, dtype=np.int64)
-    timestamp = np.full(row_count, np.nan, dtype=np.float64)
-    timestamp_sys = np.full(row_count, np.nan, dtype=np.float64)
     for idx, frame_idx in enumerate(frame_indices.tolist()):
         row = pair_lookup.get(int(frame_idx))
         if row is None:
             continue
         recording[idx] = int(row["recording_frame_id"])
         parent[idx] = int(row["parent_frame_index"])
-        if row.get("timestamp") is not None:
-            timestamp[idx] = float(row["timestamp"])
-        if row.get("timestamp_sys") is not None:
-            timestamp_sys[idx] = float(row["timestamp_sys"])
     if np.any(recording < 0):
         missing = int(np.count_nonzero(recording < 0))
         raise ValueError(f"recording_frame_index is missing {missing} ROI frame mapping row(s)")
     return {
         "recording_frame_id": recording,
         "parent_frame_index": parent,
-        "timestamp": timestamp,
-        "timestamp_sys": timestamp_sys,
     }
 
 

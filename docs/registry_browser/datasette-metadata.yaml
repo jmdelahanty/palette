@@ -91,6 +91,40 @@ databases:
           WHERE r.set_id = :set_id
           ORDER BY r.created_utc DESC;
 
+      recordings_in_run:
+        title: Recordings in a run (one row per camera)
+        sql: |-
+          SELECT camera_id, recording_id, recording_name, started_utc,
+                 recording_intent, data_origin, dataset_id, zarr_path,
+                 analysis_dataset_count
+          FROM recording_run_members
+          WHERE session_uuid = :session_uuid
+          ORDER BY camera_id, recording_id;
+
+      compare_two_runs:
+        title: Compare two runs camera by camera
+        sql: |-
+          WITH cams AS (
+            SELECT camera_id FROM recording_run_members WHERE session_uuid = :run_a
+            UNION
+            SELECT camera_id FROM recording_run_members WHERE session_uuid = :run_b
+          )
+          SELECT c.camera_id,
+                 a.recording_id AS run_a_recording_id,
+                 a.started_utc AS run_a_started_utc,
+                 a.dataset_id AS run_a_dataset_id,
+                 a.zarr_path AS run_a_zarr_path,
+                 b.recording_id AS run_b_recording_id,
+                 b.started_utc AS run_b_started_utc,
+                 b.dataset_id AS run_b_dataset_id,
+                 b.zarr_path AS run_b_zarr_path
+          FROM cams c
+          LEFT JOIN recording_run_members a
+            ON a.session_uuid = :run_a AND a.camera_id IS c.camera_id
+          LEFT JOIN recording_run_members b
+            ON b.session_uuid = :run_b AND b.camera_id IS c.camera_id
+          ORDER BY c.camera_id, run_a_recording_id, run_b_recording_id;
+
     # ----- Curated tables/views: titles, sort, facets -----
     tables:
 
@@ -107,6 +141,17 @@ databases:
 
       recording_overview:
         title: Recording overview (joined recording + subject + genetics)
+
+      recording_runs:
+        title: Recording runs (one row per session_uuid; cameras recorded together)
+        sort_desc: first_started_utc
+        facets: [camera_count, recording_intents, data_origins]
+        label_column: session_uuid
+
+      recording_run_members:
+        title: Recording run members (one row per recording, with its current analysis dataset)
+        sort: session_uuid
+        facets: [camera_id, recording_intent, data_origin]
 
       recording_step_status_wide:
         title: Step status — wide (pipeline dashboard, one column per stage)

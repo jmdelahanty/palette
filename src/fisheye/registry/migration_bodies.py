@@ -9138,3 +9138,290 @@ class RegistryMigrationMixin:
             END;
             """
         )
+
+    def _migration_075_recording_run_views(self) -> None:
+        """Group recordings into acquisition runs by their exact ``session_uuid``.
+
+        One Orange run records several cameras together, and each camera
+        recording carries the run's session id as ``recordings.session_uuid``.
+        Recordings without a session id belong to no run. A recording's current
+        analysis dataset is its newest-seen ``zarr_use='analysis'`` dataset
+        whose status is not ``'missing'`` (the registry query default hides
+        missing Zarrs). This is descriptive grouping only; it never infers an
+        ``acquisition_batch_id``.
+        """
+
+        if not self._table_exists("recordings") or not self._table_exists("datasets"):
+            return
+        cur = self.conn.cursor()
+        cur.execute("DROP VIEW IF EXISTS recording_runs;")
+        cur.execute("DROP VIEW IF EXISTS recording_run_members;")
+        cur.execute(
+            """
+            CREATE VIEW recording_run_members AS
+            WITH active_analysis_datasets AS (
+                SELECT
+                    d.dataset_id,
+                    d.recording_id,
+                    d.zarr_path,
+                    COUNT(*) OVER (PARTITION BY d.recording_id) AS analysis_dataset_count,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY d.recording_id
+                        ORDER BY
+                            COALESCE(d.last_seen_utc, '') DESC,
+                            COALESCE(d.created_utc, '') DESC,
+                            d.dataset_id DESC
+                    ) AS _rn
+                FROM datasets d
+                WHERE d.recording_id IS NOT NULL
+                  AND d.zarr_use = 'analysis'
+                  AND (d.status IS NULL OR d.status != 'missing')
+            )
+            SELECT
+                r.session_uuid AS session_uuid,
+                NULLIF(TRIM(r.camera_id), '') AS camera_id,
+                r.recording_id AS recording_id,
+                r.recording_name AS recording_name,
+                r.started_utc AS started_utc,
+                r.recording_type AS recording_type,
+                r.recording_intent AS recording_intent,
+                r.data_origin AS data_origin,
+                aad.dataset_id AS dataset_id,
+                aad.zarr_path AS zarr_path,
+                COALESCE(aad.analysis_dataset_count, 0) AS analysis_dataset_count
+            FROM recordings r
+            LEFT JOIN active_analysis_datasets aad
+              ON aad.recording_id = r.recording_id
+             AND aad._rn = 1
+            WHERE r.session_uuid IS NOT NULL
+              AND TRIM(r.session_uuid) <> '';
+            """
+        )
+
+        def _sorted_distinct(column: str) -> str:
+            # GROUP_CONCAT over an ordered subquery keeps the list sorted on
+            # every SQLite release (aggregate ORDER BY needs SQLite >= 3.44).
+            # It reads ``recordings`` directly so the per-run lists do not
+            # re-evaluate the members view's dataset window functions.
+            return f"""(
+                    SELECT GROUP_CONCAT(v.value, ',')
+                    FROM (
+                        SELECT DISTINCT NULLIF(TRIM(x.{column}), '') AS value
+                        FROM recordings x
+                        WHERE x.session_uuid = m.session_uuid
+                          AND NULLIF(TRIM(x.{column}), '') IS NOT NULL
+                        ORDER BY value
+                    ) v
+                )"""
+
+        cur.execute(
+            f"""
+            CREATE VIEW recording_runs AS
+            SELECT
+                m.session_uuid AS session_uuid,
+                COUNT(DISTINCT m.camera_id) AS camera_count,
+                {_sorted_distinct("camera_id")} AS camera_ids,
+                COUNT(*) AS recording_count,
+                MIN(NULLIF(TRIM(m.started_utc), '')) AS first_started_utc,
+                MAX(NULLIF(TRIM(m.started_utc), '')) AS last_started_utc,
+                {_sorted_distinct("recording_intent")} AS recording_intents,
+                {_sorted_distinct("recording_type")} AS recording_types,
+                {_sorted_distinct("data_origin")} AS data_origins,
+                SUM(m.analysis_dataset_count) AS analysis_dataset_count
+            FROM recording_run_members m
+            GROUP BY m.session_uuid;
+            """
+        )
+
+    def _migration_076_recording_realtime_products(self) -> None:
+        """Orange realtime products recorded at import, and the models that ran.
+
+        One row per dataset and product (``detections``, ``pose``), mirroring
+        the analysis Zarr's ``analysis/acquisition_realtime_products`` record
+        exactly. A recording whose session predates Orange's declaration has
+        one row with product ``undeclared``. The view joins each product's model
+        to ``training_runs`` by content (weights sha256 = model_sha256) and by
+        name (engine manifest run_id), and to ``model_deployment_artifacts`` by
+        engine sha256. Engine manifest status is history, never a gate.
+        """
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_realtime_products (
+                dataset_id TEXT NOT NULL,
+                product TEXT NOT NULL,
+                recording_id TEXT,
+                camera_id TEXT,
+                declared INTEGER NOT NULL,
+                status TEXT,
+                line_schema_id TEXT,
+                line_schema_version INTEGER,
+                row_count INTEGER,
+                header_rows INTEGER,
+                result_rows INTEGER,
+                no_result_rows INTEGER,
+                failed_rows INTEGER,
+                other_rows INTEGER,
+                first_recording_frame_id INTEGER,
+                last_recording_frame_id INTEGER,
+                validation TEXT,
+                line_validator TEXT,
+                events_path TEXT,
+                events_sha256 TEXT,
+                model_id TEXT,
+                model_schema TEXT,
+                engine_sha256 TEXT,
+                engine_bytes INTEGER,
+                weights_sha256 TEXT,
+                onnx_sha256 TEXT,
+                engine_manifest_sha256 TEXT,
+                engine_manifest_run_id TEXT,
+                engine_manifest_status TEXT,
+                engine_precision TEXT,
+                engine_build_id TEXT,
+                record_sha256 TEXT NOT NULL,
+                updated_utc TEXT,
+                PRIMARY KEY (dataset_id, product)
+            );
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_realtime_products_engine "
+            "ON recording_realtime_products(engine_sha256);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_realtime_products_weights "
+            "ON recording_realtime_products(weights_sha256);"
+        )
+        cur.execute("DROP VIEW IF EXISTS recording_realtime_models;")
+        cur.execute(
+            """
+            CREATE VIEW recording_realtime_models AS
+            SELECT
+                p.dataset_id,
+                p.recording_id,
+                p.camera_id,
+                p.product,
+                p.model_id,
+                p.engine_sha256,
+                p.weights_sha256,
+                p.onnx_sha256,
+                p.engine_precision,
+                p.engine_manifest_status,
+                by_weights.run_id AS training_run_by_weights,
+                by_name.run_id AS training_run_by_name,
+                CASE
+                    WHEN by_weights.run_id IS NULL OR by_name.run_id IS NULL THEN NULL
+                    WHEN by_weights.run_id = by_name.run_id THEN 1
+                    ELSE 0
+                END AS training_joins_agree,
+                artifact.artifact_id AS deployment_artifact_id,
+                artifact.status AS deployment_artifact_status
+            FROM recording_realtime_products p
+            LEFT JOIN training_runs by_weights
+              ON p.weights_sha256 IS NOT NULL AND by_weights.model_sha256 = p.weights_sha256
+            LEFT JOIN training_runs by_name
+              ON p.engine_manifest_run_id IS NOT NULL AND by_name.run_id = p.engine_manifest_run_id
+            LEFT JOIN model_deployment_artifacts artifact
+              ON p.engine_sha256 IS NOT NULL AND artifact.engine_sha256 = p.engine_sha256
+            WHERE p.declared = 1 AND p.status = 'present';
+            """
+        )
+
+    def _migration_077_crop_collection_consumer_readiness(self) -> None:
+        """Let clip collections pass crop readiness on their ledger proof.
+
+        A rolling clip collection has no single crop video or metadata file, so
+        its video/metadata path, existence and row-count columns are truthfully
+        NULL. The collection ledger already refused any clip whose crop video or
+        metadata was missing, or whose metadata rows differ from its frame
+        count, and it binds every member by digest. Single-file streams keep
+        their existing predicate. Only this view changes; no row is rewritten.
+        """
+
+        cur = self.conn.cursor()
+        cur.execute("DROP VIEW IF EXISTS recording_crop_video_available_current;")
+        cur.execute(
+            """
+            CREATE VIEW recording_crop_video_available_current AS
+            SELECT
+                recording_id,
+                dataset_id,
+                zarr_path,
+                stream_key,
+                stream_id,
+                camera_id,
+                CASE
+                    WHEN output_kind = 'crop'
+                     AND availability_status = 'ok'
+                     AND (COALESCE(video_exists, 0) = 1 OR collection_members_declared = 1)
+                    THEN 1
+                    ELSE 0
+                END AS crop_stream_available,
+                CASE
+                    WHEN output_kind = 'crop'
+                     AND availability_status <> 'missing_required_file'
+                     AND canonical_ledger_status = 'complete'
+                     AND canonical_ledger_record_sha256 IS NOT NULL
+                     AND canonical_ledger_row_count = frame_count
+                     AND (
+                        (
+                            COALESCE(video_exists, 0) = 1
+                            AND COALESCE(metadata_exists, 0) = 1
+                            AND canonical_ledger_row_count = metadata_row_count
+                        )
+                        OR collection_members_declared = 1
+                     )
+                    THEN 1
+                    ELSE 0
+                END AS crop_stream_consumer_ready,
+                availability_status,
+                inventory_status,
+                video_path,
+                metadata_path,
+                width,
+                height,
+                frame_count,
+                frame_rate,
+                codec,
+                encoded_format,
+                pixel_source_format,
+                color_range,
+                color_space,
+                color_transfer,
+                color_primaries,
+                video_pixel_coordinate_space,
+                source_geometry_coordinate_space,
+                blank_frame_policy,
+                selection_policy,
+                metadata_row_count,
+                frames_encoded,
+                frames_dropped,
+                canonical_ledger_status,
+                canonical_ledger_run,
+                canonical_ledger_path,
+                canonical_ledger_record_sha256,
+                canonical_ledger_source_metadata_sha256,
+                canonical_ledger_source_video_fingerprint,
+                canonical_ledger_row_count,
+                canonical_ledger_detected_row_count,
+                canonical_ledger_blank_row_count,
+                canonical_ledger_imported_at_utc,
+                updated_utc
+            FROM (
+                SELECT
+                    streams.*,
+                    CASE
+                        WHEN NOT json_valid(contract_json) OR NOT json_valid(files_json) THEN 0
+                        WHEN json_extract(contract_json, '$.source_profile') = 'rolling_clip_collection_v1'
+                         AND COALESCE(json_extract(contract_json, '$.member_count'), 0) >= 1
+                         AND json_extract(files_json, '$.recording_clip_index.exists') = 1
+                        THEN 1
+                        ELSE 0
+                    END AS collection_members_declared
+                FROM recording_acquisition_video_streams_current AS streams
+                WHERE output_kind = 'crop'
+            );
+            """
+        )

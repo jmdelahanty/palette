@@ -1,0 +1,2 @@
+frame_id,timestamp,timestamp_sys,recording_frame_id,crop_video_frame_index,session_crop_video_frame_index,has_detection,blank_frame,crop_x,crop_y,crop_w,crop_h,detection_x,detection_y,detection_w,detection_h
+3,1700000001000000000,1700000001000000010,3,0,2,1,0,8,8,16,16,12,12,4,4

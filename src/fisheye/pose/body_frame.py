@@ -8,6 +8,7 @@ from typing import Mapping, Optional
 import numpy as np
 
 from fisheye.shared.detect_reason_codec import encode_reason_bytes
+from fisheye.shared.heading_convention import heading_degrees, left_axis
 
 BODY_FRAME_SCHEMA_ID = "fish_anatomical_body_frame"
 BODY_FRAME_SCHEMA_VERSION = 1
@@ -93,8 +94,9 @@ def compute_keypoint_body_frame(
     lateral_unit, lateral_ok = _unit_or_nan(lateral_raw)
 
     candidate_left = np.empty_like(forward_unit)
-    candidate_left[:, 0] = forward_unit[:, 1]
-    candidate_left[:, 1] = -forward_unit[:, 0]
+    candidate_left[:, 0], candidate_left[:, 1] = left_axis(
+        forward_unit[:, 0], forward_unit[:, 1], dtype=forward_unit.dtype
+    )
 
     orientable = anchor_finite & forward_ok & lateral_ok
     if np.any(orientable):
@@ -103,8 +105,8 @@ def compute_keypoint_body_frame(
         left_axis_xy[orientable] = candidate_left[orientable] * signs[:, None]
         forward_axis_xy[orientable] = forward_unit[orientable]
         origin_xy[orientable] = origin[orientable].astype(np.float32, copy=False)
-        heading_deg[orientable] = np.rad2deg(
-            np.arctan2(-forward_unit[orientable, 1], forward_unit[orientable, 0])
+        heading_deg[orientable] = heading_degrees(
+            forward_unit[orientable, 0], forward_unit[orientable, 1], dtype=forward_unit.dtype
         ).astype(np.float32, copy=False)
 
     valid = success & orientable

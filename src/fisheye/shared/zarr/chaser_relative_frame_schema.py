@@ -27,6 +27,7 @@ from fisheye.shared.zarr.array_contracts import (
     ArrayContractBinding,
     ArrayContractCatalog,
 )
+from fisheye.shared.heading_convention import heading_degrees
 
 
 CHASER_RELATIVE_FRAME_SCHEMA_ID = "palette.analysis.chaser_relative_frame"
@@ -1638,8 +1639,8 @@ def _validate_body_invariants(
     heading_valid = values.get("body_heading_valid")
     heading = values.get("body_heading_deg")
     if heading_valid is not None and heading is not None and forward is not None:
-        expected_heading = np.rad2deg(
-            np.arctan2(-forward[:, 1], forward[:, 0])
+        expected_heading = heading_degrees(
+            forward[:, 0], forward[:, 1], dtype=forward.dtype
         ).astype(np.float32)
         if np.any(
             heading_valid

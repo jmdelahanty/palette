@@ -1158,12 +1158,14 @@ def test_bound_rows_reject_legacy_identity_overwrite(tmp_path: Path) -> None:
     try:
         result = _project(registry, zarr_path)
 
-        with pytest.raises(sqlite3.IntegrityError):
+        # B7: the generic upserts refuse before writing, with a clear error.
+        refused = "bound to a verified source import"
+        with pytest.raises(RecordingIdentityAuthorityError, match=refused):
             registry.upsert_recording(
                 recording_id="recording-a", session_uuid="session-b"
             )
         registry.conn.rollback()
-        with pytest.raises(sqlite3.IntegrityError):
+        with pytest.raises(RecordingIdentityAuthorityError, match=refused):
             registry.upsert_dataset(
                 result.dataset_id,
                 session_uuid="session-b",
@@ -1172,21 +1174,36 @@ def test_bound_rows_reject_legacy_identity_overwrite(tmp_path: Path) -> None:
                 artifact_kind="source_recording",
             )
         registry.conn.rollback()
-        with pytest.raises(
-            sqlite3.IntegrityError,
-            match="authority-bound recording context is immutable",
-        ):
+        with pytest.raises(RecordingIdentityAuthorityError, match="camera_id"):
             registry.upsert_recording(
                 recording_id="recording-a", camera_id="2010094"
             )
         registry.conn.rollback()
+        with pytest.raises(RecordingIdentityAuthorityError, match="recording_path"):
+            registry.upsert_recording(
+                recording_id="recording-a",
+                recording_path=str(tmp_path / "recordings" / "other"),
+            )
+        registry.conn.rollback()
+
+        # The schema triggers remain the backstop for writes that bypass the
+        # Python boundary entirely.
         with pytest.raises(
             sqlite3.IntegrityError,
             match="authority-bound recording context is immutable",
         ):
-            registry.upsert_recording(
-                recording_id="recording-a",
-                recording_path=str(tmp_path / "recordings" / "other"),
+            registry.conn.execute(
+                "UPDATE recordings SET camera_id = '2010094' "
+                "WHERE recording_id = 'recording-a';"
+            )
+        registry.conn.rollback()
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="authority-bound dataset identity and locator are immutable",
+        ):
+            registry.conn.execute(
+                "UPDATE datasets SET session_uuid = 'session-b' WHERE dataset_id = ?;",
+                (result.dataset_id,),
             )
         registry.conn.rollback()
     finally:

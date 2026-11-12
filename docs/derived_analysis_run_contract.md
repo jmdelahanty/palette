@@ -3,7 +3,7 @@
 version: 1
 status: active
 implementation: implemented
-last_verified: 2026-07-17
+last_verified: 2026-10-27
 -->
 
 Purpose: define the shared storage and provenance contract for deterministic
@@ -234,8 +234,9 @@ Existing analysis outputs already follow this direction:
   `analysis.track_kinematics_runs` version 1 and row axis `track_samples`.
 - `analysis/bout_kinematics_runs/<run>` stores per-bout heading and movement
   metrics derived from an exact swim-bout segmentation candidate without
-  mutating that segmentation artifact. Schema v7 defaults to compact table
-  paths resolved by `fisheye.analysis.bout_kinematics_io`; its logical
+  mutating that segmentation artifact. Schema v7 defaults to the
+  `compact_tabular_v2` layout whose exact arrays are declared by
+  `fisheye.analysis.bout_kinematics_schema`; its logical
   movement table contains physical-active movement summaries measured
   from a declared physical speed source, while preserving source
   detector-window durations. It may also include an optional

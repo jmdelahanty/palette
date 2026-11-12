@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, urlparse
 
-from flask import Flask, Response, request
+from flask import Flask, Response, redirect, request
 
 from .admin_dashboard import _known_labeler_status, _store_consistency_report
 from .web_app import claimed_route
@@ -25,7 +25,7 @@ from .web_identity import (
     _identity_probe_payload,
     _mark_identity_probe_unknown_labeling_user,
 )
-from .web_personal_renderers import _dashboard_html, _datasets_html, _queue_html
+from .web_personal_renderers import _dashboard_html, _queue_html
 from .web_policy import (
     IDENTITY_PROBE_PATH,
     LABELER_QUEUE_PAGE_PATH,
@@ -35,6 +35,15 @@ from .web_policy import (
 from .web_responses import _format_error
 
 QUEUE_PAGE_PATH = LABELER_QUEUE_PAGE_PATH
+# Entry paths of the retired dataset-queue page. They redirect to /queue with
+# the query kept, so links already sent out still land on the labeler queue.
+RETIRED_DATASET_QUEUE_PAGE_PATHS = (
+    "/",
+    "/me",
+    LABELING_HOME_PATH,
+    DATASET_QUEUE_PATH,
+    PERSONAL_DATASET_QUEUE_PATH,
+)
 
 PersonalPageResponder = Callable[..., tuple[bytes, HTTPStatus, str]]
 
@@ -149,8 +158,6 @@ def _personal_page_response_payload(
         return _dashboard_html(), HTTPStatus.OK, "text/html; charset=utf-8"
     if path == QUEUE_PAGE_PATH:
         return _queue_html(), HTTPStatus.OK, "text/html; charset=utf-8"
-    if path in {"/", "/me", LABELING_HOME_PATH, DATASET_QUEUE_PATH, PERSONAL_DATASET_QUEUE_PATH}:
-        return _datasets_html(), HTTPStatus.OK, "text/html; charset=utf-8"
 
     payload = _format_error("not_found", status=HTTPStatus.NOT_FOUND)
     return (
@@ -180,24 +187,22 @@ def _respond(
     return Response(body, status=int(status), content_type=content_type)
 
 
+def _redirect_to_queue() -> Response:
+    query = request.query_string.decode("utf-8", errors="replace")
+    return redirect(f"{QUEUE_PAGE_PATH}?{query}" if query else QUEUE_PAGE_PATH, code=HTTPStatus.FOUND)
+
+
 def register_personal_page_routes(
     app: Flask,
     state: Any,
     response_builder: PersonalPageResponder,
 ) -> None:
-    """Register read-only personal dashboard and dataset queue pages on ``app``."""
+    """Register the labeler queue, work dashboard, and identity pages on ``app``."""
 
-    @claimed_route(app, "/", methods=["GET"])
-    def labeler_landing_home() -> Response:
-        return _respond(state, response_builder, path="/")
-
-    @claimed_route(app, "/me", methods=["GET"])
-    def labeler_landing_me() -> Response:
-        return _respond(state, response_builder, path="/me")
-
-    @claimed_route(app, "/labeling", methods=["GET"])
-    def labeler_landing_labeling() -> Response:
-        return _respond(state, response_builder, path="/labeling")
+    for retired_path in RETIRED_DATASET_QUEUE_PAGE_PATHS:
+        claimed_route(app, retired_path, methods=["GET"], endpoint=f"retired_dataset_queue_{retired_path}")(
+            _redirect_to_queue
+        )
 
     @claimed_route(app, "/identity", methods=["GET"])
     def labeler_identity_probe() -> Response:
@@ -215,13 +220,11 @@ def register_personal_page_routes(
     def labeler_queue_page() -> Response:
         return _respond(state, response_builder, path=QUEUE_PAGE_PATH)
 
-    @claimed_route(app, "/datasets", methods=["GET"])
-    def personal_dataset_queue() -> Response:
-        return _respond(state, response_builder, path="/datasets")
-
-    @claimed_route(app, "/my-datasets", methods=["GET"])
-    def personal_dataset_queue_alias() -> Response:
-        return _respond(state, response_builder, path="/my-datasets")
 
 
-__all__ = ["QUEUE_PAGE_PATH", "_personal_page_response_payload", "register_personal_page_routes"]
+__all__ = [
+    "QUEUE_PAGE_PATH",
+    "RETIRED_DATASET_QUEUE_PAGE_PATHS",
+    "_personal_page_response_payload",
+    "register_personal_page_routes",
+]

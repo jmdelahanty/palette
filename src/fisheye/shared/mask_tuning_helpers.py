@@ -9,6 +9,7 @@ import numpy as np
 import zarr
 from skimage import filters, measure, morphology
 from skimage.measure import EllipseModel
+from fisheye.shared.heading_convention import heading_degrees
 
 
 SLIDER_MAX_PADDING = 40
@@ -74,7 +75,7 @@ def compute_heading_deg(
     dy = float(head_vec[1])
     if dx == 0.0 and dy == 0.0:
         return None
-    return float(np.degrees(np.arctan2(-dy, dx)))
+    return float(heading_degrees(dx, dy))
 
 
 def rotate_image_and_points(

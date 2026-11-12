@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from http import HTTPStatus
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, urlparse
@@ -32,6 +33,7 @@ from .admin_dashboard import (
     _zarr_backup_policy,
 )
 from .web_app import claimed_route
+from .peer_review import open_flag_counts
 from .web_labeler_queue import labeler_queue_payload, queue_task_ids
 from .web_auth import (
     DASHBOARD_PATH,
@@ -497,8 +499,13 @@ def _personal_api_response_payload(
         )
 
     if path == "/api/me/queue":
-        row_progress = state.store.task_row_progress(queue_task_ids(work))
-        return labeler_queue_payload(work, user=str(user), row_progress=row_progress), HTTPStatus.OK
+        task_ids = queue_task_ids(work)
+        row_progress = state.store.task_row_progress(task_ids)
+        open_flags = open_flag_counts(Path(state.store.path), task_ids)
+        return (
+            labeler_queue_payload(work, user=str(user), row_progress=row_progress, open_flags=open_flags),
+            HTTPStatus.OK,
+        )
 
     if path == "/api/me/datasets":
         return (

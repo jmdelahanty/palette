@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orange.external_recorder.frame_identity_proof.v2",
+  "title": "Orange external recorder frame identity proof (version 2)",
+  "description": "Written by the external recorder (tools/external_recorder_ipc_probe.cpp, frame_identity_proof_json) into every Cam<serial>_<stream>_summary.json as 'frame_identity_proof', one per recording session and camera stream (full-frame or crop). It certifies that every encoded video frame of the stream is bound to the recording_frame_id it was submitted with: the NVENC output timestamp of each packet is matched back to the input identity registry, and the metadata row for a frame is written only after that match. verified (and status = passed) is true iff the identity coordinator was enabled, the stream did not fail, submitted_frame_identities == returned_identity_matches == encoded_video_frames == packets_written == metadata_rows, identity_mismatches == 0, outstanding_submitted_identities == 0, and the packet write counters balance (accepted == attempts == written, rejected == failures == 0). continuity_policy encoded_subset with recording_frame_id_gaps_allowed true states the proof's scope: it certifies identity, not continuity, of the encoded frames; continuity is the stream's own contract (the full-frame ingest_authoritative stream must be dense, which Orange's gates enforce with source_frames_dropped == 0 and Palette checks on the metadata rows; a crop stream may be a policy subset). Authoritative checks: scripts/verify_external_recorder_session.py verify_frame_identity_proof.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id", "schema_version", "status", "canonical_field", "scope", "assignment_event",
+    "row_granularity", "legacy_aliases", "continuity_policy", "recording_frame_id_gaps_allowed",
+    "source_frames_skipped_by_policy", "source_frames_dropped", "video_binding"
+  ],
+  "properties": {
+    "schema_id": {"const": "orange.external_recorder.frame_identity_proof"},
+    "schema_version": {"const": 2},
+    "status": {"enum": ["passed", "failed"], "description": "passed iff video_binding.verified"},
+    "canonical_field": {"const": "recording_frame_id"},
+    "scope": {"const": "recording_session_and_camera_stream"},
+    "assignment_event": {"const": "orange_acquisition_recording_frame_sequence", "description": "recording_frame_id is assigned on the acquisition thread, 1-based per recording, before any consumer sees the frame"},
+    "row_granularity": {"const": "one_encoded_video_frame"},
+    "legacy_aliases": {
+      "type": "object", "additionalProperties": false, "required": ["frame_id"],
+      "properties": {"frame_id": {"const": "recording_frame_id"}}
+    },
+    "continuity_policy": {"const": "encoded_subset"},
+    "recording_frame_id_gaps_allowed": {"const": true},
+    "source_frames_skipped_by_policy": {"type": "integer", "minimum": 0, "description": "frames the recorder skipped by policy (never counted as a loss); 0 for a production full-frame stream"},
+    "source_frames_dropped": {"type": "integer", "minimum": 0, "description": "frames the recorder dropped (a loss); Orange's gates require 0 for every stream"},
+    "video_binding": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "method", "metadata_write_event", "submitted_frame_identities", "returned_identity_matches",
+        "identity_mismatches", "outstanding_submitted_identities", "encoded_video_frames",
+        "packet_submissions_accepted", "packet_submissions_rejected", "packet_write_attempts",
+        "packets_written", "packet_write_failures", "first_packet_write_error_code", "metadata_rows",
+        "verification_rule_id", "verified"
+      ],
+      "properties": {
+        "method": {"const": "nvenc_input_timestamp_to_output_timestamp_registry"},
+        "metadata_write_event": {"const": "completed_gop_after_returned_identity_match"},
+        "submitted_frame_identities": {"type": "integer", "minimum": 0},
+        "returned_identity_matches": {"type": "integer", "minimum": 0},
+        "identity_mismatches": {"type": "integer", "minimum": 0},
+        "outstanding_submitted_identities": {"type": "integer", "minimum": 0},
+        "encoded_video_frames": {"type": "integer", "minimum": 0},
+        "packet_submissions_accepted": {"type": "integer", "minimum": 0},
+        "packet_submissions_rejected": {"type": "integer", "minimum": 0},
+        "packet_write_attempts": {"type": "integer", "minimum": 0},
+        "packets_written": {"type": "integer", "minimum": 0},
+        "packet_write_failures": {"type": "integer", "minimum": 0},
+        "first_packet_write_error_code": {"type": ["integer", "null"]},
+        "metadata_rows": {"type": "integer", "minimum": 0, "description": "rows written to the stream's metadata CSV; for a rolling session the sum of the clips' frame counts"},
+        "verification_rule_id": {"const": "orange.external_recorder.frame_identity.v2"},
+        "verified": {"type": "boolean"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "passed"}}},
+      "then": {
+        "properties": {
+          "video_binding": {
+            "properties": {
+              "verified": {"const": true},
+              "identity_mismatches": {"const": 0},
+              "outstanding_submitted_identities": {"const": 0},
+              "packet_submissions_rejected": {"const": 0},
+              "packet_write_failures": {"const": 0},
+              "first_packet_write_error_code": {"type": "null"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "failed"}}},
+      "then": {"properties": {"video_binding": {"properties": {"verified": {"const": false}}}}}
+    }
+  ]
+}

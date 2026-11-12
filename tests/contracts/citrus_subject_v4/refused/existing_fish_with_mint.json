@@ -1,0 +1,76 @@
+{
+  "schema_version": 4,
+  "api_schema_version": 2,
+  "queried_at_utc": "2026-10-15T14:02:11Z",
+  "dish_id": "19220_1",
+  "subject_lookup_status": "collected",
+  "subject_lookup_reason": null,
+  "dish": {
+    "dish_id": "19220_1",
+    "dish_uuid": "28c29cc6-a1ef-4382-9dc5-414fbb445d92",
+    "dish_revision": 1,
+    "dish_updated_at": "2026-10-02 16:28:20",
+    "cross_id": "19220",
+    "genotype": "synthetic",
+    "dof": "20260928",
+    "dpf": 8,
+    "fish_count": 32,
+    "species": "Danio rerio",
+    "sex": "unknown"
+  },
+  "cross": {
+    "cross_id": "19220",
+    "line_strain": "synthetic",
+    "parents": [
+      {
+        "identifier": "synthetic-parent",
+        "sex": "F"
+      }
+    ]
+  },
+  "fish_reference": {
+    "mzb_fish_id": "6b1d0f3e-2c4a-4e8b-9a71-0d5e8c2f4b19",
+    "mzb_fish_revision": 3,
+    "mzb_fish_updated_at": "2026-10-09 18:12:05",
+    "mzb_fish_subject_label": "Z1",
+    "mzb_fish_unit_id": "well-A1",
+    "mzb_dish_listed_fish_count_at_start": null,
+    "mzb_registration_mode": "existing",
+    "mzb_registration_status": "registered",
+    "mzb_registration_reason": null,
+    "mint": {
+      "method": "os_csprng_uuid4",
+      "minted_at_utc": "2026-10-15T13:58:40Z"
+    },
+    "registration_request": null
+  },
+  "errors": [],
+  "zebrobot_service": {
+    "service_commit": "509a3eb88d6ff44fe07e7ea20d212be5eafe46b7",
+    "service_commit_dirty": false,
+    "consumer_schema_sha256": "f5280e430d4b5f10c3643cb89a6187eacc45fdac7af55b2e81f5e315b7b754dc"
+  },
+  "subject": {
+    "subject_id": "6b1d0f3e-2c4a-4e8b-9a71-0d5e8c2f4b19",
+    "subject_type": "individual",
+    "subject_count": 1
+  },
+  "members": null,
+  "usage_link_request": {
+    "method": "POST",
+    "path": "/usage-links",
+    "body": {
+      "recording_ref": "obsctx_3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f",
+      "ref_kind": "observation_context",
+      "recording_id": "2026_10_15_14_00_00",
+      "dish_id": "19220_1",
+      "fish_id": "6b1d0f3e-2c4a-4e8b-9a71-0d5e8c2f4b19",
+      "fish_revision": 3,
+      "unit_id": "well-A1",
+      "subject_count": 1,
+      "rig_id": "omnifin0",
+      "arena_id": "arena_1",
+      "started_at": "2026-10-15T14:02:11Z"
+    }
+  }
+}

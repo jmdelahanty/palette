@@ -4,7 +4,7 @@
 version: 1
 status: active
 implementation: implemented
-last_verified: 2026-07-29
+last_verified: 2026-10-28
 -->
 
 Purpose: define explicit, machine-readable metadata for how keypoint runs

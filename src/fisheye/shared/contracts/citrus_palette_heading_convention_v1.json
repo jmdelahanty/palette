@@ -1,0 +1,100 @@
+{
+  "schema_id": "citrus_palette.heading_convention",
+  "schema_version": 1,
+  "title": "Fish heading and left/right convention shared by Palette and Citrus",
+  "authority": {
+    "repository": "jmdelahanty/palette",
+    "commit": "b9a49c43",
+    "sources": [
+      "src/fisheye/shared/pose_schema.py:26 (canonical labels)",
+      "src/fisheye/shared/pose_heading.py:188-191 (angle)",
+      "src/fisheye/shared/zarr/body_frame_producer.py:318-335 (left axis, angle)",
+      "src/fisheye/pose/body_frame.py:18-22 (reason codes)",
+      "docs/keypoint_heading_computation_contract.md:114-131",
+      "docs/body_frame_contract.md:119-131"
+    ]
+  },
+  "consumers": [
+    {
+      "repository": "JohnsonLabJanelia/citrus",
+      "artifact": "citrus.pose_observation v2 contract_json.heading_definition_ref and the derived heading in /observations/pose/objects"
+    },
+    {
+      "repository": "jmdelahanty/palette",
+      "artifact": "body frame v1 and intake checks on citrus.pose_observation v2"
+    }
+  ],
+  "frame": {
+    "space": "source_camera_image_px",
+    "origin": "top_left",
+    "x": "right",
+    "y": "down",
+    "crop_rule": "a per-camera crop is a pure translation of the full frame, so the angle is identical in both",
+    "camera_view_assumed": "dorsal_unmirrored",
+    "camera_view_note": "The handedness id below is meaningful only for a non-mirrored top-down view. A producer declares the view it assumed per session (citrus.pose_observation v2 contract_json.camera_view_assumed). No shared contract measures mirror/AOI or projector orientation yet (Palette coordinate-spaces proposal pending)."
+  },
+  "keypoints": {
+    "canonical_labels": [
+      "swim_bladder",
+      "eye_left",
+      "eye_right"
+    ],
+    "forward": "midpoint(eye_left, eye_right) - swim_bladder",
+    "origin": "midpoint(eye_left, eye_right)",
+    "recipe_carrier": "pose_schema.metadata.heading_computation in the model sidecar (ops keypoint and midpoint); Citrus resolves the recipe by skeleton node name, never by hard-coded anatomy",
+    "never_contribute": [
+      "snout",
+      "tail",
+      "fins"
+    ],
+    "fallback": "none: any of the three missing or non-finite makes heading unknown; never velocity, interpolation, neighbouring frames or another keypoint",
+    "confidence": "gates usability only; it never changes the value. Palette offline refinement requires all three confidences >= 0.3 plus triangle geometry; Citrus applies its own minimum_keypoint_confidence as an admission gate. Neither is part of this definition."
+  },
+  "angle": {
+    "id": "atan2_negative_y_x_degrees",
+    "formula": "heading_deg = degrees(atan2(-forward_y, forward_x))",
+    "zero": "image +x (right)",
+    "positive_rotation": "counter-clockwise as seen on the image (+90 = image up)",
+    "units": "degrees",
+    "range": "[-180, 180]",
+    "range_rule": "-180 and +180 denote the same heading. An exactly horizontal forward (forward_y == 0, common with quantised integer keypoints) gives atan2(-0.0, negative) = -180 in IEEE arithmetic; neither producer normalises it. Comparisons use wrap_delta (|wrap_delta(a - b)| <= tolerance), never raw equality.",
+    "delta_wrap": "((d + 180) mod 360) - 180",
+    "degenerate": {
+      "palette_epsilon_px": 1e-09,
+      "citrus_epsilon_px": 1e-06,
+      "rule": "|forward| <= epsilon is degenerate_forward_axis; each producer declares its epsilon"
+    },
+    "valid_row_invariant": "wrap_delta(heading_angle_degrees - degrees(atan2(-heading_direction_y, heading_direction_x))) == 0 (within tolerance), with direction the unit forward vector in y-down coordinates"
+  },
+  "left_right": {
+    "id": "forward_cross_left_negative_source_camera_xy",
+    "left_axis": "(forward_y, -forward_x)",
+    "sign": "anatomical left is positive",
+    "point_on_left": "dot(p - origin, left_axis) > 0, equivalently cross(forward, p - origin) = f_x*v_y - f_y*v_x < 0 in y-down coordinates",
+    "determinant_in_y_down": -1,
+    "egocentric_bearing": "atan2(dot(v, left_axis), dot(v, forward)): 0 = ahead, +90 = left",
+    "eye_check": "a row is valid only if dot(eye_left - eye_right, left_axis) > 0; the labels are never swapped to make it pass (Palette corrects eye flips earlier, offline)"
+  },
+  "unknown": {
+    "encoding": "NaN in every derived float plus a validity flag or status",
+    "reason_codes": [
+      "detection_failure",
+      "missing_source_anchor",
+      "degenerate_forward_axis",
+      "left_right_unresolved"
+    ],
+    "producer_specific_reasons": "a producer may add its own prefixed reasons (Citrus: citrus_no_pose, citrus_unresolved_metadata, citrus_identity_mismatch, citrus_low_confidence, citrus_policy_disabled) for gates this definition does not cover"
+  },
+  "smoothing": {
+    "rule": "no minimum-displacement rule and no realtime smoothing in the definition. Palette smooths offline (centred circular box filter over cos/sin, window round(fps*0.05)). A realtime producer logs the raw per-frame heading it used; any smoothed or held value is a separate field, so Palette can recompute and compare exactly."
+  },
+  "projection": {
+    "rule": "The heading is defined in camera pixels only. A consumer that needs it in another plane (projector canvas, arena) maps two points, origin and origin + forward, through the fitted camera-to-plane homography and takes their difference; it never reuses the camera angle, which is correct only when the homography has no rotation or reflection (omnifin0 arena 1's active homography carries a y reflection: camera 90 deg maps to canvas 270 deg)."
+  },
+  "not_this": [
+    "Palette Megabouts tail_posture head_yaw: head to tail base, no y flip, radians",
+    "Palette chaser-centred bearing in chaser_escape_freeze_summary: positive clockwise",
+    "Palette visualization fallback to motion heading",
+    "Citrus pose_observation v1 heading_angle_degrees: atan2(dy, dx) clockwise positive in [0, 360); convert with angle_v2 = ((-angle_v1 + 180) mod 360) - 180 (lands in [-180, 180); compare under wrap_delta)"
+  ]
+}

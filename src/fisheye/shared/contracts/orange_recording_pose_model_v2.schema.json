@@ -1,0 +1,326 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orange.recording_pose_model.v2",
+  "title": "Orange recording pose model declaration (version 2)",
+  "description": "recording_snapshot_start.json models.<serial>.pose (also in recording_snapshot.json): the second-stage pose network per camera, sealed at record start. runtime.pose_crop_size_px is the side of the square inference window cut around the detection and fed to the pose network (ORANGE_POSE_CROP_SIZE_PX; 0 = the video crop size); it is never encoded as video and is unrelated to the crop video size (crop_outputs.<serial>.runtime.crop_size_px). runtime.mode real = the TensorRT engine ran (backend tensorrt); noop = the stand-in. The skeleton object embeds the Palette sidecar and is left open. Version 2 (2026-10-09) adds the model identity chain: runtime.engine_sha256 is the SHA-256 Orange computed over the engine bytes that ran, engine_bytes its size, weights_sha256 / onnx_sha256 come from the engine's Palette build manifest (runtime.engine_manifest), and onnx_sha256_matches_skeleton_sidecar says whether the skeleton sidecar's source_onnx_sha256 names the same export (null when either is absent). Written by build_gui_pose_model_snapshot (src/gui/recording_snapshots.cpp); closed on the other fields.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "enabled",
+    "runtime",
+    "source"
+  ],
+  "properties": {
+    "enabled": {
+      "type": "boolean"
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "worker",
+        "backend",
+        "mode",
+        "pose_crop_size_px",
+        "engine_path",
+        "model_id",
+        "skeleton_id",
+        "skeleton_path",
+        "skeleton",
+        "engine_sha256",
+        "engine_bytes",
+        "weights_sha256",
+        "onnx_sha256",
+        "onnx_sha256_matches_skeleton_sidecar",
+        "engine_manifest",
+        "ipc_model_id_hash",
+        "gpu_id",
+        "queue_size",
+        "files"
+      ],
+      "properties": {
+        "worker": {
+          "const": "PoseWorker"
+        },
+        "backend": {
+          "enum": [
+            "tensorrt",
+            "noop",
+            "none"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "real",
+            "noop",
+            "disabled"
+          ]
+        },
+        "pose_crop_size_px": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "engine_path": {
+          "type": "string"
+        },
+        "model_id": {
+          "type": "string"
+        },
+        "skeleton_id": {
+          "type": "string"
+        },
+        "skeleton_path": {
+          "type": "string"
+        },
+        "skeleton": {
+          "type": "object"
+        },
+        "engine_sha256": {
+          "$ref": "#/$defs/sha256_or_empty",
+          "description": "SHA-256 of the engine file bytes that ran, computed by Orange at record start; empty when disabled or unreadable"
+        },
+        "engine_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "weights_sha256": {
+          "$ref": "#/$defs/sha256_or_empty",
+          "description": "source.weights.sha256 from the engine manifest (training weights, e.g. best.pt)"
+        },
+        "onnx_sha256": {
+          "$ref": "#/$defs/sha256_or_empty",
+          "description": "source.onnx.sha256 from the engine manifest (the portable ONNX export Palette registered)"
+        },
+        "onnx_sha256_matches_skeleton_sidecar": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "engine_manifest": {
+          "$ref": "#/$defs/engine_manifest"
+        },
+        "ipc_model_id_hash": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gpu_id": {
+          "type": "integer"
+        },
+        "queue_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "camera_config_path",
+        "ui_selected",
+        "requires_yolo",
+        "requires_crop_output"
+      ],
+      "properties": {
+        "camera_config_path": {
+          "type": "string"
+        },
+        "ui_selected": {
+          "type": "boolean"
+        },
+        "requires_yolo": {
+          "type": "boolean"
+        },
+        "requires_crop_output": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "enabled": {
+            "const": true
+          },
+          "runtime": {
+            "properties": {
+              "mode": {
+                "const": "real"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime": {
+            "properties": {
+              "backend": {
+                "const": "tensorrt"
+              },
+              "engine_path": {
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "enabled": {
+            "const": true
+          },
+          "runtime": {
+            "properties": {
+              "mode": {
+                "const": "real"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime": {
+            "properties": {
+              "engine_sha256": {
+                "minLength": 64
+              },
+              "engine_manifest": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256_or_empty": {
+      "type": "string",
+      "pattern": "^([0-9a-f]{64})?$"
+    },
+    "digest_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256_or_empty"
+        }
+      }
+    },
+    "engine_manifest": {
+      "description": "The engine's Palette build manifest `<stem>.manifest.json` beside the engine (`foo.engine` -> `foo.manifest.json`) (schema_id orange.tensorrt_engine_manifest), read at record start; null when no engine is selected. present=false when the file is missing; error non-empty when it could not be parsed or has another schema_id (identity fields then empty). engine_sha256_matches says whether the manifest's engine.sha256 equals runtime.engine_sha256 (the bytes that ran).",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "present",
+        "sha256",
+        "error",
+        "schema_id",
+        "schema_version",
+        "status",
+        "task",
+        "run_id",
+        "set_id",
+        "build_id",
+        "precision",
+        "target_hardware_class",
+        "created_at_utc",
+        "engine_sha256_declared",
+        "engine_sha256_matches",
+        "onnx",
+        "weights",
+        "canonical_manifest",
+        "onnx_manifest"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256_or_empty"
+        },
+        "error": {
+          "type": "string"
+        },
+        "schema_id": {
+          "type": "string"
+        },
+        "schema_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string",
+          "description": "palette_run_id: the Palette training run the engine was built from"
+        },
+        "set_id": {
+          "type": "string"
+        },
+        "build_id": {
+          "type": "string",
+          "description": "e.g. a16_gpu5_trt100_int8mm_bo5_avg32"
+        },
+        "precision": {
+          "type": "string"
+        },
+        "target_hardware_class": {
+          "type": "string"
+        },
+        "created_at_utc": {
+          "type": "string"
+        },
+        "engine_sha256_declared": {
+          "$ref": "#/$defs/sha256_or_empty"
+        },
+        "engine_sha256_matches": {
+          "type": "boolean"
+        },
+        "onnx": {
+          "$ref": "#/$defs/digest_ref"
+        },
+        "weights": {
+          "$ref": "#/$defs/digest_ref"
+        },
+        "canonical_manifest": {
+          "$ref": "#/$defs/digest_ref"
+        },
+        "onnx_manifest": {
+          "$ref": "#/$defs/digest_ref"
+        }
+      }
+    }
+  }
+}

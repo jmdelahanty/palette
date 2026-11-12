@@ -1,0 +1,506 @@
+{
+  "description": "Reference cases for stimulus_angle_convention_v1 (id atan2_negative_y_x_degrees) in y-down rasters. angle -> vector (cos t, -sin t); vector -> degrees(atan2(-y, x)); angles compared with wrap_delta(d) = ((d + 180) mod 360) - 180 (floored mod) under tolerance_deg. Cross-raster cases give the camera->canvas homography H; canvas_to_camera maps through the Jacobian of inverse(H) at a canvas point, camera_to_canvas through the Jacobian of H at a camera point. Expected cross-raster angles were computed independently by finite differences through the full projective map.",
+  "tolerance_deg": 1e-05,
+  "tolerance_vector": 1e-12,
+  "angle_to_vector": [
+    {
+      "name": "0 is right",
+      "angle_deg": 0,
+      "expect_vector": [
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "45 is up-right",
+      "angle_deg": 45,
+      "expect_vector": [
+        0.7071067811865476,
+        -0.7071067811865476
+      ]
+    },
+    {
+      "name": "90 is up (y negative)",
+      "angle_deg": 90,
+      "expect_vector": [
+        0.0,
+        -1.0
+      ]
+    },
+    {
+      "name": "180 is left",
+      "angle_deg": 180,
+      "expect_vector": [
+        -1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "-90 is down (y positive)",
+      "angle_deg": -90,
+      "expect_vector": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "270 is down, not normalised",
+      "angle_deg": 270,
+      "expect_vector": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "-180 is left",
+      "angle_deg": -180,
+      "expect_vector": [
+        -1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "450 is up, not normalised",
+      "angle_deg": 450,
+      "expect_vector": [
+        0.0,
+        -1.0
+      ]
+    }
+  ],
+  "vector_to_angle": [
+    {
+      "name": "right",
+      "vector": [
+        1.0,
+        0.0
+      ],
+      "expect_angle_deg": 0.0
+    },
+    {
+      "name": "up-right",
+      "vector": [
+        3.0,
+        -3.0
+      ],
+      "expect_angle_deg": 45.0
+    },
+    {
+      "name": "up",
+      "vector": [
+        0.0,
+        -2.0
+      ],
+      "expect_angle_deg": 90.0
+    },
+    {
+      "name": "down",
+      "vector": [
+        0.0,
+        5.0
+      ],
+      "expect_angle_deg": -90.0
+    },
+    {
+      "name": "left with y = 0 gives -180 in IEEE (same as +180)",
+      "vector": [
+        -1.0,
+        0.0
+      ],
+      "expect_angle_deg": -180.0,
+      "also_accept_deg": 180.0
+    },
+    {
+      "name": "down-left",
+      "vector": [
+        -1.0,
+        1.0
+      ],
+      "expect_angle_deg": -135.0
+    }
+  ],
+  "wrap_delta": [
+    {
+      "d": 0,
+      "expect": 0
+    },
+    {
+      "d": 190,
+      "expect": -170
+    },
+    {
+      "d": -190,
+      "expect": 170
+    },
+    {
+      "d": 180,
+      "expect": -180,
+      "note": "+180 and -180 are the same direction; wrap_delta maps both to -180"
+    },
+    {
+      "d": -180,
+      "expect": -180
+    },
+    {
+      "d": 359,
+      "expect": -1
+    },
+    {
+      "d": 360,
+      "expect": 0
+    },
+    {
+      "d": 540,
+      "expect": -180
+    },
+    {
+      "d": -270,
+      "expect": 90
+    }
+  ],
+  "same_direction": [
+    {
+      "name": "-180 and 180 identity",
+      "a": -180,
+      "b": 180
+    },
+    {
+      "name": "270 and -90",
+      "a": 270,
+      "b": -90
+    },
+    {
+      "name": "450 and 90",
+      "a": 450,
+      "b": 90
+    }
+  ],
+  "cross_raster": [
+    {
+      "name": "preserved rig: canvas up is camera up",
+      "rig": "preserved",
+      "H_camera_to_canvas": [
+        [
+          2.0,
+          0.0,
+          100.0
+        ],
+        [
+          0.0,
+          2.0,
+          50.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "direction": "canvas_to_camera",
+      "point": [
+        300.0,
+        250.0
+      ],
+      "angle_deg": 90,
+      "expect_angle_deg": 90.0,
+      "expect_det_sign": 1
+    },
+    {
+      "name": "reflected rig: canvas up is camera down",
+      "rig": "reflected",
+      "H_camera_to_canvas": [
+        [
+          2.0,
+          0.0,
+          100.0
+        ],
+        [
+          0.0,
+          -2.0,
+          1000.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "direction": "canvas_to_camera",
+      "point": [
+        300.0,
+        250.0
+      ],
+      "angle_deg": 90,
+      "expect_angle_deg": -90.0,
+      "expect_det_sign": -1
+    },
+    {
+      "name": "reflected rig: camera heading up is canvas down (heading v1 projection note: camera 90 -> canvas 270)",
+      "rig": "reflected",
+      "H_camera_to_canvas": [
+        [
+          2.0,
+          0.0,
+          100.0
+        ],
+        [
+          0.0,
+          -2.0,
+          1000.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "direction": "camera_to_canvas",
+      "point": [
+        100.0,
+        200.0
+      ],
+      "angle_deg": 90,
+      "expect_angle_deg": -90.0,
+      "expect_det_sign": -1
+    },
+    {
+      "name": "preserved rig: canvas 30 is camera 30 (legacy canvas value -30 differs from the camera angle)",
+      "rig": "preserved",
+      "H_camera_to_canvas": [
+        [
+          2.0,
+          0.0,
+          100.0
+        ],
+        [
+          0.0,
+          2.0,
+          50.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "direction": "canvas_to_camera",
+      "point": [
+        300.0,
+        250.0
+      ],
+      "angle_deg": 30,
+      "expect_angle_deg": 30.0,
+      "expect_det_sign": 1
+    },
+    {
+      "name": "reflected rig: canvas 30 is camera -30 (the legacy canvas value happens to equal it: the coincidence Palette's grating subtraction relies on)",
+      "rig": "reflected",
+      "H_camera_to_canvas": [
+        [
+          2.0,
+          0.0,
+          100.0
+        ],
+        [
+          0.0,
+          -2.0,
+          1000.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "direction": "canvas_to_camera",
+      "point": [
+        300.0,
+        250.0
+      ],
+      "angle_deg": 30,
+      "expect_angle_deg": -30.0,
+      "expect_det_sign": -1
+    },
+    {
+      "name": "preserved rig rotated 30 degrees counter-clockwise camera->canvas: canvas up is camera 60",
+      "rig": "preserved",
+      "H_camera_to_canvas": [
+        [
+          1.7320508075688774,
+          1.0,
+          100.0
+        ],
+        [
+          -1.0,
+          1.7320508075688774,
+          400.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "direction": "canvas_to_camera",
+      "point": [
+        500.0,
+        500.0
+      ],
+      "angle_deg": 90,
+      "expect_angle_deg": 60.0,
+      "expect_det_sign": 1
+    },
+    {
+      "name": "projective reflected rig, canvas to camera (Jacobian depends on the point)",
+      "rig": "reflected",
+      "H_camera_to_canvas": [
+        [
+          1.8,
+          0.1,
+          120.0
+        ],
+        [
+          -0.05,
+          -1.9,
+          980.0
+        ],
+        [
+          0.0004,
+          -0.0002,
+          1.0
+        ]
+      ],
+      "direction": "canvas_to_camera",
+      "point": [
+        600.0,
+        400.0
+      ],
+      "angle_deg": 90,
+      "expect_angle_deg": -98.02724,
+      "expect_det_sign": -1
+    },
+    {
+      "name": "projective reflected rig, camera to canvas",
+      "rig": "reflected",
+      "H_camera_to_canvas": [
+        [
+          1.8,
+          0.1,
+          120.0
+        ],
+        [
+          -0.05,
+          -1.9,
+          980.0
+        ],
+        [
+          0.0004,
+          -0.0002,
+          1.0
+        ]
+      ],
+      "direction": "camera_to_canvas",
+      "point": [
+        300.0,
+        200.0
+      ],
+      "angle_deg": 45,
+      "expect_angle_deg": -49.073701,
+      "expect_det_sign": -1
+    }
+  ],
+  "legacy_to_v1": [
+    {
+      "name": "legacy 90 (down) is v1 -90",
+      "legacy_deg": 90,
+      "expect_v1_deg": -90
+    },
+    {
+      "name": "legacy -31.8 (baker_baier_dots) is v1 31.8",
+      "legacy_deg": -31.8,
+      "expect_v1_deg": 31.8
+    },
+    {
+      "name": "legacy 0 and 180 are unchanged",
+      "legacy_deg": 180,
+      "expect_v1_deg": -180
+    },
+    {
+      "name": "legacy 270 (up) is v1 -270, i.e. 90",
+      "legacy_deg": 270,
+      "expect_v1_deg": 90
+    }
+  ],
+  "moving_grating_drift": {
+    "rule": "orientation era (file has orientation_degrees, no motion_direction_degrees): drift_legacy = orientation + 180 if speed_pps > 0, orientation if speed_pps < 0, undefined (static, no drift; consumers refuse a direction) if speed_pps == 0. motion era (file has motion_direction_degrees): drift_legacy = motion_direction_degrees for ANY non-zero speed sign (Citrus derives the render axis = motion + 180 for speed >= 0 and = motion for speed < 0, so the authored motion angle is always the drift); speed_pps == 0 is static. unit-circle era (citrus.stimulus_protocol schema_version 2): drift_v1 = motion_direction_degrees. All legacy drifts are clockwise (+90 = down); drift_v1 = -drift_legacy. Compare under wrap_delta.",
+    "cases": [
+      {
+        "name": "a orientation era, orientation 90, speed +50",
+        "era": "orientation",
+        "orientation_degrees": 90,
+        "speed_pps": 50,
+        "expect_drift_legacy_deg": 270,
+        "expect_drift_v1_deg": -270
+      },
+      {
+        "name": "b orientation era, orientation 90, speed -50",
+        "era": "orientation",
+        "orientation_degrees": 90,
+        "speed_pps": -50,
+        "expect_drift_legacy_deg": 90,
+        "expect_drift_v1_deg": -90
+      },
+      {
+        "name": "c orientation era, Blindfish orientation 0, speed +62.54",
+        "era": "orientation",
+        "orientation_degrees": 0,
+        "speed_pps": 62.54,
+        "expect_drift_legacy_deg": 180,
+        "expect_drift_v1_deg": -180
+      },
+      {
+        "name": "c2 orientation era, speed 0 is static",
+        "era": "orientation",
+        "orientation_degrees": 45,
+        "speed_pps": 0,
+        "expect_drift_legacy_deg": null,
+        "expect_drift_v1_deg": null
+      },
+      {
+        "name": "d motion era, motion -90 STIMULUS_CANVAS, speed +50",
+        "era": "motion",
+        "motion_direction_degrees": -90,
+        "speed_pps": 50,
+        "expect_drift_legacy_deg": -90,
+        "expect_drift_v1_deg": 90
+      },
+      {
+        "name": "d2 motion era, motion -90, speed -50 (sign does not flip the drift)",
+        "era": "motion",
+        "motion_direction_degrees": -90,
+        "speed_pps": -50,
+        "expect_drift_legacy_deg": -90,
+        "expect_drift_v1_deg": 90
+      },
+      {
+        "name": "e unit-circle era, motion 90 is up",
+        "era": "unit_circle",
+        "motion_direction_degrees": 90,
+        "speed_pps": 50,
+        "expect_drift_v1_deg": 90,
+        "expect_vector": [
+          0.0,
+          -1.0
+        ]
+      },
+      {
+        "name": "f legacy->v1 of a: 270 -> -270 (same direction as 90, up)",
+        "era": "orientation",
+        "orientation_degrees": 90,
+        "speed_pps": 50,
+        "expect_drift_legacy_deg": 270,
+        "expect_drift_v1_deg": 90
+      }
+    ]
+  }
+}

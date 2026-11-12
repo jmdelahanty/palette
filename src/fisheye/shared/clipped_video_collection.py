@@ -29,6 +29,26 @@ SOURCE_VIDEO_COLLECTION_LAYOUT = "clipped_video_collection"
 SOURCE_VIDEO_COLLECTION_SCHEMA_ID = "palette.clipped_video_collection.v1"
 SOURCE_VIDEO_COLLECTION_LOCATOR_KIND = "recording_relative_frame_index"
 SOURCE_VIDEO_COLLECTION_FINGERPRINT_STRATEGY = "member_stat_and_index_sha256_v1"
+# Version 2 (2026-10-07) adds each member's probed colorimetry and requires one
+# color range per recording. Version 1 archives stay readable unchanged.
+SOURCE_VIDEO_COLLECTION_SCHEMA_VERSION = 2
+SOURCE_VIDEO_COLLECTION_SCHEMA_VERSIONS = frozenset({1, 2})
+COLLECTION_COLORIMETRY_FIELDS = ("color_range", "color_space", "color_transfer", "color_primaries")
+
+
+def collection_color_range(collection: Mapping[str, Any]) -> str | None:
+    """The single color range a version-2 collection's members declare.
+
+    None for version 1 (never observed) or when no member is tagged; raises if
+    members disagree, which intake refuses.
+    """
+
+    if collection.get("schema_version") != 2:
+        return None
+    ranges = {member.get("color_range") for member in collection.get("members") or []}
+    if len(ranges) != 1:
+        raise ValueError(f"Clipped collection members declare different color ranges: {sorted(map(str, ranges))}.")
+    return ranges.pop()
 
 
 class ClippedVideoCollectionEvidenceError(ValueError):
@@ -164,7 +184,7 @@ def verify_clipped_video_collection_live_files(
     collection = metadata.get("collection")
     if not isinstance(collection, Mapping) or (
         collection.get("schema_id") != SOURCE_VIDEO_COLLECTION_SCHEMA_ID
-        or collection.get("schema_version") != 1
+        or collection.get("schema_version") not in SOURCE_VIDEO_COLLECTION_SCHEMA_VERSIONS
         or collection.get("fingerprint_strategy")
         != SOURCE_VIDEO_COLLECTION_FINGERPRINT_STRATEGY
     ):
@@ -270,6 +290,18 @@ def verify_clipped_video_collection_live_files(
         raise ClippedVideoCollectionEvidenceError(
             "Clipped collection coverage differs from source total_frames."
         )
+    if collection.get("schema_version") == 2:
+        for member_index, member in enumerate(raw_members):
+            for name in COLLECTION_COLORIMETRY_FIELDS:
+                value = member.get(name, KeyError)
+                if value is KeyError or not (value is None or (isinstance(value, str) and value)):
+                    raise ClippedVideoCollectionEvidenceError(
+                        f"collection member {member_index} lacks a valid {name}."
+                    )
+        try:
+            collection_color_range(collection)
+        except ValueError as exc:
+            raise ClippedVideoCollectionEvidenceError(str(exc)) from exc
     collection_sha256 = collection.get("collection_sha256")
     if type(collection_sha256) is not str or len(collection_sha256) != 64:
         raise ClippedVideoCollectionEvidenceError(
@@ -627,6 +659,10 @@ def build_clipped_video_collection_metadata(
                 "fps": fps,
                 "codec": str(codec) if codec not in (None, "") else None,
                 "pix_fmt": str(pix_fmt) if pix_fmt not in (None, "") else None,
+                **{
+                    name: probed.get(f"video_{name}")
+                    for name in COLLECTION_COLORIMETRY_FIELDS
+                },
                 "file_fingerprint": {
                     "strategy": fingerprint["source_video_fingerprint_strategy"],
                     "value": fingerprint["source_video_fingerprint"],
@@ -649,6 +685,14 @@ def build_clipped_video_collection_metadata(
         for value in fps_values
     ):
         raise ValueError("Clipped camera frame rate changes across source members.")
+    color_ranges = {member["color_range"] for member in members}
+    if len(color_ranges) != 1:
+        # One recording, one color range: a tv/pc split (or a tagged and an
+        # untagged clip) inside a recording would misdecode some clips.
+        raise ValueError(
+            "Clipped camera color range changes across source members: "
+            f"{sorted(map(str, color_ranges))}."
+        )
     total_frames = sum(int(member["frame_count"]) for member in members)
     if total_frames != pq.ParquetFile(frame_index).metadata.num_rows:
         raise ValueError(
@@ -657,7 +701,7 @@ def build_clipped_video_collection_metadata(
 
     collection_basis = {
         "schema_id": SOURCE_VIDEO_COLLECTION_SCHEMA_ID,
-        "schema_version": 1,
+        "schema_version": SOURCE_VIDEO_COLLECTION_SCHEMA_VERSION,
         "fingerprint_strategy": SOURCE_VIDEO_COLLECTION_FINGERPRINT_STRATEGY,
         "recording_clip_index": _file_evidence(recording, clip_index),
         "recording_frame_index": _file_evidence(recording, frame_index),
@@ -715,6 +759,10 @@ __all__ = [
     "SOURCE_VIDEO_COLLECTION_LOCATOR_KIND",
     "SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID",
     "SOURCE_VIDEO_COLLECTION_SCHEMA_ID",
+    "SOURCE_VIDEO_COLLECTION_SCHEMA_VERSION",
+    "SOURCE_VIDEO_COLLECTION_SCHEMA_VERSIONS",
+    "COLLECTION_COLORIMETRY_FIELDS",
+    "collection_color_range",
     "VerifiedClippedVideoCollectionFiles",
     "build_clipped_video_collection_metadata",
     "clipped_video_collection_summary",

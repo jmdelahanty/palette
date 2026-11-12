@@ -4,13 +4,18 @@ import csv
 from pathlib import Path
 from statistics import median
 
+import numpy as np
+
+from fisheye.shared.acquisition_frame_clock import (
+    CLOCK_CSV_TIMESTAMP_FIELDS,
+    clock_csv_frame_field,
+    parse_acquisition_frame_clock_csv,
+)
+
 from .models import CameraCsvInfo, Finding
 from .probe import classify_video_source
 
-REQUIRED_CAMERA_CSV_COLUMNS = ("recording_frame_id", "timestamp", "timestamp_sys")
-CAMERA_CSV_COLUMN_ALIASES = {
-    "recording_frame_id": ("frame_id", "local_frame_id"),
-}
+REQUIRED_CAMERA_CSV_COLUMNS = ("recording_frame_id", *CLOCK_CSV_TIMESTAMP_FIELDS)
 
 
 def expected_camera_csv_path(video_path: Path) -> Path:
@@ -36,25 +41,6 @@ def _median_step(values: list[int]) -> int | None:
     if not diffs:
         return None
     return int(median(diffs))
-
-
-def _parse_int(value: object, *, field_name: str, row_number: int) -> int:
-    text = str(value).strip()
-    if not text:
-        raise ValueError(f"Row {row_number}: missing value for {field_name}")
-    try:
-        return int(text)
-    except ValueError as exc:
-        raise ValueError(f"Row {row_number}: invalid integer for {field_name}: {text}") from exc
-
-
-def _resolve_column(fieldnames: list[str], column: str) -> str | None:
-    if column in fieldnames:
-        return column
-    for alias in CAMERA_CSV_COLUMN_ALIASES.get(column, ()):
-        if alias in fieldnames:
-            return alias
-    return None
 
 
 def inspect_camera_csv(
@@ -87,45 +73,35 @@ def inspect_camera_csv(
 
     try:
         with csv_path.open("r", encoding="utf-8", newline="") as handle:
-            reader = csv.DictReader(handle)
-            fieldnames = [str(name).strip() for name in (reader.fieldnames or [])]
-            resolved_columns = {
-                name: _resolve_column(fieldnames, name)
-                for name in REQUIRED_CAMERA_CSV_COLUMNS
-            }
-            missing_columns = [
-                name
-                for name, resolved_name in resolved_columns.items()
-                if resolved_name is None
+            fieldnames = [
+                str(name).strip() for name in (csv.DictReader(handle).fieldnames or [])
             ]
-            info.schema_ok = not missing_columns
-            info.missing_columns = missing_columns
-            if missing_columns:
-                info.status = "fail"
-                findings.append(
-                    Finding(
-                        severity="fail",
-                        code="video.camera_csv_schema",
-                        summary="Camera metadata CSV is missing required columns.",
-                        details=f"Missing columns: {', '.join(missing_columns)}",
-                        component="camera_csv",
-                    )
+        missing_columns = [
+            name
+            for name in REQUIRED_CAMERA_CSV_COLUMNS
+            if (
+                clock_csv_frame_field(fieldnames) is None
+                if name == "recording_frame_id"
+                else name not in fieldnames
+            )
+        ]
+        info.schema_ok = not missing_columns
+        info.missing_columns = missing_columns
+        if missing_columns:
+            info.status = "fail"
+            findings.append(
+                Finding(
+                    severity="fail",
+                    code="video.camera_csv_schema",
+                    summary="Camera metadata CSV is missing required columns.",
+                    details=f"Missing columns: {', '.join(missing_columns)}",
+                    component="camera_csv",
                 )
-                return info, findings
-
-            frame_id_column = resolved_columns["recording_frame_id"]
-            timestamp_column = resolved_columns["timestamp"]
-            timestamp_sys_column = resolved_columns["timestamp_sys"]
-            if frame_id_column is None or timestamp_column is None or timestamp_sys_column is None:
-                raise AssertionError("resolved camera CSV columns unexpectedly missing")
-
-            frame_ids: list[int] = []
-            timestamps: list[int] = []
-            timestamps_sys: list[int] = []
-            for row_number, row in enumerate(reader, start=2):
-                frame_ids.append(_parse_int(row.get(frame_id_column), field_name=frame_id_column, row_number=row_number))
-                timestamps.append(_parse_int(row.get(timestamp_column), field_name=timestamp_column, row_number=row_number))
-                timestamps_sys.append(_parse_int(row.get(timestamp_sys_column), field_name=timestamp_sys_column, row_number=row_number))
+            )
+            return info, findings
+        # The clock authority's own parser, so this report reads rows exactly as
+        # clock publication does (empty timestamps are invalid, not parse errors).
+        parsed = parse_acquisition_frame_clock_csv(csv_path)
     except ValueError as exc:
         info.status = "fail"
         info.error = str(exc)
@@ -153,6 +129,23 @@ def inspect_camera_csv(
         )
         return info, findings
 
+    frame_ids = [int(value) for value in parsed.recording_frame_id]
+    timestamps = [
+        int(value)
+        for value in parsed.camera_timestamp_ns[parsed.camera_timestamp_valid]
+    ]
+    timestamps_sys = [
+        int(value)
+        for value in parsed.system_timestamp_ns[parsed.system_timestamp_valid]
+    ]
+    both_valid = parsed.camera_timestamp_valid & parsed.system_timestamp_valid
+    offsets = [
+        int(value)
+        for value in (
+            parsed.system_timestamp_ns[both_valid] - parsed.camera_timestamp_ns[both_valid]
+        )
+    ]
+    invalid_timestamp_rows = int(np.count_nonzero(~both_valid))
     info.rows = len(frame_ids)
     if not frame_ids:
         info.status = "fail"
@@ -174,13 +167,25 @@ def inspect_camera_csv(
     info.timestamp_sys_monotonic = _is_monotonic(timestamps_sys)
     info.median_timestamp_step_ns = _median_step(timestamps)
     info.median_timestamp_sys_step_ns = _median_step(timestamps_sys)
-    info.timestamp_offset_first_ns = timestamps_sys[0] - timestamps[0]
-    info.timestamp_offset_last_ns = timestamps_sys[-1] - timestamps[-1]
-    info.timestamp_offset_drift_ns = info.timestamp_offset_last_ns - info.timestamp_offset_first_ns
+    if offsets:
+        info.timestamp_offset_first_ns = offsets[0]
+        info.timestamp_offset_last_ns = offsets[-1]
+        info.timestamp_offset_drift_ns = offsets[-1] - offsets[0]
     if expected_frame_count is not None:
         info.row_count_matches_video = info.rows == int(expected_frame_count)
 
     info.status = "pass"
+    if invalid_timestamp_rows:
+        info.status = "warn"
+        findings.append(
+            Finding(
+                severity="warn",
+                code="video.camera_csv_invalid_timestamps",
+                summary="Camera metadata rows have empty timestamps; the clock marks them invalid.",
+                details=f"rows={invalid_timestamp_rows}",
+                component="camera_csv",
+            )
+        )
     if info.frame_id_monotonic is False:
         info.status = "fail"
         findings.append(
