@@ -135,6 +135,41 @@
       "producer_commit": "e1bbc75cbe41c67103c1d0d830c2cd3f44343794",
       "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-orange-roundtrip-e1bbc75-a481250-20260927/transfer/citrus/citsess_4f7734ce5a9efaf93e8c20668343339d6f178713035ce065311c71e5055b3cde_synthetic_roundtrip_chaser.h5",
       "scope": "globally_finalized"
+    },
+    "v3_dish_collected": {
+      "producer_commit": "288f14d722fdfe9f6a56972b242d5ea0fc8eba33",
+      "scope": "globally_finalized",
+      "sha256": "3dd4199466d41157360094004ba2abdc1dab533eaff36e382291537fad9776a8",
+      "size_bytes": 886304,
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-subject-v3-288f14d-20261006/cases/v3_dish_collected/synthetic-paired-recording/citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair.h5"
+    },
+    "v3_dish_group": {
+      "producer_commit": "288f14d722fdfe9f6a56972b242d5ea0fc8eba33",
+      "scope": "globally_finalized",
+      "sha256": "55c93af4fec1dda0dd91b7d401ab130c4a78299355b20756f77c8bc8cd05b7c7",
+      "size_bytes": 886248,
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-subject-v3-288f14d-20261006/cases/v3_dish_group/synthetic-paired-recording/citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair.h5"
+    },
+    "v3_lookup_failed": {
+      "producer_commit": "288f14d722fdfe9f6a56972b242d5ea0fc8eba33",
+      "scope": "globally_finalized",
+      "sha256": "fb7201e31379534ec5b3aa88d23a536e7ba33e40014392d0f5264ccc64053e89",
+      "size_bytes": 885104,
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-subject-v3-288f14d-20261006/cases/v3_lookup_failed/synthetic-paired-recording/citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair.h5"
+    },
+    "v3_no_dish": {
+      "producer_commit": "288f14d722fdfe9f6a56972b242d5ea0fc8eba33",
+      "scope": "globally_finalized",
+      "sha256": "f0464c3ac27a04652b93bf3776e5d95b4517e1ce8590fbe2de8ebafdf241cf84",
+      "size_bytes": 885112,
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-subject-v3-288f14d-20261006/cases/v3_no_dish/synthetic-paired-recording/citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair.h5"
+    },
+    "v3_version_read_failed": {
+      "producer_commit": "288f14d722fdfe9f6a56972b242d5ea0fc8eba33",
+      "scope": "globally_finalized",
+      "sha256": "2745191ce6cf7d198dcae9912928e40e7aa409b708d872977a78e90b669fe08e",
+      "size_bytes": 886432,
+      "source_path": "/groups/johnson/johnsonlab/jeremy/agent_review_evidence/citrus-subject-v3-288f14d-20261006/cases/v3_version_read_failed/synthetic-paired-recording/citrus/citsess_70abf99098ea86d9c5ef12a3f8e07454eb86a02e93f27f73df473eae63b74d80_h5_preservation_full_bound_pair.h5"
     }
   }
 }

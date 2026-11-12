@@ -1,0 +1,449 @@
+"""Register completed Citrus transfer imports from the designated writer host.
+
+The canonical registry is one SQLite file on NFS, so exactly one host writes
+it (``fisheye.registry.shadow_publish``). Cluster import jobs are dispatched
+with ``--no-register`` (poller config ``"registration": "workstation"``); this
+step runs on the writer host, normally from the same cron entry right after
+``citrus_transfer_v2_poller``, and registers what those jobs imported.
+
+For each delivery the poller marked submitted (``<state_dir>/<key>.submitted``)
+and not yet registered, it reads the job's status JSON
+(``<log_dir>/bsub_submissions/citrus_import_*_<key>/workflow-<job_id>/citrus_session_import.status.json``):
+
+- no status and the job has not ended: still queued or running; next run;
+- no status but the job ended (the launcher's ``*.<job_id>.status.txt`` or
+  LSF's report in ``<job_id>.out`` exists): recorded as a failed import;
+- status not ``complete``: the import failed; recorded once in
+  ``<key>.import_failed`` for operator review, never retried here;
+- complete: the delivery (the status's ``plan.snapshot_id``) is registered by
+  ``fisheye.intake.register_delivery``: its import probe is re-verified and
+  ALL of its Zarrs are synchronized in one registry publication, so a delivery
+  is registered whole or not at all; ``<key>.registered`` records the result.
+  A registration error is written to ``<key>.registration_failed`` and retried
+  on the next run (registration is idempotent). A refusal (synthetic origin,
+  job-mode delivery, registrar at another commit than the receipts) is written
+  once to the terminal ``<key>.registration_refused`` and never retried. A
+  registration held by another live run is left for the next run.
+- registered: once ``<key>.registered`` exists, the delivery's staging folder
+  (``staging_dir/<delivery>``, from ``<key>.claimed``), which intake left
+  empty after moving every file into the recordings store, is removed with a
+  non-recursive ``rmdir``. A folder that is missing, not directly under
+  ``staging_dir``, or not empty is left alone and logged; this never changes
+  the delivery's registration state.
+- a job whose payload exited 75 found the delivery held by another live job:
+  it is attached, never recorded as a failed import. Its delivery (the claimed
+  snapshot_id) is registered once its import probe is true; otherwise it stays
+  pending and after ``attached_max_ticks`` (12) runs or ``attached_max_hours``
+  (6) becomes the terminal ``<key>.attached_unresolved`` for the operator.
+  Optional config ``destination_root`` (default: $PALETTE_RECORDINGS_ROOT or
+  the /groups store) locates the delivery.
+
+Producer-declared synthetic transfers are never registered. Config (the
+poller's JSON plus): ``registry``, ``writer_host`` (this host, short name or
+FQDN, compared by ``fisheye.intake.registration.is_writer_host``),
+``writer_lock_path``, ``shadow_temp_root``, ``shadow_backup_dir``; optional
+``registration`` may only be ``"workstation"``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Mapping
+
+from fisheye.intake.delivery import refuse_synthetic_registration
+from fisheye.intake.outcomes import EXIT_HELD, IntakeHeld, IntakeRefused
+from fisheye.intake.registration import RegistryWriter
+
+REQUIRED = ("state_dir", "log_dir", "registry", "writer_host", "writer_lock_path",
+            "shadow_temp_root", "shadow_backup_dir")
+
+
+class RegistrarRefusal(ValueError):
+    pass
+
+
+def log(message: str) -> None:
+    print(f"{datetime.now(timezone.utc).isoformat()} {message}", flush=True)
+
+
+def load_config(path: Path) -> dict:
+    try:
+        config = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as exc:
+        raise RegistrarRefusal(f"unreadable config {path}: {exc}") from exc
+    missing = [key for key in REQUIRED if not (isinstance(config, dict) and config.get(key))]
+    if missing:
+        raise RegistrarRefusal(f"config missing required keys: {', '.join(missing)}")
+    if config.get("registration", "workstation") != "workstation":
+        raise RegistrarRefusal('config "registration" must be "workstation" (job mode is retired)')
+    return config
+
+
+def _writer(config: dict) -> RegistryWriter:
+    try:
+        return RegistryWriter.from_config(config)
+    except IntakeRefused as exc:
+        raise RegistrarRefusal(str(exc)) from exc
+
+
+def _require_writer_host(config: dict) -> None:
+    try:
+        _writer(config).require_this_host()
+    except IntakeRefused as exc:
+        raise RegistrarRefusal(str(exc)) from exc
+
+
+def _job_id(submitted: Path) -> str | None:
+    ids = re.findall(r"^job_id=(\d+)\s*$", submitted.read_text(), flags=re.MULTILINE)
+    return ids[-1] if ids else None
+
+
+def _run_dir(config: dict, key: str, job_id: str) -> Path | None:
+    """The launcher run directory that holds this job's outputs."""
+
+    candidates = [
+        path for path in (Path(config["log_dir"]) / "bsub_submissions").glob(f"citrus_import_*_{key}")
+        if _workflow_dirs(path, job_id) or (path / f"{job_id}.out").exists()
+        or any(path.glob(f"*.{job_id}.status.txt"))
+    ]
+    if len(candidates) > 1:
+        raise RegistrarRefusal(f"ambiguous run directory for key={key} job={job_id}: {candidates}")
+    return candidates[0] if candidates else None
+
+
+def _workflow_dirs(run_dir: Path, job_id: str) -> list[Path]:
+    """This job's workflow directories, oldest attempt first.
+
+    The job script names each attempt ``workflow-<job>-<index>-<attempt>``
+    (an LSF requeue reuses the job id); ``workflow-<job>`` is the older name.
+    """
+
+    attempts = [p for p in run_dir.glob(f"workflow-{job_id}-*") if p.is_dir()]
+    legacy = run_dir / f"workflow-{job_id}"
+    return ([legacy] if legacy.is_dir() else []) + sorted(attempts, key=lambda p: p.name)
+
+
+def _status_json(config: dict, key: str, job_id: str) -> Path | None:
+    """The status of the job's newest attempt (an older one is superseded)."""
+
+    run_dir = _run_dir(config, key, job_id)
+    if run_dir is None:
+        return None
+    attempts = _workflow_dirs(run_dir, job_id)
+    if not attempts:
+        return None
+    path = attempts[-1] / "citrus_session_import.status.json"
+    return path if path.is_file() else None
+
+
+def _payload_returncode(config: dict, key: str, job_id: str) -> int | None:
+    """The intake exit code the job script recorded in its status.txt."""
+
+    run_dir = _run_dir(config, key, job_id)
+    if run_dir is None:
+        return None
+    for path in sorted(run_dir.glob(f"*.{job_id}.status.txt")):
+        found = re.findall(r"^payload_returncode=(-?\d+)\s*$", path.read_text(), flags=re.MULTILINE)
+        if found:
+            return int(found[-1])
+    return None
+
+
+def _job_ended(config: dict, key: str, job_id: str) -> bool:
+    """LSF appends its job report to -oo <job_id>.out; the job script writes status.txt last."""
+
+    run_dir = _run_dir(config, key, job_id)
+    if run_dir is None:
+        return False
+    if any(run_dir.glob(f"*.{job_id}.status.txt")):
+        return True
+    out = run_dir / f"{job_id}.out"
+    return out.is_file() and "Resource usage summary" in out.read_text(errors="replace")
+
+
+def _write(path: Path, payload: dict) -> None:
+    tmp = path.with_name(path.name + f".{os.getpid()}")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    tmp.replace(path)
+
+
+Register = Callable[[dict, str, Path], Mapping[str, str]]
+
+
+def _default_register(config: dict, snapshot_sha: str, destination_root: Path) -> dict[str, str]:
+    """One delivery through the intake owner; returns {zarr path: dataset id}."""
+
+    from fisheye.intake.registration import register_delivery
+
+    result = register_delivery(
+        snapshot_sha, writer=_writer(config), destination_root=destination_root
+    )
+    return {binding["zarr_path"]: binding["dataset_id"] for binding in result.bindings or ()}
+
+
+ATTACHED_MAX_TICKS = 12  # about an hour of 5-minute ticks
+ATTACHED_MAX_HOURS = 6.0
+
+
+def _default_probe(snapshot_sha: str, destination_root: Path) -> bool:
+    from fisheye.intake.probes import probe_import
+
+    return probe_import(snapshot_sha, destination_root=destination_root).verdict
+
+
+Probe = Callable[[str, Path], bool]
+
+
+def _resolve_attached(
+    config: dict, state: Path, key: str, job_id: str, *, dry_run: bool,
+    register: Register, probe: Probe,
+) -> int:
+    """A job that found its delivery held: register it once the holder imported it.
+
+    The delivery is the snapshot the poller claimed (``<key>.claimed``). When
+    its import probe is true it is registered like any completed import.
+    Otherwise it stays pending; after ``attached_max_ticks`` runs or
+    ``attached_max_hours`` it becomes a terminal ``<key>.attached_unresolved``
+    for the operator, instead of stalling silently.
+    """
+
+    from fisheye.intake.delivery import default_destination_root
+
+    claimed = state / f"{key}.claimed"
+    try:
+        snapshot_sha = str(json.loads(claimed.read_text())["snapshot_id"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        snapshot_sha, why = None, f"no readable claim with a snapshot_id: {exc}"
+    destination_root = Path(config.get("destination_root") or default_destination_root())
+    if snapshot_sha is not None:
+        try:
+            imported = probe(snapshot_sha, destination_root)
+            why = "the delivery's import probe is false"
+        except Exception as exc:
+            imported, why = False, f"import probe failed: {type(exc).__name__}: {exc}"
+        if imported:
+            log(f"attached: key={key} job={job_id}; the holder imported {snapshot_sha}")
+            if dry_run:
+                return 0
+            return _register_delivery_key(
+                config, state, key, job_id, register=register, plan=None,
+                snapshot_sha=snapshot_sha, destination_root=destination_root,
+                status_json=None, zarr_paths=None,
+            )
+    log(f"attached: key={key} job={job_id} pending: {why}")
+    if dry_run:
+        return 0
+    tracker = state / f"{key}.attached_pending"
+    now = datetime.now(timezone.utc)
+    try:
+        record = json.loads(tracker.read_text())
+    except (OSError, ValueError):
+        record = {"first_seen_utc": now.isoformat(), "ticks": 0}
+    record["ticks"] = int(record.get("ticks", 0)) + 1
+    record.update(job_id=job_id, snapshot_id=snapshot_sha, last_reason=why, last_seen_utc=now.isoformat())
+    age_h = (now - datetime.fromisoformat(record["first_seen_utc"])).total_seconds() / 3600
+    if record["ticks"] >= int(config.get("attached_max_ticks", ATTACHED_MAX_TICKS)) or age_h >= float(
+        config.get("attached_max_hours", ATTACHED_MAX_HOURS)
+    ):
+        _write(state / f"{key}.attached_unresolved", {
+            **record, "destination_root": str(destination_root),
+            "error": "job attached to a delivery held by another job, which never became importable",
+        })
+        tracker.unlink(missing_ok=True)
+        log(f"attached_unresolved: key={key} job={job_id}; recorded for operator review")
+        return 1
+    _write(tracker, record)
+    return 0
+
+
+def _remove_empty_staging_folder(config: dict, state: Path, key: str) -> None:
+    """Remove a registered delivery's empty staging folder, never recursively."""
+
+    try:
+        marker = Path(json.loads((state / f"{key}.claimed").read_text())["marker"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    if not config.get("staging_dir"):
+        return
+    folder = marker.parent
+    staging = Path(config["staging_dir"])
+    if folder.parent != staging or folder.name.startswith("."):
+        log(f"staging cleanup skipped: key={key} {folder} is not a delivery folder under {staging}")
+        return
+    if folder.is_symlink() or not folder.is_dir():
+        return
+    try:
+        folder.rmdir()
+    except OSError as exc:
+        log(f"staging cleanup skipped: key={key} {folder}: {exc.strerror or exc}")
+        return
+    log(f"staging folder removed: key={key} {folder}")
+
+
+def _register_key(config: dict, state: Path, registry: Path, submitted: Path, *,
+                  dry_run: bool, register: Register, probe: Probe = _default_probe) -> int:
+    """One submitted delivery; returns 1 when it counts as a failure this run."""
+
+    key = submitted.name[: -len(".submitted")]
+    done = state / f"{key}.registered"
+    import_failed = state / f"{key}.import_failed"
+    refused = state / f"{key}.registration_refused"
+    unresolved = state / f"{key}.attached_unresolved"
+    if done.exists():
+        if not dry_run:
+            _remove_empty_staging_folder(config, state, key)
+        return 0
+    if import_failed.exists() or refused.exists() or unresolved.exists():
+        return 0
+    job_id = _job_id(submitted)
+    if job_id is None:
+        log(f"no job_id recorded for key={key}; skipping")
+        return 0
+    status_path = _status_json(config, key, job_id)
+    if status_path is None:
+        if not _job_ended(config, key, job_id):
+            log(f"pending: key={key} job={job_id} has no status yet")
+            return 0
+        if _payload_returncode(config, key, job_id) == EXIT_HELD:
+            # Another live job held the delivery: this one attached and
+            # created nothing. Not a failed import: resolve it from evidence.
+            return _resolve_attached(
+                config, state, key, job_id, dry_run=dry_run, register=register, probe=probe
+            )
+        log(f"import failed: key={key} job={job_id} ended without a status JSON")
+        if not dry_run:
+            _write(import_failed, {"job_id": job_id, "status_json": None, "status": "failed",
+                                   "error": "LSF job ended without writing its status JSON"})
+        return 0
+    try:
+        status: dict[str, Any] = json.loads(status_path.read_text())
+        if not isinstance(status, dict):
+            raise ValueError("status JSON is not an object")
+    except ValueError:
+        # The workflow reserves its status file empty and fills it at the end:
+        # an empty or partial status belongs to a job still running.
+        if not _job_ended(config, key, job_id):
+            log(f"pending: key={key} job={job_id} status is not written yet")
+            return 0
+        log(f"import failed: key={key} job={job_id} ended with an unreadable status JSON")
+        if not dry_run:
+            _write(import_failed, {"job_id": job_id, "status_json": str(status_path), "status": "failed",
+                                   "error": "LSF job ended with an empty or undecodable status JSON"})
+        return 0
+    if status.get("status") != "complete" or not status.get("import_complete"):
+        log(f"import failed: key={key} job={job_id}; recorded for operator review")
+        if not dry_run:
+            _write(import_failed, {"job_id": job_id, "status_json": str(status_path),
+                                   "status": status.get("status"), "error": status.get("error")})
+        return 0
+    zarr_paths = [Path(path) for path in status.get("zarr_paths") or []]
+    if dry_run:
+        log(f"dry-run: would register key={key} job={job_id} zarrs={[str(p) for p in zarr_paths]}")
+        return 0
+    plan = status.get("plan") or {}
+    return _register_delivery_key(
+        config, state, key, job_id, register=register, plan=plan,
+        snapshot_sha=str(plan.get("snapshot_id")), destination_root=plan.get("destination_root"),
+        status_json=str(status_path), zarr_paths=zarr_paths,
+    )
+
+
+def _register_delivery_key(
+    config: dict, state: Path, key: str, job_id: str, *, register: Register,
+    plan: Mapping[str, Any] | None, snapshot_sha: str, destination_root: str | Path | None,
+    status_json: str | None, zarr_paths: list[Path] | None,
+) -> int:
+    """Register one delivery and record the outcome; 1 when it failed this run."""
+
+    registry = Path(config["registry"])
+    done = state / f"{key}.registered"
+    refused = state / f"{key}.registration_refused"
+    try:
+        if plan:
+            refuse_synthetic_registration(plan, registry=registry)
+        if zarr_paths is not None and not zarr_paths:
+            raise RegistrarRefusal("complete import lists no zarr_paths")
+        if destination_root is None:
+            raise RegistrarRefusal("the delivery's destination root is unknown")
+        datasets = dict(register(config, snapshot_sha, Path(destination_root)))
+    except IntakeHeld as exc:
+        log(f"pending: key={key} job={job_id}: {exc}")
+        return 0
+    except IntakeRefused as exc:
+        # Deterministic (synthetic origin, job-mode delivery, registrar at
+        # another commit than the receipts): terminal, never retried.
+        log(f"registration refused: key={key} job={job_id}: {exc}")
+        _write(refused, {"job_id": job_id, "error": getattr(exc, "code", None) or str(exc),
+                         "message": str(exc), **getattr(exc, "details", {}),
+                         "refused_utc": datetime.now(timezone.utc).isoformat()})
+        (state / f"{key}.registration_failed").unlink(missing_ok=True)
+        return 1
+    except Exception as exc:  # retried on the next run
+        log(f"registration failed: key={key} job={job_id}: {exc}")
+        _write(state / f"{key}.registration_failed",
+               {"job_id": job_id, "error": str(exc),
+                "failed_utc": datetime.now(timezone.utc).isoformat()})
+        return 1
+    _write(done, {"job_id": job_id, "status_json": status_json, "registry": str(registry),
+                  "datasets": datasets, "registered_utc": datetime.now(timezone.utc).isoformat()})
+    (state / f"{key}.registration_failed").unlink(missing_ok=True)
+    (state / f"{key}.attached_pending").unlink(missing_ok=True)
+    log(f"registered key={key} job={job_id} datasets={sorted(datasets.values())}")
+    _remove_empty_staging_folder(config, state, key)
+    return 0
+
+
+def register_completed(
+    config: dict,
+    *,
+    dry_run: bool,
+    register: Register = _default_register,
+    probe: Probe = _default_probe,
+) -> int:
+    state = Path(config["state_dir"])
+    registry = Path(config["registry"])
+    failures = 0
+    for submitted in sorted(state.glob("*.submitted")):
+        try:
+            failures += _register_key(
+                config, state, registry, submitted, dry_run=dry_run, register=register, probe=probe
+            )
+        except Exception as exc:  # one bad key never stops the others
+            failures += 1
+            log(f"error: key={submitted.name[: -len('.submitted')]}: {type(exc).__name__}: {exc}")
+    return 1 if failures else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--config", type=Path, default=os.environ.get("CITRUS_V2_POLLER_CONFIG"))
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+    if args.config is None:
+        parser.error("--config or CITRUS_V2_POLLER_CONFIG is required")
+    try:
+        config = load_config(args.config)
+        if args.dry_run:
+            return register_completed(config, dry_run=True)
+        _require_writer_host(config)
+        with open(Path(config["state_dir"]) / "registrar.lock", "w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                log("another registrar run is in progress; exiting")
+                return 0
+            return register_completed(config, dry_run=False)
+    except RegistrarRefusal as exc:
+        log(f"refusing: {exc}")
+        return 2
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())

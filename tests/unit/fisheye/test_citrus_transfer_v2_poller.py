@@ -67,8 +67,22 @@ def test_v1_marker_ignored(tmp_path, capsys):
     runner = FakeRunner()
     assert poller.poll(_config(tmp_path), dry_run=False, runner=runner) == 0
     assert runner.calls == []
-    assert "legacy v1 marker ignored" in capsys.readouterr().out
+    assert "legacy v1 markers ignored: 1" in capsys.readouterr().out
     assert list((tmp_path / "state").iterdir()) == []
+
+
+def test_only_top_level_delivery_folders_are_searched(tmp_path):
+    from fisheye.intake.discovery import staging_marker_paths
+
+    staging = tmp_path / "staging"
+    for folder in ("delivery_a", "delivery_b", ".processed/old", "group/nested", ".hidden"):
+        (staging / folder).mkdir(parents=True)
+        (staging / folder / poller.MARKER_NAME).write_text("{}")
+    (staging / "delivery_c").mkdir()
+    assert staging_marker_paths(staging) == [
+        staging / "delivery_a" / poller.MARKER_NAME,
+        staging / "delivery_b" / poller.MARKER_NAME,
+    ]
 
 
 @pytest.mark.parametrize(
@@ -154,3 +168,48 @@ def test_local_transport_builds_bash_command(tmp_path):
     config = _config(tmp_path, submit={"transport": "local", "repo": "/r"})
     command = poller.build_command(config, Path("/s"), "k")
     assert command[:2] == ["bash", "-c"] and command[2].startswith("cd /r && scripts/")
+
+
+def test_claim_left_by_a_dead_poll_is_retried_not_skipped(tmp_path, capsys):
+    # A poll that died between claiming and recording the submission leaves only
+    # .claimed. Polls run one at a time, so that claim is stale: the next poll
+    # retries, and the launcher returns the earlier LSF job if there is one.
+    _session(tmp_path)
+    config = _config(tmp_path)
+
+    class Crash(RuntimeError):
+        pass
+
+    def crash(command):
+        raise Crash("killed mid-submit")
+
+    with pytest.raises(Crash):
+        poller.poll(config, dry_run=False, runner=crash)
+    [claimed] = (tmp_path / "state").glob("*.claimed")
+    assert not list((tmp_path / "state").glob("*.submitted"))
+
+    runner = FakeRunner()
+    assert poller.poll(config, dry_run=False, runner=runner) == 0
+    assert len(runner.calls) == 1
+    assert "retrying unfinished claim" in capsys.readouterr().out
+    [submitted] = (tmp_path / "state").glob("*.submitted")
+    assert submitted.read_text() == "job_id=42\n"
+    assert json.loads(claimed.read_text())["marker_sha256"]
+    # Once submitted, later polls leave it alone.
+    assert poller.poll(config, dry_run=False, runner=runner) == 0
+    assert len(runner.calls) == 1
+
+
+def test_job_mode_registration_config_is_refused_not_reinterpreted(tmp_path):
+    with pytest.raises(poller.PollerRefusal, match="job-mode registration is retired"):
+        _config(tmp_path, registration="job")
+    assert _config(tmp_path, registration="workstation")["registration"] == "workstation"
+
+
+def test_every_submission_tells_the_job_not_to_register(tmp_path):
+    # --no-register also keeps an older launcher checkout (default: register)
+    # at submit.repo from registering inside the LSF job.
+    for overrides in ({}, {"registration": "workstation"}, {"writer_host": "ws1"}):
+        command = poller.build_command(_config(tmp_path, **overrides), Path("/s"), "k")
+        assert "--no-register" in command[-1]
+        assert "--writer-host" not in command[-1] and "--register " not in command[-1]

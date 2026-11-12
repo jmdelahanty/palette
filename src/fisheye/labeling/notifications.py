@@ -5,15 +5,16 @@ from __future__ import annotations
 import json
 import os
 import re
-import smtplib
+import smtplib  # noqa: F401 -- tests patch fisheye.labeling.notifications.smtplib.SMTP
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
-from email.utils import formatdate, make_msgid
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import quote, urlparse
+
+from fisheye.shared.email_delivery import SmtpConfig, build_message, send, write_outbox
 
 
 NOTIFICATION_MODES = ("disabled", "outbox", "smtp")
@@ -36,7 +37,7 @@ SMTP_SSL_ENV_VAR = "PALETTE_LABELING_SMTP_SSL"
 DEFAULT_NOTIFICATION_MODE = "outbox"
 DEFAULT_NOTIFICATION_FROM = "Palette Labeling <palette-labeling@localhost>"
 DEFAULT_NOTIFICATION_OUTBOX = "~/.palette/labeling_email_outbox"
-PERSONAL_DATASET_QUEUE_PATH = "/my-datasets"
+LABELER_QUEUE_PAGE_PATH = "/queue"
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ class LabelingNotification:
     to_user: str
     subject: str
     text_body: str
+    html_body: str | None = None
 
 
 def send_labeler_added_notification(
@@ -195,7 +197,7 @@ def _build_labeler_added_notification(
     status = str(user.get("status") or "active").strip() or "active"
     display_name = str(user.get("display_name") or user_id).strip() or user_id
     email = str(user.get("email") or "").strip()
-    queue_url = _personal_dataset_queue_url(user_id, base_url=base_url)
+    queue_url = _labeler_queue_url(user_id, base_url=base_url)
     subject = f"Palette labeling access added: {user_id}"
     body = "\n".join(
         [
@@ -208,7 +210,7 @@ def _build_labeler_added_notification(
             f"Status: {status}",
             "",
             "Use this username when opening the labeling website.",
-            f"Assigned datasets queue: {queue_url}",
+            f"Your labeling queue: {queue_url}",
             *_fixed_user_tunnel_instruction_lines(user_id, base_url=base_url),
             "",
             "If the page says your browser identity does not match, contact the operator and include the username above.",
@@ -234,7 +236,7 @@ def _build_assignment_available_notification(
     email = str((user or {}).get("email") or "").strip()
     recording_id = str(assignment.get("recording_id") or "").strip()
     notes = str(assignment.get("notes") or "").strip()
-    queue_url = _personal_dataset_queue_url(assignee_user, base_url=base_url)
+    queue_url = _labeler_queue_url(assignee_user, base_url=base_url)
     subject = f"Palette dataset available for labeling: {recording_id}"
     lines = [
         f"Hi {display_name},",
@@ -243,7 +245,7 @@ def _build_assignment_available_notification(
         "",
         f"Username: {assignee_user}",
         f"Recording: {recording_id}",
-        f"Assigned datasets queue: {queue_url}",
+        f"Your labeling queue: {queue_url}",
         *_fixed_user_tunnel_instruction_lines(assignee_user, base_url=base_url),
     ]
     if notes:
@@ -251,7 +253,7 @@ def _build_assignment_available_notification(
     lines.extend(
         [
             "",
-            "Open the assigned datasets queue and start the available review tasks from there.",
+            "Open your labeling queue and start the available review tasks from there.",
             "If the page says your browser identity does not match, contact the operator and include the username above.",
         ]
     )
@@ -270,18 +272,22 @@ def _build_email_message(
     config: LabelingNotificationConfig,
     actor_user: str | None,
 ) -> EmailMessage:
-    message = EmailMessage()
-    message["From"] = config.sender
-    message["To"] = notification.to_email
-    message["Subject"] = notification.subject
-    message["Date"] = formatdate(localtime=False)
-    message["Message-ID"] = make_msgid(domain="palette-labeling.local")
-    message["X-Palette-Labeling-Notification-Kind"] = notification.kind
-    message["X-Palette-Labeling-User"] = notification.to_user
+    headers = {
+        "X-Palette-Labeling-Notification-Kind": notification.kind,
+        "X-Palette-Labeling-User": notification.to_user,
+    }
     if actor_user:
-        message["X-Palette-Labeling-Actor"] = str(actor_user)
-    message.set_content(notification.text_body)
-    return message
+        headers["X-Palette-Labeling-Actor"] = str(actor_user)
+    return build_message(
+        sender=config.sender,
+        to=notification.to_email,
+        subject=notification.subject,
+        text_body=notification.text_body,
+        html_body=notification.html_body,
+        headers=headers,
+        message_id_domain="palette-labeling.local",
+        localtime=False,
+    )
 
 
 def _write_outbox_message(
@@ -292,14 +298,12 @@ def _write_outbox_message(
     context: Mapping[str, object] | None,
 ) -> dict[str, object]:
     outbox_dir = config.outbox_dir
-    outbox_dir.mkdir(parents=True, exist_ok=True)
     notification_id = str(uuid.uuid4())
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     safe_user = _safe_file_token(notification.to_user or "unknown")
     stem = f"{stamp}_{notification.kind}_{safe_user}_{notification_id}"
-    eml_path = outbox_dir / f"{stem}.eml"
+    eml_path = write_outbox(message, outbox_dir, stem)
     json_path = outbox_dir / f"{stem}.json"
-    eml_path.write_bytes(bytes(message))
     payload = _result_payload(
         ok=True,
         notification_id=notification_id,
@@ -335,13 +339,17 @@ def _send_smtp_message(
         )
     notification_id = str(uuid.uuid4())
     try:
-        smtp_cls = smtplib.SMTP_SSL if config.smtp_ssl else smtplib.SMTP
-        with smtp_cls(config.smtp_host, config.smtp_port, timeout=30) as server:
-            if config.smtp_starttls and not config.smtp_ssl:
-                server.starttls()
-            if config.smtp_username:
-                server.login(config.smtp_username, config.smtp_password or "")
-            server.send_message(message)
+        send(
+            message,
+            SmtpConfig(
+                host=config.smtp_host,
+                port=config.smtp_port,
+                username=config.smtp_username,
+                password=config.smtp_password,
+                starttls=config.smtp_starttls,
+                ssl=config.smtp_ssl,
+            ),
+        )
     except Exception as exc:
         return _failed_result(
             kind=notification.kind,
@@ -437,8 +445,8 @@ def _failed_result(
     }
 
 
-def _personal_dataset_queue_url(user_id: str, *, base_url: str | None = None) -> str:
-    path = f"{PERSONAL_DATASET_QUEUE_PATH}?expected_user={quote(str(user_id or '').strip())}"
+def _labeler_queue_url(user_id: str, *, base_url: str | None = None) -> str:
+    path = f"{LABELER_QUEUE_PAGE_PATH}?expected_user={quote(str(user_id or '').strip())}"
     base_url = _normalize_base_url(base_url if base_url is not None else os.environ.get(NOTIFICATION_BASE_URL_ENV_VAR))
     return f"{base_url}{path}" if base_url else path
 
@@ -480,7 +488,7 @@ def _fixed_user_tunnel_instruction_lines(user_id: str, *, base_url: str | None) 
         f"   ssh -N -L {local_port}:{remote_bind_host}:{remote_port} {ssh_target}",
         "",
         "3. Keep that terminal open while labeling.",
-        f"4. Open {base_url}{PERSONAL_DATASET_QUEUE_PATH} in your browser.",
+        f"4. Open {base_url}{LABELER_QUEUE_PAGE_PATH} in your browser.",
     ]
 
 

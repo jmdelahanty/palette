@@ -32,6 +32,7 @@ from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
 from fisheye.shared.system_metadata import get_git_info
+from fisheye.shared.heading_convention import chaser_centred_bearing_degrees
 
 SCHEMA_ID = "palette.chaser.escape_freeze_summary.v1"
 SCHEMA_VERSION = 1
@@ -517,7 +518,7 @@ def chaser_frame_transform(
     x_prime = cos_a * delta[:, 0] - sin_a * delta[:, 1]
     y_prime = sin_a * delta[:, 0] + cos_a * delta[:, 1]
     radius = np.sqrt(x_prime * x_prime + y_prime * y_prime)
-    bearing_deg = np.degrees(np.arctan2(x_prime, y_prime))
+    bearing_deg = chaser_centred_bearing_degrees(x_prime, y_prime)
     return np.column_stack([x_prime, y_prime]).astype(np.float32), radius.astype(np.float32), bearing_deg.astype(np.float32)
 
 
@@ -875,7 +876,7 @@ def build_chaser_escape_freeze_summary_result(
                 net_vec = max_xy - trigger_xy
                 net_displacement = float(np.linalg.norm(net_vec))
                 radial_excursion = float(chaser_frame_radius[max_frame] - chaser_frame_radius[trigger])
-                escape_bearing = float(np.degrees(np.arctan2(float(net_vec[0]), float(net_vec[1]))))
+                escape_bearing = float(chaser_centred_bearing_degrees(float(net_vec[0]), float(net_vec[1])))
             else:
                 net_displacement = np.nan
                 radial_excursion = np.nan

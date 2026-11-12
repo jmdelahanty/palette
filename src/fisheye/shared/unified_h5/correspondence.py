@@ -24,6 +24,12 @@ from .hdf5_types import dataset_bytes, iter_blocks
 from .integrity import internal_nodes
 from .schema import (
     CHASER_STATES,
+    CORRESPONDENCE_RECEIPT_SCHEMAS,
+    admitted_binding,
+    preflight_admission,
+    require_selected_catalog_versions,
+    require_declared_core_tables,
+    require_stimulus_angle_convention,
     contract,
     describe_internal_dataset,
     describe_table,
@@ -45,6 +51,8 @@ PREFLIGHT = "/metadata/admission/capacity_preflight_json"
 FRAME_JOINED_STATES = (
     "/components/independent_motion_grid/states",
     "/components/moving_grating/states",
+    "/components/phototaxis/states",
+    "/components/video_tracking_overlay/states",
 )
 
 
@@ -181,10 +189,11 @@ def validate_component_correspondence(h5) -> CorrespondenceSummary:
     internal_nodes(h5)
     binding, total = _binding(h5)
     inputs = read_json(h5, INPUT, canonical=True)
-    # Correspondence input v2 (admission v2); the chaser table must be v2 too.
+    # Correspondence input v2 (admission v2-v4); the chaser table must be an
+    # admitted version (v2, or v3 under frame identity v1), never v1.
     require(
         inputs.get("schema_version") == 2
-        and table_version(h5, CHASER_STATES) in (None, 2),
+        and table_version(h5, CHASER_STATES) != 1,
         "correspondence_revision_mismatch",
     )
     return _validate_v2(h5, binding, total, inputs)
@@ -207,22 +216,32 @@ class _RowReader:
 
 
 @contract_errors
-def validate_capacity_preflight(h5) -> None:
+def validate_capacity_preflight(h5) -> dict:
     """Whole-recording capacity-preflight evidence under the frozen producer policy.
 
     Admission of a finalized recording requires it; component-only witnesses
-    validated for correspondence alone do not carry it.
+    validated for correspondence alone do not carry it. Returns the admitted
+    binding, whose ``stimulus_angle_convention`` fixes the file's stimulus
+    angle sign.
     """
 
     document = read_json(h5, PREFLIGHT, canonical=True)
-    _schema_check(
-        document, "experimental_h5_capacity_preflight_v1.schema.json", "capacity_preflight"
+    declared = document.get("admission_policy_sha256")
+    require(isinstance(declared, str), "capacity_preflight_producer_policy")
+    # The preflight schema_version selects the admission revision (v1 -> 3,
+    # v2 -> 4, v3 -> 5); the file's table versions, declared policy and (revision 4)
+    # catalog_id select one admitted catalog binding, whose own preflight
+    # schema then applies.
+    binding = admitted_binding(h5, declared, document)
+    _schema_check(document, binding["preflight_schema"], "capacity_preflight")
+    require_declared_core_tables(
+        h5, (table["path"] for table in document["tables"]), binding["catalog_file"]
     )
-    pin = contract("unified_h5_admission_v2.json")["producer_policy_pin"]["file_sha256"]
-    require(
-        "sha256:" + document["admission_policy_sha256"] == pin,
-        "capacity_preflight_producer_policy",
-    )
+    require_selected_catalog_versions(h5, binding["catalog_file"])
+    # The binding fixes the stimulus angle convention; the file's session and
+    # protocol declarations must agree with it (absent on legacy bindings).
+    require_stimulus_angle_convention(h5, binding)
+    return binding
 
 
 def _validate_v2(h5, binding, total, inputs) -> CorrespondenceSummary:
@@ -247,11 +266,22 @@ def _validate_v2(h5, binding, total, inputs) -> CorrespondenceSummary:
     require(has_chaser or chaser_count == 0, "live_chaser_without_canonical_table")
 
     receipt = read_json(h5, RECEIPT, canonical=True)
-    _schema_check(
-        receipt,
-        "experimental_h5_correspondence_receipt_v2.schema.json",
-        "correspondence_receipt",
+    # Receipt v2 (admission revisions 2-3) or v3 (revision 4: embedded core
+    # table versions are pinned by the catalog map, not enumerated), selected
+    # by its own schema_version; a whole recording's preflight fixes which.
+    version = receipt.get("schema_version")
+    require(
+        type(version) is int and version in CORRESPONDENCE_RECEIPT_SCHEMAS,
+        "correspondence_receipt_unknown_schema_version",
     )
+    if PREFLIGHT in h5:
+        admission = contract(preflight_admission(read_json(h5, PREFLIGHT, canonical=True)))
+        require(
+            admission["correspondence_definition_pins"]["receipt_schema"]["schema_version"]
+            == version,
+            "correspondence_receipt_revision_mismatch",
+        )
+    _schema_check(receipt, CORRESPONDENCE_RECEIPT_SCHEMAS[version], "correspondence_receipt")
     require(
         receipt["status"] == "complete" and receipt["reason"] == "",
         "correspondence_receipt_incomplete",

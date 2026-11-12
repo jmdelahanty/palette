@@ -1,0 +1,438 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "citrus.pose_observation.v1",
+  "title": "Citrus unified-H5 pose observation contract (/observations/pose/contract_json), v1",
+  "description": "Closed. The table layouts are fixed: any change is a new version. Normative rules: README.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "schema_version",
+    "source_scope",
+    "scope_values",
+    "snapshot_ref",
+    "association_status",
+    "metadata_cameras",
+    "heading_status_values",
+    "minimum_keypoint_confidence",
+    "angle_convention",
+    "status_semantics",
+    "object_index_semantics",
+    "maximum_logged_keypoints_per_object",
+    "tables"
+  ],
+  "properties": {
+    "schema_id": {
+      "const": "citrus.pose_observation"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "source_scope": {
+      "const": "arena_drained_observations_not_all_orange_published_slots"
+    },
+    "scope_values": {
+      "const": {
+        "0": "source_wide",
+        "1": "region_selected_subset"
+      }
+    },
+    "snapshot_ref": {
+      "const": "/metadata/recording/recording_snapshot_json"
+    },
+    "association_status": {
+      "enum": [
+        "bound",
+        "advisory"
+      ]
+    },
+    "metadata_cameras": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[!-~]{1,32}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sidecar_sha256",
+          "engine_sha256",
+          "ipc_skeleton_id_hash",
+          "ipc_model_id_hash",
+          "heading_policy_version",
+          "heading_enabled"
+        ],
+        "properties": {
+          "sidecar_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "engine_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "ipc_skeleton_id_hash": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 18446744073709551615
+          },
+          "ipc_model_id_hash": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 18446744073709551615
+          },
+          "heading_policy_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "heading_enabled": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "heading_status_values": {
+      "const": {
+        "0": "no_pose",
+        "1": "unresolved_metadata",
+        "2": "identity_mismatch",
+        "3": "missing_point",
+        "4": "invalid_point",
+        "5": "low_confidence",
+        "6": "degenerate",
+        "7": "valid",
+        "8": "policy_disabled"
+      }
+    },
+    "minimum_keypoint_confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "angle_convention": {
+      "const": "camera_native_top_left_x_right_y_down_degrees_clockwise_from_right"
+    },
+    "status_semantics": {
+      "const": "derived_heading_is_diagnostic_not_stimulus_admission"
+    },
+    "object_index_semantics": {
+      "const": "original_payload_local_index_not_track_identity"
+    },
+    "maximum_logged_keypoints_per_object": {
+      "const": 16
+    },
+    "tables": {
+      "const": {
+        "keypoints": {
+          "fields": [
+            {
+              "name": "object_row",
+              "offset_bytes": 0,
+              "width_bytes": 8
+            },
+            {
+              "name": "payload_keypoint_index",
+              "offset_bytes": 8,
+              "width_bytes": 4
+            },
+            {
+              "name": "label_id",
+              "offset_bytes": 12,
+              "width_bytes": 2
+            },
+            {
+              "name": "flags",
+              "offset_bytes": 14,
+              "width_bytes": 2
+            },
+            {
+              "name": "x_px",
+              "offset_bytes": 16,
+              "width_bytes": 4
+            },
+            {
+              "name": "y_px",
+              "offset_bytes": 20,
+              "width_bytes": 4
+            },
+            {
+              "name": "confidence",
+              "offset_bytes": 24,
+              "width_bytes": 4
+            }
+          ],
+          "numeric_encoding": "little_endian_ieee754_f32",
+          "row_bytes": 28
+        },
+        "objects": {
+          "fields": [
+            {
+              "name": "update_row",
+              "offset_bytes": 0,
+              "width_bytes": 8
+            },
+            {
+              "name": "keypoints_start",
+              "offset_bytes": 8,
+              "width_bytes": 8
+            },
+            {
+              "name": "payload_object_index",
+              "offset_bytes": 16,
+              "width_bytes": 4
+            },
+            {
+              "name": "flags",
+              "offset_bytes": 20,
+              "width_bytes": 4
+            },
+            {
+              "name": "keypoint_count",
+              "offset_bytes": 24,
+              "width_bytes": 4
+            },
+            {
+              "name": "heading_status",
+              "offset_bytes": 28,
+              "width_bytes": 4
+            },
+            {
+              "name": "x_px",
+              "offset_bytes": 32,
+              "width_bytes": 4
+            },
+            {
+              "name": "y_px",
+              "offset_bytes": 36,
+              "width_bytes": 4
+            },
+            {
+              "name": "width_px",
+              "offset_bytes": 40,
+              "width_bytes": 4
+            },
+            {
+              "name": "height_px",
+              "offset_bytes": 44,
+              "width_bytes": 4
+            },
+            {
+              "name": "confidence",
+              "offset_bytes": 48,
+              "width_bytes": 4
+            },
+            {
+              "name": "label_id",
+              "offset_bytes": 52,
+              "width_bytes": 4
+            },
+            {
+              "name": "track_id",
+              "offset_bytes": 56,
+              "width_bytes": 4
+            },
+            {
+              "name": "heading_origin_x_px",
+              "offset_bytes": 60,
+              "width_bytes": 4
+            },
+            {
+              "name": "heading_origin_y_px",
+              "offset_bytes": 64,
+              "width_bytes": 4
+            },
+            {
+              "name": "heading_direction_x",
+              "offset_bytes": 68,
+              "width_bytes": 4
+            },
+            {
+              "name": "heading_direction_y",
+              "offset_bytes": 72,
+              "width_bytes": 4
+            },
+            {
+              "name": "heading_angle_degrees",
+              "offset_bytes": 76,
+              "width_bytes": 4
+            }
+          ],
+          "numeric_encoding": "little_endian_ieee754_f32",
+          "row_bytes": 80
+        },
+        "updates": {
+          "fields": [
+            {
+              "name": "sequence_id",
+              "offset_bytes": 0,
+              "width_bytes": 8
+            },
+            {
+              "name": "state_frame_id",
+              "offset_bytes": 8,
+              "width_bytes": 8
+            },
+            {
+              "name": "source_frame_id",
+              "offset_bytes": 16,
+              "width_bytes": 8
+            },
+            {
+              "name": "camera_frame_id",
+              "offset_bytes": 24,
+              "width_bytes": 8
+            },
+            {
+              "name": "recording_frame_id",
+              "offset_bytes": 32,
+              "width_bytes": 8
+            },
+            {
+              "name": "producer_generation",
+              "offset_bytes": 40,
+              "width_bytes": 8
+            },
+            {
+              "name": "producer_instance_id",
+              "offset_bytes": 48,
+              "width_bytes": 8
+            },
+            {
+              "name": "camera_timestamp_ns",
+              "offset_bytes": 56,
+              "width_bytes": 8
+            },
+            {
+              "name": "timestamp_sys_ns",
+              "offset_bytes": 64,
+              "width_bytes": 8
+            },
+            {
+              "name": "orange_publish_timestamp_us_epoch",
+              "offset_bytes": 72,
+              "width_bytes": 8
+            },
+            {
+              "name": "orange_publish_timestamp_us_monotonic",
+              "offset_bytes": 80,
+              "width_bytes": 8
+            },
+            {
+              "name": "pose_model_id_hash",
+              "offset_bytes": 88,
+              "width_bytes": 8
+            },
+            {
+              "name": "pose_skeleton_id_hash",
+              "offset_bytes": 96,
+              "width_bytes": 8
+            },
+            {
+              "name": "detection_model_id_hash",
+              "offset_bytes": 104,
+              "width_bytes": 8
+            },
+            {
+              "name": "objects_start",
+              "offset_bytes": 112,
+              "width_bytes": 8
+            },
+            {
+              "name": "ipc_read_time_ns",
+              "offset_bytes": 120,
+              "width_bytes": 8
+            },
+            {
+              "name": "session_time_ns",
+              "offset_bytes": 128,
+              "width_bytes": 8
+            },
+            {
+              "name": "camera_id",
+              "offset_bytes": 136,
+              "width_bytes": 4
+            },
+            {
+              "name": "source_width_px",
+              "offset_bytes": 140,
+              "width_bytes": 4
+            },
+            {
+              "name": "source_height_px",
+              "offset_bytes": 144,
+              "width_bytes": 4
+            },
+            {
+              "name": "detection_status",
+              "offset_bytes": 148,
+              "width_bytes": 4
+            },
+            {
+              "name": "pose_status",
+              "offset_bytes": 152,
+              "width_bytes": 4
+            },
+            {
+              "name": "detection_reason",
+              "offset_bytes": 156,
+              "width_bytes": 4
+            },
+            {
+              "name": "object_order",
+              "offset_bytes": 160,
+              "width_bytes": 4
+            },
+            {
+              "name": "source_detection_count",
+              "offset_bytes": 164,
+              "width_bytes": 4
+            },
+            {
+              "name": "retained_detection_count",
+              "offset_bytes": 168,
+              "width_bytes": 4
+            },
+            {
+              "name": "transmitted_object_count",
+              "offset_bytes": 172,
+              "width_bytes": 4
+            },
+            {
+              "name": "objects_truncated",
+              "offset_bytes": 176,
+              "width_bytes": 4
+            },
+            {
+              "name": "logged_object_count",
+              "offset_bytes": 180,
+              "width_bytes": 4
+            },
+            {
+              "name": "scope",
+              "offset_bytes": 184,
+              "width_bytes": 4
+            },
+            {
+              "name": "camera_serial",
+              "offset_bytes": 188,
+              "width_bytes": 32
+            },
+            {
+              "name": "recording_identity_token",
+              "offset_bytes": 220,
+              "width_bytes": 72
+            },
+            {
+              "name": "region_id",
+              "offset_bytes": 292,
+              "width_bytes": 64
+            }
+          ],
+          "numeric_encoding": "little_endian_ieee754_f32",
+          "row_bytes": 356
+        }
+      }
+    }
+  }
+}

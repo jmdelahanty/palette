@@ -44,6 +44,7 @@ from fisheye.shared.run_lineage_fingerprint import (
     write_run_lineage_attrs,
 )
 from fisheye.shared.system_metadata import get_git_info
+from fisheye.shared.heading_convention import image_angle_degrees, wrap_delta_degrees
 
 
 SCHEMA_ID = "palette.chaser_egocentric_bearing.v1"
@@ -137,11 +138,8 @@ def _open_root(zarr_path: Path, *, mode: str) -> zarr.Group:
     return zarr.open_group(str(zarr_path), mode=mode, use_consolidated=False)
 
 
-def wrap_degrees_signed(values: np.ndarray | float) -> np.ndarray:
-    """Wrap degree values into the signed [-180, 180) interval."""
-
-    array = np.asarray(values, dtype=np.float64)
-    return ((array + 180.0) % 360.0) - 180.0
+# Public name kept for importers; the convention lives in heading_convention.
+wrap_degrees_signed = wrap_delta_degrees
 
 
 def normalize_heading_level(value: str) -> str:
@@ -344,7 +342,7 @@ def compute_egocentric_chaser_bearing(
     vector_finite = np.isfinite(vector).all(axis=2)
     valid = fish_valid_arr[:, None] & chaser_valid_arr & heading_valid_arr[:, None] & vector_finite & distance_finite_arr
 
-    object_bearing_world_deg = np.rad2deg(np.arctan2(-vector[:, :, 1], vector[:, :, 0]))
+    object_bearing_world_deg = image_angle_degrees(vector[:, :, 0], vector[:, :, 1], dtype=vector.dtype)
     bearing = wrap_degrees_signed(object_bearing_world_deg - heading[:, None])
     bearing = np.where(valid, bearing, np.nan).astype(np.float32)
 

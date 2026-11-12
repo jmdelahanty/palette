@@ -135,6 +135,7 @@ from fisheye.shared.zarr.analysis_storage_planning import (
     AnalysisArrayStoragePlanReceipt,
     AnalysisStoragePlanReceipt,
 )
+from fisheye.shared.heading_convention import wrap_delta_degrees
 
 # Preserve the long-standing module import surface while the implementation
 # and exact declarations live in ``eye_angle_schema``.
@@ -1347,8 +1348,7 @@ def _signed_angle_from_body_axes(
 
 def _wrap_signed_degrees(values: np.ndarray) -> np.ndarray:
     """Wrap degrees into [-180, 180)."""
-    wrapped = (np.asarray(values, dtype=np.float64) + 180.0) % 360.0 - 180.0
-    return wrapped.astype(np.float32, copy=False)
+    return wrap_delta_degrees(values).astype(np.float32, copy=False)
 
 
 def _rotate_body_frame_90(

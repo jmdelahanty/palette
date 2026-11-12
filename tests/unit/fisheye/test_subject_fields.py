@@ -139,3 +139,60 @@ def test_unknown_lookup_status_is_unresolved():
     subject = sf.from_h5_attributes({"subject_lookup_status": "maybe"})
     assert "subject_lookup" not in subject
     assert subject["unresolved"]["subject_lookup"] == "unknown status: 'maybe'"
+
+
+def test_v2_records_keep_the_fields_fixed_at_publish(tmp_path, monkeypatch):
+    root = zarr.open_group(str(tmp_path / "v2.zarr"), mode="w")
+    published = publish_subject_metadata(root, CITRUS_V3, source_artifact={"kind": "test"},
+                                         translator="h5_attributes")
+    assert published.record["schema_id"] == "palette.subject_metadata.v2"
+    assert published.record["subject_translator"] == "h5_attributes"
+    stored = dict(published.subject)
+    # A later translator change must not alter (or invalidate) a stored record.
+    monkeypatch.setitem(sf.TRANSLATORS, "h5_attributes", lambda *_args: {"changed": True})
+    assert resolve_subject_metadata(root, allow_legacy=False).subject == stored
+
+
+def test_v1_records_still_translate_on_read(tmp_path):
+    root = zarr.open_group(str(tmp_path / "v1.zarr"), mode="w")
+    published = publish_subject_metadata(root, LEGACY_H5, source_artifact={"kind": "test"})
+    assert published.record["schema_id"] == "palette.subject_metadata.v1"
+    assert published.subject["dpf_at_acquisition"] == 8
+
+
+def test_unknown_translator_is_refused(tmp_path):
+    root = zarr.open_group(str(tmp_path / "x.zarr"), mode="w")
+    with pytest.raises(ValueError, match="Unknown subject translator"):
+        publish_subject_metadata(root, LEGACY_H5, source_artifact={"kind": "test"}, translator="guess")
+
+
+@pytest.mark.parametrize(
+    "queried, expected",
+    [
+        ("2026-07-22T00:06:17Z", 7),  # 20:06 EDT on 2026-07-21: still day 7 in the lab
+        ("2026-07-22T12:00:00Z", 8),
+        ("2026-07-21T20:06:17-04:00", 7),
+    ],
+)
+def test_age_counts_lab_calendar_days_not_utc(queried, expected):
+    # Real case: fertilized 20260714, recorded the evening of 2026-07-21 (EDT);
+    # Citrus stored days_post_fertilization "7".
+    subject = sf.from_h5_attributes(
+        {"date_of_fertilization": "20260714", "days_post_fertilization": "7", "queried_at_utc": queried}
+    )
+    assert subject["dpf_at_acquisition"] == expected
+
+
+def test_a_picked_fish_carries_its_sealed_unit_and_new_reasons_pass_through():
+    picked = dict(CITRUS_V3, fish_reference_status="collected", mzb_fish_id="f1",
+                  mzb_fish_revision=4, mzb_fish_updated_at="2026-08-11 08:00:00",
+                  mzb_fish_unit_id="18867_10_WP1:A1")
+    picked.pop("fish_reference_reason")
+    subject = sf.from_h5_attributes(picked)
+    assert subject["mzb_fish_unit_id"] == "18867_10_WP1:A1"
+    assert subject["fish_reference"] == {"status": "collected", "reason": ""}
+    # Files before the amendment carry no unit and gain no field.
+    assert "mzb_fish_unit_id" not in sf.from_h5_attributes(CITRUS_V3)
+    for reason in ("operator_declined_pick", "no_registered_fish", "fish_list_unavailable"):
+        declined = sf.from_h5_attributes(dict(CITRUS_V3, fish_reference_reason=reason))
+        assert declined["fish_reference"] == {"status": "not_collected", "reason": reason}

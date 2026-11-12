@@ -1,0 +1,87 @@
+{
+  "schema_version": 4,
+  "api_schema_version": null,
+  "queried_at_utc": "2026-10-15T14:02:11Z",
+  "dish_id": "19220_1",
+  "subject_lookup_status": "lookup_failed",
+  "subject_lookup_reason": "dish_lookup_transport_failure",
+  "dish": null,
+  "cross": null,
+  "fish_reference": {
+    "mzb_fish_id": "c0a8e4d2-7f13-4b6a-8e25-91d3f6a7b240",
+    "mzb_fish_revision": null,
+    "mzb_fish_updated_at": null,
+    "mzb_fish_subject_label": null,
+    "mzb_fish_unit_id": null,
+    "mzb_dish_listed_fish_count_at_start": null,
+    "mzb_registration_mode": "outbox",
+    "mzb_registration_status": "queued",
+    "mzb_registration_reason": "create_transport_failure",
+    "mint": {
+      "method": "os_csprng_uuid4",
+      "minted_at_utc": "2026-10-15T13:58:40Z"
+    },
+    "registration_request": {
+      "method": "POST",
+      "path": "/dishes/19220_1/fish",
+      "body": {
+        "fish_id": "c0a8e4d2-7f13-4b6a-8e25-91d3f6a7b240",
+        "subject_label": "Z11"
+      }
+    }
+  },
+  "errors": [
+    {
+      "endpoint": "/version",
+      "method": "GET",
+      "kind": "transport",
+      "http_status": null,
+      "detail_error": null,
+      "message": "connection refused"
+    },
+    {
+      "endpoint": "/dishes/19220_1/citrus-snapshot",
+      "method": "GET",
+      "kind": "transport",
+      "http_status": null,
+      "detail_error": null,
+      "message": "connection refused"
+    },
+    {
+      "endpoint": "/dishes/19220_1/fish",
+      "method": "POST",
+      "kind": "transport",
+      "http_status": null,
+      "detail_error": null,
+      "message": "connection refused"
+    }
+  ],
+  "zebrobot_service": {
+    "service_commit": null,
+    "service_commit_dirty": null,
+    "consumer_schema_sha256": null
+  },
+  "subject": {
+    "subject_id": "c0a8e4d2-7f13-4b6a-8e25-91d3f6a7b240",
+    "subject_type": "individual",
+    "subject_count": 1
+  },
+  "members": null,
+  "usage_link_request": {
+    "method": "POST",
+    "path": "/usage-links",
+    "body": {
+      "recording_ref": "obsctx_3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f",
+      "ref_kind": "observation_context",
+      "recording_id": "2026_10_15_14_00_00",
+      "dish_id": "19220_1",
+      "fish_id": "c0a8e4d2-7f13-4b6a-8e25-91d3f6a7b240",
+      "fish_revision": null,
+      "unit_id": null,
+      "subject_count": 1,
+      "rig_id": "omnifin0",
+      "arena_id": "arena_1",
+      "started_at": "2026-10-15T14:02:11Z"
+    }
+  }
+}

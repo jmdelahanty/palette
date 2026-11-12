@@ -20,9 +20,14 @@ from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.import_video_metadata import probe_video_metadata
 from fisheye.shared.recording_preflight import preflight_gate_reason, read_manifest_payload
 from fisheye.shared.recording_manifest_context import validate_recording_manifest_context
+from fisheye.shared.recording_manifest_seal import (
+    SealedRecordingManifestError,
+    require_unsealed_recording_manifest,
+)
 from fisheye.shared.source_recording_identity import require_source_identity_text
 
 
+TOOL_NAME = "fisheye.utils.intake_video_only_recording"
 DEFAULT_RECORDING_TYPE = "behavior"
 DEFAULT_RECORDING_SUBTYPE = "free"
 DEFAULT_BEHAVIOR_MODE = "free"
@@ -236,6 +241,7 @@ def write_manifest(
         raise FileExistsError(
             f"Manifest already exists: {manifest_path}. Use --overwrite-manifest to replace it."
         )
+    require_unsealed_recording_manifest(manifest_path, tool=TOOL_NAME)
     recording_dir.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return manifest_path
@@ -579,7 +585,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         if manifest is not None:
             validate_recording_manifest_context(manifest)
         metadata = _build_metadata(args, recording_dir=recording_dir, video_path=video_path)
-    except ValueError as exc:
+        if args.write_manifest and args.overwrite_manifest:
+            # Refuse before any import or Zarr metadata write.
+            require_unsealed_recording_manifest(
+                recording_dir / "recording_manifest.json", tool=TOOL_NAME
+            )
+    except (ValueError, SealedRecordingManifestError) as exc:
         print(str(exc))
         return 1
 

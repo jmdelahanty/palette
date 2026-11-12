@@ -13,13 +13,23 @@ cannot be translated is left out and its reason is recorded under
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 import json
 import re
 from typing import Any, Callable, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 SUBJECT_TYPES = ("individual", "dish_group")
+# Fertilization dates are lab calendar days, so the recording day must be too:
+# an evening recording is already "tomorrow" in UTC (Citrus counts locally).
+# Owner's statement: metazebrobot docs/zebrobot_snapshot.md "Dates and times"
+# (commit 49cc930): calendar days are America/New_York; updated_at/created_at
+# are UTC without an offset; *_utc fields carry an explicit Z.
+LAB_TIMEZONE = ZoneInfo("America/New_York")
 LOOKUP_STATUSES = ("collected", "not_collected", "lookup_failed")
+# Citrus subject identity v4 registration record (agent-contracts PR 103, final d329774).
+REGISTRATION_MODES = ("existing", "created_at_start", "outbox")
+REGISTRATION_STATUSES = ("registered", "unverified", "queued", "failed")
 # The manual CLI's "group" means a dish group (decided 2026-10-06).
 _SUBJECT_TYPE_ALIASES = {"individual": "individual", "dish_group": "dish_group", "group": "dish_group"}
 _PARENT_WITH_SEX = re.compile(r"^(?P<identifier>.*?)\s*\[(?P<sex>[^\]]*)\]$")
@@ -32,7 +42,7 @@ _MANUAL_SOURCES = frozenset(
 )
 
 TEXT_FIELDS = ("species", "sex", "genotype", "line_strain", "cross_id", "dish_id", "dish_uuid",
-               "dish_updated_at", "mzb_fish_id", "mzb_fish_updated_at")
+               "dish_updated_at", "mzb_fish_id", "mzb_fish_updated_at", "mzb_fish_unit_id")
 
 
 def _text(value: Any) -> str | None:
@@ -100,6 +110,12 @@ def _fertilization_date(value: Any) -> date | None:
         return None
 
 
+def lab_recording_date(moment: datetime) -> date:
+    """The lab calendar day of an instant (naive instants are taken as lab-local)."""
+
+    return moment.astimezone(LAB_TIMEZONE).date() if moment.tzinfo is not None else moment.date()
+
+
 def _recording_date(value: Any) -> date | None:
     text = _text(value)
     if text is None:
@@ -108,9 +124,7 @@ def _recording_date(value: Any) -> date | None:
         moment = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
     except ValueError:
         return None
-    if moment.tzinfo is not None:
-        moment = moment.astimezone(timezone.utc)
-    return moment.date()
+    return lab_recording_date(moment)
 
 
 class _Builder:
@@ -145,6 +159,15 @@ class _Builder:
             self.unresolved[name] = f"unknown status: {status!r}"
             return
         self.fields[name] = {"status": status, "reason": _text(reason) or ""}
+
+    def registration(self, mode: Any, status: Any, reason: Any) -> None:
+        mode, status = _text(mode), _text(status)
+        if mode is None and status is None:
+            return
+        if mode not in REGISTRATION_MODES or status not in REGISTRATION_STATUSES:
+            self.unresolved["mzb_registration"] = f"unknown registration: {mode!r}/{status!r}"
+            return
+        self.fields["mzb_registration"] = {"mode": mode, "status": status, "reason": _text(reason) or ""}
 
     def subject_type(self, value: Any) -> None:
         text = _text(value)
@@ -192,7 +215,8 @@ def from_h5_attributes(attrs: Mapping[str, Any], subject_ids: Sequence[str] = ()
         out.text(name, attrs.get(name))
     out.text("cross_id", attrs.get("cross_id"), attrs.get("source_cross_id"))
     out.text("dish_id", attrs.get("dish_id"), attrs.get("source_dish_id"))
-    for name in ("subject_count", "dish_revision", "mzb_fish_revision"):
+    for name in ("subject_count", "dish_revision", "mzb_fish_revision",
+                 "mzb_dish_listed_fish_count_at_start"):
         out.integer(name, attrs.get(name))
     out.integer("source_dish_population_count",
                 attrs.get("source_dish_population_count"), attrs.get("fish_count"))
@@ -203,6 +227,10 @@ def from_h5_attributes(attrs: Mapping[str, Any], subject_ids: Sequence[str] = ()
             attrs.get("dpf_at_acquisition"), attrs.get("days_post_fertilization"))
     out.status("subject_lookup", attrs.get("subject_lookup_status"), attrs.get("subject_lookup_reason"))
     out.status("fish_reference", attrs.get("fish_reference_status"), attrs.get("fish_reference_reason"))
+    # v4: the registration record replaces fish_reference; the label is display only.
+    out.registration(attrs.get("mzb_registration_mode"), attrs.get("mzb_registration_status"),
+                     attrs.get("mzb_registration_reason"))
+    out.text("mzb_fish_subject_label", attrs.get("mzb_fish_subject_label"))
     return out.finish(subject_ids)
 
 
@@ -239,10 +267,45 @@ def from_manual_assertion(metadata: Mapping[str, Any], subject_ids: Sequence[str
     out.subject_type(metadata.get("subject_type"))
     for name in ("species", "sex", "genotype", "line_strain", "cross_id", "dish_id"):
         out.text(name, metadata.get(name))
+    # e.g. "recording_local_placeholder": ids that name no real animal.
+    out.text("identity_scope", metadata.get("identity_scope"))
     out.integer("subject_count", metadata.get("subject_count"))
     out.age(metadata.get("date_of_fertilization"), None,
             metadata.get("dpf_at_acquisition"), metadata.get("days_post_fertilization"))
     return out.finish(subject_ids)
+
+
+def from_declared_absence(metadata: Mapping[str, Any], subject_ids: Sequence[str] = ()) -> dict[str, Any]:
+    """A session that declares no subject: only the lookup statuses (no dish)."""
+
+    out = _Builder()
+    out.status("subject_lookup", metadata.get("subject_lookup_status"), metadata.get("subject_lookup_reason"))
+    out.status("fish_reference", metadata.get("fish_reference_status"), metadata.get("fish_reference_reason"))
+    return out.finish(subject_ids)
+
+
+def from_legacy_zebrobot_snapshot(
+    snapshot: Mapping[str, Any], subject_ids: Sequence[str] = ()
+) -> dict[str, Any]:
+    """The pre-``subject_metadata`` ``analysis_metadata`` ``zebrobot_snapshot`` attr.
+
+    Dish and cross fields are nested (``dish``/``cross``); the dish's
+    ``cross_id`` wins, the cross's ``line_strain`` and ``parents`` win.
+    """
+
+    dish = snapshot.get("dish") if isinstance(snapshot.get("dish"), Mapping) else {}
+    cross = snapshot.get("cross") if isinstance(snapshot.get("cross"), Mapping) else {}
+    flat = {
+        key: value for key, value in snapshot.items() if not isinstance(value, Mapping)
+    }
+    flat.update(cross)
+    flat.update(dish)
+    for name in ("line_strain", "parents"):
+        if cross.get(name) is not None:
+            flat[name] = cross[name]
+    if dish.get("cross_id") is None and cross.get("cross_id") is not None:
+        flat["cross_id"] = cross["cross_id"]
+    return from_h5_attributes(flat, subject_ids)
 
 
 def source_kind(metadata: Mapping[str, Any]) -> str:
@@ -259,6 +322,8 @@ TRANSLATORS: dict[str, Callable[..., dict[str, Any]]] = {
     "h5_attributes": from_h5_attributes,
     "orange_reference": from_orange_reference,
     "manual_assertion": from_manual_assertion,
+    "declared_absence": from_declared_absence,
+    "legacy_zebrobot_snapshot": from_legacy_zebrobot_snapshot,
 }
 
 
@@ -268,10 +333,15 @@ def canonical_subject_fields(metadata: Mapping[str, Any], subject_ids: Sequence[
 
 __all__ = [
     "LOOKUP_STATUSES",
+    "REGISTRATION_MODES",
+    "REGISTRATION_STATUSES",
     "SUBJECT_TYPES",
     "TRANSLATORS",
     "canonical_subject_fields",
+    "from_declared_absence",
     "from_h5_attributes",
+    "lab_recording_date",
+    "from_legacy_zebrobot_snapshot",
     "from_manual_assertion",
     "from_orange_reference",
     "parse_parents",

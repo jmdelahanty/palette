@@ -25,6 +25,9 @@ import numpy as np
 import zarr
 from rich.console import Console
 
+from fisheye.shared.citrus_camera_frame_id import (
+    parent_frame_index_from_citrus_camera_frame_id,
+)
 from fisheye.shared.citrus_enums import (
     EVENT_LOOM_AUTO_REPEAT,
     EVENT_LOOM_MANUAL_START,
@@ -112,6 +115,7 @@ from fisheye.analysis.stimulus_response_omr import (
     compute_global_omr_metrics,
     compute_step_omr_metrics,
 )
+from fisheye.shared.heading_convention import wrap_delta_radians
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +616,14 @@ def _decode_protocol_params_json(raw: Any) -> Dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _citrus_frame_attr(attrs: Any, *names: str, default: int) -> int:
+    for name in names:
+        if attrs.get(name) is not None:
+            frame = parent_frame_index_from_citrus_camera_frame_id(attrs[name])
+            return default if frame is None else frame
+    return default
+
+
 def _parse_canonical_stimulus_steps(stim_group: zarr.Group) -> List[ProtocolStep]:
     """Parse import-materialized ``stimulus_runs/<run>/steps`` metadata."""
 
@@ -629,8 +641,11 @@ def _parse_canonical_stimulus_steps(stim_group: zarr.Group) -> List[ProtocolStep
         index = _attr_int(attrs, "step_index", default=int(step_name.split("_", 1)[1]))
         mode_id = _attr_int(attrs, "stimulus_mode_id", default=0)
         mode_name = str(attrs.get("stimulus_mode", f"UNKNOWN_{mode_id}"))
-        start_frame = _attr_int(attrs, "start_camera_frame", "start_frame", default=0)
-        end_frame = _attr_int(attrs, "end_camera_frame", "end_frame", default=start_frame + 1)
+        # Imported step attrs keep Citrus's raw camera frame ids.
+        start_frame = _citrus_frame_attr(attrs, "start_camera_frame", "start_frame", default=0)
+        end_frame = _citrus_frame_attr(
+            attrs, "end_camera_frame", "end_frame", default=start_frame + 1
+        )
         duration_s = _attr_float(attrs, "duration_s", default=0.0)
         stimulus_params = _decode_protocol_params_json(attrs.get("raw_protocol_params_json"))
         for mode_group_name in ("moving_grating", "concentric_grating", "looming_dot"):
@@ -704,7 +719,8 @@ def parse_protocol_steps(
     for i in range(len(event_names)):
         name = str(event_names[i]).strip()
         si = int(step_indices[i])
-        cf = int(camera_frames[i])
+        # A step logged before Citrus knew any camera frame starts at frame 0.
+        cf = parent_frame_index_from_citrus_camera_frame_id(camera_frames[i]) or 0
         mode = int(stimulus_modes[i])
 
         if name == EVENT_STEP_START:
@@ -1122,8 +1138,7 @@ def compute_concentric_per_frame(
         angle_to_center_rad = np.arctan2(dy, dx)
         heading_rad = np.deg2rad(heading_deg)
         radial_diff = heading_rad - angle_to_center_rad
-        # Wrap to [-pi, pi].
-        radial_diff = (radial_diff + np.pi) % (2 * np.pi) - np.pi
+        radial_diff = wrap_delta_radians(radial_diff, dtype=radial_diff.dtype)
         radial_heading[i] = np.rad2deg(radial_diff)
 
         # Decompose speed into radial and tangential.
@@ -1313,8 +1328,8 @@ def _load_loom_onset_events(
     for i in range(len(event_names)):
         name = str(event_names[i]).strip()
         si = int(step_indices[i])
-        cf = int(camera_frames[i])
-        if si not in loom_step_indices:
+        cf = parent_frame_index_from_citrus_camera_frame_id(camera_frames[i])
+        if si not in loom_step_indices or cf is None:
             continue
         if name in (EVENT_LOOM_AUTO_REPEAT, EVENT_LOOM_MANUAL_START):
             onsets.setdefault(si, []).append(cf)

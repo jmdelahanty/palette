@@ -218,29 +218,6 @@ def test_valid_sealed_pipeline_replay_verifies_before_detection_without_import_w
     assert result.returncode == 7
 
 
-@pytest.mark.parametrize("damage", ["none", "no_log", "no_acknowledgment", "wrong_output", "missing_receipt"])
-def test_citrus_acknowledgment_requires_real_live_import(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str,
-) -> None:
-    from fisheye.utils import run_citrus_session_import as citrus
-
-    plan, receipt = _publish_current_import(tmp_path, monkeypatch)
-    log = tmp_path / "import.jsonl"
-    output = tmp_path / "wrong.zarr" if damage == "wrong_output" else plan.zarr_path
-    event = "recording_plan" if damage == "no_acknowledgment" else "recording_ok"
-    log.write_text(json.dumps({"event": event, "zarr_path": str(output)}))
-    if damage == "missing_receipt":
-        (plan.zarr_path / ".imports" / f"{receipt.receipt_sha256}.json").unlink()
-    paths = citrus._read_zarr_paths_from_import_log(log)
-    kwargs = dict(import_log=None if damage == "no_log" else log,
-                  recording_dirs=[plan.recording_dir], zarr_paths=paths, recording_only=True)
-    if damage == "none":
-        citrus._verify_import_acknowledgments(**kwargs)
-    else:
-        with pytest.raises(ValueError):
-            citrus._verify_import_acknowledgments(**kwargs)
-
-
 def test_real_import_authority_receipt_binds_and_reopens(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

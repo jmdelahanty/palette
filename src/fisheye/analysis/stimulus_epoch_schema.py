@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from fisheye.shared.citrus_camera_frame_id import CITRUS_CAMERA_FRAME_ID_RULE
 from fisheye.shared.zarr.analysis_array_contracts import AnalysisAuthorityRole
 from fisheye.shared.run_lineage_fingerprint import (
     LINEAGE_ATTR_SCHEMA_ID,
@@ -497,9 +498,12 @@ def _required_mapping_attr(
     name: str,
     *,
     exact_fields: set[str],
+    optional_fields: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     value = run_group.attrs.get(name)
-    if type(value) is not dict or set(value) != exact_fields:
+    if type(value) is not dict or not (
+        exact_fields <= set(value) <= exact_fields | optional_fields
+    ):
         raise ValueError(f"{name} must have the exact canonical field set.")
     canonical_json_bytes(value)
     return dict(value)
@@ -788,6 +792,9 @@ def build_stimulus_epoch_run_manifest(run_group: Any) -> dict[str, object]:
         run_group,
         "source_event_schema",
         exact_fields={"events_path", "event_name_fields", "frame_fields"},
+        # Absent on runs written before 2026-10-11, whose windows index raw
+        # Citrus camera frame ids and so start one frame late.
+        optional_fields=frozenset({"frame_index_rule"}),
     )
     source_refs = _required_mapping_attr(
         run_group,
@@ -846,6 +853,10 @@ def build_stimulus_epoch_run_manifest(run_group: Any) -> dict[str, object]:
         "triggering_camera_frame_id",
     ]:
         raise ValueError("source_event_schema frame fields mismatch.")
+    if source_event_schema.get(
+        "frame_index_rule", CITRUS_CAMERA_FRAME_ID_RULE
+    ) != CITRUS_CAMERA_FRAME_ID_RULE:
+        raise ValueError("source_event_schema frame_index_rule is not recognized.")
     if (
         _required_text_attr(run_group, "storage_candidate_source_run")
         != source_epoch_run

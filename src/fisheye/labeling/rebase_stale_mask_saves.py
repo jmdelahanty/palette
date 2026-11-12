@@ -17,9 +17,21 @@ at the current revision and stays the labeler's. Before re-saving, a
 ``rebased_unchanged_base`` and, per row, the original checkpoint id, saved
 time and revision and the pixel digest that was checked.
 
+Without a base backup (``--receipt-chain``), the proof is instead this
+store's own Apply receipts: every revision step from the checkpoints'
+revision to the run's current one must be one finished Apply on this run, of
+a different component, and the last must be the Apply the run names in
+``edit_revision_last_apply_id``. A subject-mask Apply rewrites only its own
+component's plane of each row (the other planes are written back as read,
+under the mask lock), so such a chain leaves this component's pixels as they
+were when the rows were saved. A step that this store did not apply (another
+store, a script, a gap) refuses the whole task. The rows' current pixel
+digests are recorded; there is no earlier copy to compare them with.
+
 Dry run by default. --execute refuses when the task is open, an Apply is
 unfinished, the backup's revision differs from the checkpoints', row
-identities differ, or any row's component pixels changed.
+identities differ, any row's component pixels changed, or (receipt chain) any
+revision step is unaccounted for or touched this component.
 """
 
 from __future__ import annotations
@@ -41,6 +53,8 @@ from fisheye.labeling.store_backup import DEFAULT_BACKUP_DIR, backup_labeling_st
 
 REBASE_EVENT = "rebase_stale_mask_saves"
 REBASE_REASON = "rebased_unchanged_base"
+PROOF_BASE_BACKUP = "base_backup"
+PROOF_RECEIPT_CHAIN = "apply_receipt_chain"
 REBASE_CLIENT_LABEL = "rebase_stale_mask_saves"
 _ROW_IDENTITY_ARRAYS = ("source_crop_row_ids", "source_refined_row_ids", "source_detect_row_index", "instance_key", "frame_indices")
 
@@ -59,8 +73,47 @@ def _digest(array: np.ndarray) -> str:
     return hashlib.sha256(json.dumps(list(values.shape)).encode() + values.tobytes()).hexdigest()
 
 
-def rebase_plan(store_path: Path, task_id: str, base_backup: Path) -> dict[str, object]:
-    """Read-only check of which stale checkpoints may be re-saved, with refusals."""
+def _receipt_chain(conn, scope, component, from_revision, current_revision, last_apply_id):
+    """This store's Applies on the run from ``from_revision`` to now, and why they do not prove it."""
+
+    receipts = {}
+    for r in conn.execute(
+        """
+        SELECT r.apply_id, r.task_id, r.component_name, r.state, r.secondary_effects_state,
+               r.edit_revision_before, r.edit_revision_after, r.applied_at_utc, t.scope_json
+        FROM labeling_checkpoint_apply_receipts r JOIN labeling_tasks t ON t.task_id = r.task_id;
+        """
+    ):
+        other = json.loads(r["scope_json"] or "{}")
+        if (other.get("zarr_path"), other.get("refined_run")) != (scope.get("zarr_path"), scope.get("refined_run")):
+            continue
+        if r["edit_revision_before"] is not None:
+            receipts.setdefault(int(r["edit_revision_before"]), []).append(dict(r))
+    chain, refusals = [], []
+    for step in range(from_revision, current_revision):
+        found = receipts.get(step, [])
+        if len(found) != 1:
+            refusals.append(f"revision {step} -> {step + 1} has {len(found)} Apply receipt(s) in this store, not 1")
+            continue
+        r = found[0]
+        if r["edit_revision_after"] is None or int(r["edit_revision_after"]) != step + 1:
+            refusals.append(f"Apply {r['apply_id']} does not go from revision {step} to {step + 1}")
+        if r["state"] != "applied" or r["secondary_effects_state"] != "complete":
+            refusals.append(f"Apply {r['apply_id']} is unfinished")
+        if r["component_name"] == component:
+            refusals.append(f"Apply {r['apply_id']} wrote {component} itself")
+        chain.append({k: r[k] for k in ("apply_id", "task_id", "component_name", "edit_revision_before", "edit_revision_after", "applied_at_utc")})
+    if chain and chain[-1]["apply_id"] != last_apply_id:
+        refusals.append("the run's last Apply is not the last receipt in this store's chain")
+    return chain, refusals
+
+
+def rebase_plan(store_path: Path, task_id: str, base_backup: Path | None) -> dict[str, object]:
+    """Read-only check of which stale checkpoints may be re-saved, with refusals.
+
+    ``base_backup=None`` proves the rows unchanged from this store's Apply
+    receipt chain instead of a copy of the run (see the module docstring).
+    """
 
     conn = sqlite3.connect(f"file:{Path(store_path)}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -113,37 +166,50 @@ def rebase_plan(store_path: Path, task_id: str, base_backup: Path) -> dict[str, 
                 (task_id,),
             )
         }
+        run_path = f"refined_subject_masks_runs/{scope.get('refined_run')}"
+        current = zarr.open_group(str(scope.get("zarr_path")), mode="r", use_consolidated=False)[run_path]
+        labels = [str(v) for v in current.attrs.get("mask_labels") or []]
+        component = str(task["component_name"])
+        current_revision = _revision(current)
+        chain = None
+        if base_backup is None:
+            stale_revisions = [int(c["target_edit_revision"] or 0) for c in checkpoints]
+            base_revision = min([r for r in stale_revisions if r != current_revision], default=current_revision)
+            chain, chain_refusals = _receipt_chain(
+                conn, scope, component, base_revision, current_revision, current.attrs.get("edit_revision_last_apply_id")
+            )
+            refusals.extend(chain_refusals)
+            base = None
     finally:
         conn.close()
 
-    run_path = f"refined_subject_masks_runs/{scope.get('refined_run')}"
-    current = zarr.open_group(str(scope.get("zarr_path")), mode="r", use_consolidated=False)[run_path]
-    base = zarr.open_group(str(base_backup), mode="r", use_consolidated=False)
-    labels = [str(v) for v in current.attrs.get("mask_labels") or []]
-    component = str(task["component_name"])
-    if labels != [str(v) for v in base.attrs.get("mask_labels") or []] or component not in labels:
-        raise RebaseRefused("The base backup's mask labels differ from the run's, or lack this component.")
+    if component not in labels:
+        raise RebaseRefused("The run's mask labels lack this component.")
+    if base_backup is not None:
+        base = zarr.open_group(str(base_backup), mode="r", use_consolidated=False)
+        if labels != [str(v) for v in base.attrs.get("mask_labels") or []]:
+            raise RebaseRefused("The base backup's mask labels differ from the run's.")
+        base_revision = _revision(base)
+        if tuple(current["masks_roi"].shape) != tuple(base["masks_roi"].shape):
+            refusals.append("the base backup's masks_roi shape differs from the run's")
+        for name in _ROW_IDENTITY_ARRAYS:
+            if (name in current) != (name in base) or (
+                name in current and not np.array_equal(np.asarray(current[name][:]), np.asarray(base[name][:]))
+            ):
+                refusals.append(f"row identity array {name} differs between the run and the base backup")
     comp = labels.index(component)
-    current_revision, base_revision = _revision(current), _revision(base)
-    if tuple(current["masks_roi"].shape) != tuple(base["masks_roi"].shape):
-        refusals.append("the base backup's masks_roi shape differs from the run's")
-    for name in _ROW_IDENTITY_ARRAYS:
-        if (name in current) != (name in base) or (
-            name in current and not np.array_equal(np.asarray(current[name][:]), np.asarray(base[name][:]))
-        ):
-            refusals.append(f"row identity array {name} differs between the run and the base backup")
 
     stale, conflicts, other_revision = [], [], []
     for checkpoint in checkpoints:
         revision = int(checkpoint["target_edit_revision"] or 0)
         if revision == current_revision:
             continue
-        if revision != base_revision:
+        if revision != base_revision and not (base is None and base_revision < revision < current_revision):
             other_revision.append(int(checkpoint["roi_idx"]))
             continue
         roi = int(checkpoint["roi_idx"])
-        base_sha = _digest(base["masks_roi"][roi, comp])
         current_sha = _digest(current["masks_roi"][roi, comp])
+        base_sha = current_sha if base is None else _digest(base["masks_roi"][roi, comp])
         row = {
             "roi_idx": roi,
             "checkpoint_id": checkpoint["checkpoint_id"],
@@ -157,7 +223,7 @@ def rebase_plan(store_path: Path, task_id: str, base_backup: Path) -> dict[str, 
     if conflicts:
         refusals.append(f"{len(conflicts)} row(s) whose {component} pixels changed since the save; not re-saving")
     if other_revision:
-        refusals.append(f"{len(other_revision)} stale row(s) at a revision the base backup does not match")
+        refusals.append(f"{len(other_revision)} stale row(s) at a revision the {'proof' if base is None else 'base backup'} does not match")
     if not stale and not conflicts:
         refusals.append("no stale checkpoints to re-save")
     return {
@@ -167,7 +233,9 @@ def rebase_plan(store_path: Path, task_id: str, base_backup: Path) -> dict[str, 
         "assignee": task["assignee_user"],
         "zarr_path": scope.get("zarr_path"),
         "refined_run": scope.get("refined_run"),
-        "base_backup": str(base_backup),
+        "proof": PROOF_BASE_BACKUP if base_backup is not None else PROOF_RECEIPT_CHAIN,
+        "base_backup": None if base_backup is None else str(base_backup),
+        "receipt_chain": chain,
         "base_revision": base_revision,
         "current_revision": current_revision,
         "stale_rows": stale,
@@ -180,7 +248,7 @@ def rebase_plan(store_path: Path, task_id: str, base_backup: Path) -> dict[str, 
 def rebase_stale_saves(
     store_path: Path,
     task_id: str,
-    base_backup: Path,
+    base_backup: Path | None,
     *,
     actor: str,
     backup_dir: Path | None = None,
@@ -197,7 +265,9 @@ def rebase_stale_saves(
         rows = plan["stale_rows"]
         audit = {
             "reason": REBASE_REASON,
+            "proof": plan["proof"],
             "base_backup": plan["base_backup"],
+            "receipt_chain": plan["receipt_chain"],
             "from_revision": plan["base_revision"],
             "to_revision": plan["current_revision"],
             "store_backup_path": (backup or {}).get("backup_path"),
@@ -258,7 +328,12 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--store", type=Path, required=True)
     parser.add_argument("--task-id", required=True)
-    parser.add_argument("--base-backup", type=Path, required=True, help="Copy of the run at the checkpoints' revision.")
+    proof = parser.add_mutually_exclusive_group(required=True)
+    proof.add_argument("--base-backup", type=Path, help="Copy of the run at the checkpoints' revision.")
+    proof.add_argument(
+        "--receipt-chain", action="store_true",
+        help="Prove the rows unchanged from this store's Apply receipts instead of a copy of the run.",
+    )
     parser.add_argument("--actor", required=True)
     parser.add_argument("--execute", action="store_true")
     return parser

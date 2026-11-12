@@ -38,6 +38,11 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         "--status", choices=["active", "missing"], help="Filter dataset status."
     )
     parser.add_argument(
+        "--include-missing",
+        action="store_true",
+        help="Include datasets whose Zarr no longer exists (status 'missing'); hidden by default.",
+    )
+    parser.add_argument(
         "--path-contains", type=str, help="Substring match for zarr_path."
     )
 
@@ -267,6 +272,10 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
         add_clause("AND d.dataset_id = ?", args.dataset_id)
     if args.status:
         add_clause("AND d.status = ?", args.status)
+    elif not getattr(args, "include_missing", False):
+        # Registry rows for deleted Zarrs stay (lineage/provenance) but are
+        # hidden unless asked for: --status missing or --include-missing.
+        add_clause("AND (d.status IS NULL OR d.status != ?)", "missing")
     if args.path_contains:
         add_clause("AND d.zarr_path LIKE ?", f"%{args.path_contains}%")
 

@@ -123,7 +123,8 @@ def test_valid_clock_record_preserves_golden_digest(tmp_path, monkeypatch):
         },
     )
     clock._validate_source(source, expected_frame_count=2)
-    assert clock.acquisition_frame_clock_sha256(clock._build_record(source)) == (
+    # v1 rules stay byte-for-byte: this digest predates frame clock v2.
+    assert clock.acquisition_frame_clock_sha256(clock._build_record(source, 1)) == (
         "621faa07511174f0bbc02f0e6703430061b8710cebcb3c2451a7ed7ffc204771"
     )
 

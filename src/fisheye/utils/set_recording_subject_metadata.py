@@ -31,6 +31,7 @@ from fisheye.shared.experiment_setup import (
 )
 from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
 from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.recording_manifest_seal import require_unsealed_recording_manifest
 from fisheye.shared.subject_metadata import (
     MissingSubjectMetadataError,
     build_subject_metadata_record,
@@ -99,7 +100,7 @@ def _setup_source() -> dict[str, str]:
 
 
 def _desired(metadata: Mapping[str, Any]) -> dict[str, Any]:
-    subject_record = build_subject_metadata_record(metadata)
+    subject_record = build_subject_metadata_record(metadata, translator="manual_assertion")
     subject_digest = subject_metadata_sha256(subject_record)
     subject_run = f"subject_metadata_{subject_digest[:16]}"
     subject_ref = f"analysis/subject_metadata_runs/{subject_run}"
@@ -234,6 +235,7 @@ def _patch_manifest(plan: Mapping[str, Any], *, repair_id: str, reason: str) -> 
             "updated": dict(fields),
         }
     )
+    require_unsealed_recording_manifest(manifest_path, tool=TOOL_NAME)
     write_json_atomic(manifest_path, payload)
 
 
@@ -314,6 +316,7 @@ def apply_plan(
         metadata,
         source_artifact=artifact,
         provenance_command=TOOL_NAME,
+        translator="manual_assertion",
     )
     setup_record = build_experiment_setup_record(
         metadata,

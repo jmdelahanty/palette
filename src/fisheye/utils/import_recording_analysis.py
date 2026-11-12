@@ -8,6 +8,8 @@ This module intentionally excludes detect/refine orchestration. Use
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import stat
 import subprocess
@@ -24,8 +26,7 @@ from fisheye.registry.recording_identity_authority import (
 )
 from fisheye.shared.acquisition_frame_clock import (
     import_acquisition_frame_clock,
-    load_clipped_acquisition_frame_clock_source,
-    publish_acquisition_frame_clock,
+    publish_clipped_acquisition_frame_clock,
 )
 from fisheye.shared.acquisition_video_streams import (
     resolve_acquisition_manifest_file,
@@ -57,6 +58,7 @@ from fisheye.shared.clipped_video_collection import (
     SOURCE_VIDEO_COLLECTION_LAYOUT,
     build_clipped_video_collection_metadata,
 )
+from fisheye.shared.recording_manifest_seal import is_sealed_recording_manifest
 from fisheye.shared.recording_preflight import preflight_gate_reason
 from fisheye.shared.recording_manifest_context import (
     manifest_context_attrs,
@@ -73,7 +75,13 @@ from fisheye.shared.run_provenance import git_identity
 from fisheye.shared.unified_h5 import PROFILE as UNIFIED_H5_PROFILE
 from fisheye.shared.unified_h5 import UnifiedH5ContractError, declared_unified_profile
 from fisheye.shared.unified_h5.citrus_subject_snapshot import SNAPSHOT_PATH as CITRUS_SNAPSHOT_PATH
-from fisheye.shared.unified_h5.citrus_subject_snapshot import admit_subject_snapshot, subject_attributes
+from fisheye.shared.unified_h5.citrus_subject_snapshot import (
+    admit_subject_snapshot,
+    check_usage_link_recording_ref,
+    subject_attributes,
+)
+from fisheye.shared.unified_h5.metadata import string_attributes
+from fisheye.shared.unified_h5.schema import contract as unified_contract
 from fisheye.shared.unified_h5.reference import new_native_run_name, open_unified_source
 from fisheye.shared.source_recording_identity import (
     SOURCE_ANALYSIS_CLASSIFICATION,
@@ -85,6 +93,7 @@ from fisheye.shared.source_recording_identity import (
     load_source_recording_identity_profile,
     load_strict_json_object,
 )
+from fisheye.shared.subject_fields import from_orange_reference
 from fisheye.shared.subject_metadata import (
     MissingSubjectMetadataError,
     normalize_subject_metadata,
@@ -272,25 +281,28 @@ def _producer_video_metadata(plan: RecordingAnalysisPlan) -> dict[str, Any]:
     return {key: value for key, value in producer.items() if value is not None}
 
 
-def stimulus_runs_present(zarr_path: Path) -> bool:
+def _stimulus_runs(zarr_path: Path) -> tuple[Any, Any] | None:
     try:
         root = zarr.open(str(zarr_path), mode="r")
     except Exception:
-        return False
+        return None
     analysis = root.get("analysis")
     if analysis is None:
-        return False
+        return None
     stim = analysis.get("stimulus_runs")
     if stim is None:
-        return False
-    # Only the maintained completion contract can justify reuse. Historical
-    # group presence is not an ingestion completion signal.
-    if resolve_latest_complete_run_name(stim, legacy_default=False) is not None:
-        return True
-    # A sealed unified reference run is complete but deliberately not selector
-    # eligible (no adapter yet), so it never becomes "latest". Its completion
-    # and an openable reference still satisfy the intake contract.
-    for name in stim.group_keys():
+        return None
+    return root, stim
+
+
+def admitted_unified_native_run(zarr_path: Path) -> str | None:
+    """Newest sealed unified reference run that is complete and openable."""
+
+    found = _stimulus_runs(zarr_path)
+    if found is None:
+        return None
+    root, stim = found
+    for name in sorted(stim.group_keys(), reverse=True):
         run = stim.get(name)
         if run is not None and run.attrs.get("source_profile") == UNIFIED_H5_PROFILE and is_run_complete_in_parent(
             stim, run, legacy_default=False
@@ -299,8 +311,43 @@ def stimulus_runs_present(zarr_path: Path) -> bool:
                 open_unified_source(root, run_name=name)
             except (UnifiedH5ContractError, KeyError, ValueError):
                 continue
-            return True
-    return False
+            return name
+    return None
+
+
+def stimulus_runs_present(zarr_path: Path) -> bool:
+    found = _stimulus_runs(zarr_path)
+    if found is None:
+        return False
+    _root, stim = found
+    # Only the maintained completion contract can justify reuse. Historical
+    # group presence is not an ingestion completion signal.
+    if resolve_latest_complete_run_name(stim, legacy_default=False) is not None:
+        return True
+    # A sealed unified reference run is complete but deliberately not selector
+    # eligible (no adapter yet), so it never becomes "latest". Its completion
+    # and an openable reference still satisfy the intake contract.
+    return admitted_unified_native_run(zarr_path) is not None
+
+
+_REALTIME_RECORDS: dict[tuple[str, str], Optional[dict]] = {}
+
+
+def realtime_products_record(recording_dir: Path, manifest: Mapping[str, Any]) -> Optional[dict]:
+    """Orange realtime products validated for this recording (memoized per process).
+
+    Preflight and archive writing both need it; the event logs are scanned once.
+    """
+
+    from fisheye.shared.acquisition_realtime_products import build_realtime_products_record
+
+    key = (
+        str(Path(recording_dir).resolve()),
+        hashlib.sha256(json.dumps(manifest, sort_keys=True, default=str).encode()).hexdigest(),
+    )
+    if key not in _REALTIME_RECORDS:
+        _REALTIME_RECORDS[key] = build_realtime_products_record(Path(recording_dir), manifest)
+    return _REALTIME_RECORDS[key]
 
 
 def validate_recording_import_plan(
@@ -344,6 +391,9 @@ def validate_recording_import_plan(
         if plan.cam_video is None:
             raise ValueError("single-video recording plan requires its source video")
         _producer_video_metadata(plan)
+    require_transfer_v2_h5_is_unified(plan, manifest)
+    # Orange's realtime-products declaration and event logs (refuses on contradiction).
+    realtime_products_record(plan.recording_dir, manifest)
     try:
         plan.zarr_path.resolve().relative_to(plan.recording_dir.resolve())
     except ValueError as exc:
@@ -357,6 +407,40 @@ def validate_recording_import_plan(
         ):
             raise SourceRecordingIdentityError("legacy intake is forbidden")
     return manifest, identity
+
+
+def require_transfer_v2_h5_is_unified(
+    plan: RecordingAnalysisPlan, manifest: Mapping[str, Any]
+) -> None:
+    """Refuse a sealed transfer-v2 parent whose H5 would take the legacy route.
+
+    New transfer-v2 deliveries carry a sealed unified H5 or no H5 (intake
+    single-writer decision 1, 2026-10-07). The organizer already refuses a
+    legacy H5 while planning; this re-checks the organized parent before any
+    analysis-Zarr write, so a legacy H5 can never reach the legacy stimulus or
+    subject import through new intake. Full unified admission (receipt and
+    byte digest) stays with the native importer. Parents without the
+    transfer-v2 seal, and legacy H5 imports outside intake, are unaffected.
+    """
+
+    if plan.h5_path is None or not is_sealed_recording_manifest(manifest):
+        return
+    profile = stimulus_h5_unified_profile(plan.h5_path)
+    if profile is None:
+        raise ValueError(
+            "legacy_h5_refused_for_transfer_v2: a new transfer-v2 recording needs "
+            f"a sealed unified H5 or no H5; {plan.h5_path} declares no unified profile"
+        )
+    if profile != UNIFIED_H5_PROFILE:
+        raise ValueError(f"unsupported_unified_h5_profile:{profile}")
+    if (
+        plan.finalization_receipt_path is None
+        and _manifest_finalization_receipt(plan.recording_dir) is None
+    ):
+        raise ValueError(
+            "unified_h5_requires_finalization_receipt: the transfer-v2 parent "
+            "manifest declares no H5 finalization receipt"
+        )
 
 
 def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, object]]:
@@ -433,6 +517,13 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, o
         attrs.setdefault("source_layout", "rolling_clips")
         attrs.setdefault("source_frame_index_path", str(indexes["recording_frame_index"]))
         attrs.setdefault("source_recording_frame_index_path", str(indexes["recording_frame_index"]))
+        # The registry projects datasets.source_frame_index_schema from this
+        # attribute; take it from the manifest the index builder wrote.
+        index_manifest = load_strict_json_object(indexes["recording_frame_index_manifest"])
+        index_schema = index_manifest.get("frame_index_schema_version")
+        if not isinstance(index_schema, str) or not index_schema.strip():
+            raise ValueError("recording frame index manifest declares no frame_index_schema_version")
+        attrs.setdefault("source_frame_index_schema", index_schema)
     else:
         assert plan.cam_video is not None
         attrs.setdefault("source_video", plan.cam_video.name)
@@ -452,7 +543,13 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, o
         attrs["source_h5_path"] = str(plan.h5_path)
         attrs.pop("experiment_context_status_detail", None)
     root.attrs.put(attrs)
-    return write_acquisition_video_stream_inventory(root, plan.recording_dir, manifest)
+    inventory = write_acquisition_video_stream_inventory(root, plan.recording_dir, manifest)
+    record = realtime_products_record(plan.recording_dir, manifest)
+    if record is not None:
+        from fisheye.shared.acquisition_realtime_products import write_realtime_products_record
+
+        write_realtime_products_record(root, record)
+    return inventory
 
 
 def apply_video_metadata(
@@ -562,12 +659,10 @@ def apply_acquisition_frame_clock(plan: RecordingAnalysisPlan) -> dict[str, obje
         root, expected_camera_id=camera_id,
     )
     if plan.recording_layout == SOURCE_VIDEO_COLLECTION_LAYOUT:
-        source = load_clipped_acquisition_frame_clock_source(
-            plan.recording_dir, camera_id=camera_id,
-            frame_index_path=frame.record.source_video_metadata["locator"]["relative_path"],
-            expected_frame_count=frame.record.source_total_frames,
+        resolved = publish_clipped_acquisition_frame_clock(
+            root, recording_dir=plan.recording_dir, camera_id=camera_id,
+            acquisition_record=frame.record,
         )
-        resolved = publish_acquisition_frame_clock(root, source)
     else:
         resolved = import_acquisition_frame_clock(
             root, recording_dir=plan.recording_dir, camera_id=camera_id,
@@ -637,7 +732,7 @@ def import_experiment_setup(plan: RecordingAnalysisPlan) -> Optional[dict[str, A
         return None
     root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
     return _publish_subject_and_setup(
-        root, subject_metadata, source_h5_path=plan.h5_path
+        root, subject_metadata, source_h5_path=plan.h5_path, translator="h5_attributes"
     )
 
 
@@ -647,8 +742,9 @@ def import_zebrobot_subject_reference(
     """Resolve Orange's sealed Zebrobot reference for this parent at intake.
 
     A declared absence is recorded on the archive root; a collected reference
-    is fetched, verified and published as subject metadata only when no H5
-    subject metadata exists (recording-only). With H5 metadata present it is a
+    is fetched, verified and published as subject metadata only when no subject
+    record exists or the existing one is a declared absence. Any other record
+    (an H5 one, with or without a dish) stays authoritative; Orange is then a
     cross-check: a differing ``dish_uuid`` refuses. ``ZebrobotUnavailable``
     propagates so the import fails and can be retried, never finalized empty.
     """
@@ -667,42 +763,169 @@ def import_zebrobot_subject_reference(
     # exists: a stimulus session's subject record comes from the Citrus H5.
     root.attrs["orange_subject_reference_status"] = resolved.status
     root.attrs["orange_subject_reference_reason"] = resolved.reason
-    if resolved.status != "collected":
-        return {"status": resolved.status, "reason": resolved.reason}
     try:
         existing = resolve_subject_metadata(root, allow_legacy=False)
     except MissingSubjectMetadataError:
         existing = None
-    if existing is not None:
-        # dish_uuid when both sides have one; else the operator-declared dish_id
-        # (a Citrus lookup can fail and still record dish_id).
-        h5_uuid = existing.metadata.get("dish_uuid")
-        h5_dish = existing.metadata.get("dish_id")
-        if h5_uuid is not None:
-            field, h5_value = "dish_uuid", h5_uuid
-        elif h5_dish is not None:
-            field, h5_value = "dish_id", h5_dish
-        else:
-            field, h5_value = None, None
-        if field is not None and str(h5_value) != str(resolved.metadata[field]):
-            raise ValueError(
-                f"zebrobot_dish_mismatch: Orange declared {field} "
-                f"{resolved.metadata[field]!r} but the H5 records {h5_value!r}"
+    if resolved.status != "collected":
+        if existing is None:  # a declared absence is recorded, never filled in
+            publish_subject_metadata(
+                root,
+                {"subject_lookup_status": resolved.status, "subject_lookup_reason": resolved.reason},
+                source_artifact=resolved.source,
+                translator="declared_absence",
             )
-        return {"status": "collected", "published": False, "cross_checked": field,
+        return {"status": resolved.status, "reason": resolved.reason}
+    if existing is not None and existing.record.get("subject_translator") != "declared_absence":
+        # A declared subject record is authoritative, with or without a dish
+        # (a legacy or pre-contract H5 can carry ids and subject_count only).
+        # Orange is a cross-check when there is a dish to compare.
+        if existing.subject.get("dish_uuid") or existing.subject.get("dish_id"):
+            origin = _orange_reference_origin(plan.recording_dir, manifest, reference)
+            checked = _cross_check_h5_subject(
+                existing.subject, resolved.metadata, origin=origin["orange_reference_origin"]
+            )
+            root.attrs["orange_subject_reference_origin"] = origin
+            if "dish_disagreement" in checked:
+                root.attrs["orange_subject_reference_dish_disagreement"] = checked["dish_disagreement"]
+            return {"status": "collected", "published": False, **checked, **origin,
+                    **resolved.source}
+        return {"status": "collected", "published": False, "cross_checked": None,
                 **resolved.source}
+    # No subject record, or a declared absence (a Citrus v3 session without a
+    # dish): Orange's reference supplies the subject.
     if "subject_count" in resolved.metadata:
         setup = _publish_subject_and_setup(
-            root, resolved.metadata, source_artifact=resolved.source
+            root, resolved.metadata, source_artifact=resolved.source,
+            translator="orange_reference",
         )
         return {"status": "collected", "published": True,
                 "experiment_setup": True, **setup, **resolved.source}
     authority = publish_subject_metadata(
-        root, resolved.metadata, source_artifact=resolved.source
+        root, resolved.metadata, source_artifact=resolved.source, translator="orange_reference",
     )
     root.attrs["experiment_setup_status"] = "subject_count_not_declared"
     return {"status": "collected", "published": True, "experiment_setup": False,
             "subject_metadata_run": authority.run_name, **resolved.source}
+
+
+ORANGE_REFERENCE_FROM_APP_CONFIG_DEFAULT = "app_config_default"
+# Orange reference versions whose GUI could set only a rig-wide default dish.
+# A later version records per-entry provenance, so every entry must agree again.
+_DEFAULT_PLACEHOLDER_REFERENCE_VERSIONS = frozenset({2})
+# Written by Orange GUI recordings from 3b9a754 on, with the per-camera panel.
+ORANGE_SUBJECT_CONFIRMATION = "subject_confirmation.json"
+
+
+def _orange_reference_origin(
+    recording_dir: Path, manifest: Mapping[str, Any], reference: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Whether Orange's reference for this camera came from its app_config default.
+
+    Orange resolves ``recording.subject_references`` per camera: an entry under
+    ``cameras.<serial>`` wins, otherwise ``default``. Before per-entry
+    provenance (reference v2), the GUI edited only the default, so a default is
+    a rig-wide configuration placeholder, not an observation of this arena.
+    That is proven only from the sealed ``recording_snapshot_start.json``
+    (digest re-checked against the sealed inventory): the loaded app_config has
+    no entry for this camera, its default names the reference's ``dish_id``,
+    and the start snapshot's own reference for the camera equals the manifest's.
+    A sealed ``subject_confirmation.json`` means the operator confirmed each
+    camera's dish, so nothing is a placeholder. Anything else keeps the strict
+    cross-check.
+    """
+
+    from fisheye.shared.acquisition_realtime_products import sealed_parent_files
+
+    unproven = {"orange_reference_origin": "unproven"}
+    if reference.get("schema_version") not in _DEFAULT_PLACEHOLDER_REFERENCE_VERSIONS:
+        return unproven
+    camera = str(manifest.get("camera_id") or "")
+    sealed = sealed_parent_files(manifest) or {}
+    if ORANGE_SUBJECT_CONFIRMATION in sealed:
+        # Orange 3b9a754+: the operator confirmed every camera's dish at start
+        # (a blank camera row deliberately follows the default), so it is an
+        # observation that must agree.
+        return {"orange_reference_origin": "operator_confirmed"}
+    item = sealed.get("recording_snapshot_start.json")
+    if item is None:
+        return unproven
+    path = Path(recording_dir) / item["relative_path"]
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != item["sha256"] or len(data) != item["size_bytes"]:
+        raise ValueError(f"recording_snapshot_start.json differs from the sealed inventory: {path}")
+    snapshot = json.loads(data)
+    session = snapshot.get("session") if isinstance(snapshot.get("session"), Mapping) else {}
+    declared = (session.get("subject_references") or {}).get(camera)
+    if declared is not None and declared != reference:
+        return unproven
+    app_config = (session.get("effective_configuration") or {}).get("app_config") or {}
+    if app_config.get("status") != "loaded":
+        return unproven
+    configured = ((app_config.get("contents") or {}).get("recording") or {}).get("subject_references")
+    if not isinstance(configured, Mapping):
+        return unproven
+    cameras = configured.get("cameras") or {}
+    default = configured.get("default")
+    dish = reference.get("dish") if isinstance(reference.get("dish"), Mapping) else {}
+    if (
+        camera in cameras
+        or not isinstance(default, Mapping)
+        or default.get("dish_id") != dish.get("dish_id")
+    ):
+        return unproven
+    return {
+        "orange_reference_origin": ORANGE_REFERENCE_FROM_APP_CONFIG_DEFAULT,
+        "orange_app_config_sha256": app_config.get("sha256"),
+    }
+
+
+def _cross_check_h5_subject(
+    h5: Mapping[str, Any], orange: Mapping[str, Any], *, origin: str = "unproven"
+) -> dict[str, Any]:
+    """Orange's reference against the H5 subject (authoritative for bound sessions).
+
+    The dish must match: ``dish_uuid`` when the H5 has one, else the declared
+    ``dish_id`` (a Citrus lookup can fail and still record it). Sex and
+    genotype must match too, unless MetaZebrobot shows the dish was edited
+    since recording (then Orange's intake copy may legitimately differ).
+    A reference proven to be Orange's v2 app_config default is a placeholder:
+    a differing dish is returned as a recorded disagreement, not refused, and
+    its biology is not compared (it describes another dish).
+    """
+
+    if h5.get("dish_uuid"):
+        field = "dish_uuid"
+    else:
+        field = "dish_id"
+    if str(h5[field]) != str(orange.get(field)):
+        if origin == ORANGE_REFERENCE_FROM_APP_CONFIG_DEFAULT:
+            return {
+                "cross_checked": field,
+                "dish_disagreement": {
+                    "field": field,
+                    "h5": str(h5[field]),
+                    "orange": None if orange.get(field) is None else str(orange.get(field)),
+                    "orange_dish_id": orange.get("dish_id"),
+                    "resolution": "h5_authoritative_orange_reference_is_app_config_default",
+                },
+            }
+        raise ValueError(
+            f"zebrobot_dish_mismatch: Orange declared {field} "
+            f"{orange.get(field)!r} but the H5 records {h5[field]!r}"
+        )
+    canonical = from_orange_reference(orange)
+    differing = [
+        name for name in ("sex", "genotype")
+        if h5.get(name) and canonical.get(name) and h5[name] != canonical[name]
+    ]
+    if differing and not orange.get("dish_changed_since_recording"):
+        raise ValueError(
+            "zebrobot_subject_mismatch: "
+            + ", ".join(f"{name} H5={h5[name]!r} Zebrobot={canonical[name]!r}" for name in differing)
+            + " for an unchanged dish"
+        )
+    return {"cross_checked": field, "biology_differs_after_dish_edit": differing}
 
 
 def require_unified_source_matches_recording(
@@ -737,8 +960,9 @@ def project_unified_subject_metadata(
     Reads ``/metadata/subject`` through the sealed reference's verified
     attribute snapshot (not by reopening the raw H5 unchecked) and publishes it through the same subject/setup owners as legacy import,
     to the same locations. Missing fields such as ``subject_count`` refuse;
-    nothing is inferred. ``subject_id`` is the Citrus-local identity and
-    legacy ``fish_id`` its alias; a source carrying both refuses.
+    nothing is inferred. ``subject_id`` is the Citrus-local identity in
+    snapshot v3 and the MetaZebrobot fish UUID for a v4 individual; legacy
+    ``fish_id`` is its alias, and a source carrying both refuses.
     """
 
     read_root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=True)
@@ -757,15 +981,22 @@ def project_unified_subject_metadata(
             raise
         snapshot = None
     snapshot_admission = admit_subject_snapshot(snapshot, attributes)
-    if snapshot_admission["citrus_snapshot_status"] == "admitted" and "subject_id" not in attributes:
-        # v3 writes /metadata/subject in every session; with no dish declared it
-        # holds only lookup statuses (declared absence). Record them, publish no
-        # subject record, so an Orange reference for the camera can still publish.
+    if snapshot_admission.get("citrus_snapshot_schema_version") == 4:
+        check_usage_link_recording_ref(snapshot, **_sealed_recording_refs(source_reader))
+    if snapshot_admission["citrus_snapshot_status"] == "admitted" and "subject_type" not in attributes:
+        # v3/v4 write /metadata/subject in every session; with no dish declared it
+        # holds only lookup statuses (declared absence). A v4 dish_group declares
+        # a dish and a count but no subject_id, so it is not an absence. Publish them as a
+        # statuses-only record with no experiment setup; an Orange reference for
+        # the camera can still supply the dish (import_zebrobot_subject_reference).
         root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
-        for name in ("subject_lookup_status", "subject_lookup_reason",
-                     "fish_reference_status", "fish_reference_reason"):
-            if name in attributes:
-                root.attrs[f"citrus_{name}"] = attributes[name]
+        publish_subject_metadata(
+            root, attributes, translator="declared_absence",
+            source_artifact={**snapshot_admission, "kind": "unified_native_subject_metadata",
+                             "group_path": "/metadata/subject", "native_run_path": run_path,
+                             "unified_reference_sha256": str(source_reader.reference_sha256),
+                             "source_profile": UNIFIED_H5_PROFILE},
+        )
         return None
     subject_metadata = normalize_subject_metadata(attributes)
     if not subject_metadata:
@@ -780,7 +1011,28 @@ def project_unified_subject_metadata(
         "source_profile": UNIFIED_H5_PROFILE,
     }
     root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
-    return _publish_subject_and_setup(root, subject_metadata, source_artifact=source)
+    return _publish_subject_and_setup(
+        root, subject_metadata, source_artifact=source, translator="h5_attributes"
+    )
+
+
+def _sealed_recording_refs(source_reader: Any) -> dict[str, Optional[str]]:
+    """The file's own recording refs: its bound observation context (from the
+    digest-covered association claims; None when unbound) and Citrus session."""
+
+    claims_path = unified_contract("experimental_h5_identity_claims_v1.json")["component"]["claims_path"]
+    try:
+        claims = source_reader.read_json(claims_path)
+    except UnifiedH5ContractError as exc:
+        if "unified_dataset_not_admitted" not in str(exc):
+            raise
+        claims = None
+    session = source_reader.typed_attributes("/metadata/session")
+    uuid = session.get("session_uuid")
+    return {
+        "observation_context_id": None if claims is None else claims.get("observation_context_id"),
+        "session_uuid": None if uuid is None else string_attributes({"session_uuid": uuid})["session_uuid"],
+    }
 
 
 def _publish_subject_and_setup(
@@ -789,12 +1041,14 @@ def _publish_subject_and_setup(
     *,
     source_h5_path: Path | None = None,
     source_artifact: Mapping[str, Any] | None = None,
+    translator: str | None = None,
 ) -> dict[str, Any]:
     subject_authority = publish_subject_metadata(
         root,
         subject_metadata,
         source_h5_path=source_h5_path,
         source_artifact=source_artifact,
+        translator=translator,
     )
     record = build_experiment_setup_record(
         subject_metadata,
@@ -1205,6 +1459,14 @@ def process_recording_import(
                 zarr_path=str(plan.zarr_path),
                 reason="stimulus_runs already present",
             )
+            # A retry after a sealed native import still projects the subject
+            # from that run, exactly as the first attempt would have.
+            native_run = admitted_unified_native_run(plan.zarr_path) if unified_h5 else None
+            if unified_h5 and native_run is None:
+                return RecordingImportResult(
+                    ok=False, failed_step="import_experiment_setup",
+                    error="unified H5 intake found no admitted native run to project the subject from",
+                )
         else:
             stim_opts = opts
             if unified_h5:
@@ -1232,32 +1494,29 @@ def process_recording_import(
                         else "stimulus import failed"
                     ),
                 )
-            if unified_h5:
-                try:
-                    require_unified_source_matches_recording(
-                        plan, str(stim_opts.stimulus_run_name)
-                    )
-                except Exception as exc:
-                    return RecordingImportResult(
-                        ok=False, failed_step="unified_h5_recording_identity", error=str(exc)
-                    )
-                try:
-                    setup = project_unified_subject_metadata(
-                        plan, str(stim_opts.stimulus_run_name)
-                    )
-                except Exception as exc:
-                    return RecordingImportResult(
-                        ok=False, failed_step="import_experiment_setup", error=str(exc)
-                    )
-                _log(
-                    logger,
-                    "experiment_setup_imported" if setup else "subject_metadata_absent",
-                    recording_dir=str(plan.recording_dir),
-                    zarr_path=str(plan.zarr_path),
-                    source="unified_native_candidate",
-                    native_run=str(stim_opts.stimulus_run_name),
-                    **(setup or {}),
+            native_run = str(stim_opts.stimulus_run_name) if unified_h5 else None
+        if native_run is not None:
+            try:
+                require_unified_source_matches_recording(plan, native_run)
+            except Exception as exc:
+                return RecordingImportResult(
+                    ok=False, failed_step="unified_h5_recording_identity", error=str(exc)
                 )
+            try:
+                setup = project_unified_subject_metadata(plan, native_run)
+            except Exception as exc:
+                return RecordingImportResult(
+                    ok=False, failed_step="import_experiment_setup", error=str(exc)
+                )
+            _log(
+                logger,
+                "experiment_setup_imported" if setup else "subject_metadata_absent",
+                recording_dir=str(plan.recording_dir),
+                zarr_path=str(plan.zarr_path),
+                source="unified_native_candidate",
+                native_run=native_run,
+                **(setup or {}),
+            )
 
     try:
         subject_reference = import_zebrobot_subject_reference(plan)

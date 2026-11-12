@@ -130,3 +130,25 @@ def test_build_video_report_fails_media_when_camera_csv_row_count_mismatches(mon
     assert report.media_status == "fail"
     assert report.overall_status == "fail"
     assert any(f.code == "video.camera_csv_row_count_mismatch" for f in report.findings)
+
+
+def test_inspect_camera_csv_warns_on_empty_timestamps_like_the_clock(
+    tmp_path: Path,
+) -> None:
+    cams_dir = tmp_path / "session" / "cams"
+    cams_dir.mkdir(parents=True)
+    video_path = cams_dir / "Cam1.mp4"
+    video_path.write_bytes(b"video")
+    (cams_dir / "Cam1_meta.csv").write_text(
+        "recording_frame_id,timestamp,timestamp_sys\n1,100,1100\n2,,1200\n3,300,1300\n",
+        encoding="utf-8",
+    )
+
+    info, findings = mod.inspect_camera_csv(video_path, expected_frame_count=3)
+
+    assert info.status == "warn"
+    assert [finding.code for finding in findings] == [
+        "video.camera_csv_invalid_timestamps"
+    ]
+    assert info.timestamp_monotonic is True
+    assert info.timestamp_offset_drift_ns == 0

@@ -151,6 +151,7 @@ from .subject_shape_spline import (
     fit_subject_body_spline_batch,
     tail_sample_positions,
 )
+from fisheye.shared.heading_convention import heading_degrees
 
 SUBJECT_SHAPE_SCHEMA_ID = CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_ID
 SUBJECT_SHAPE_SCHEMA_VERSION = CANONICAL_SUBJECT_SHAPE_RUN_SCHEMA_VERSION
@@ -1744,7 +1745,7 @@ def _compute_body_frame_batch(batches: Mapping[str, ComponentBatch]) -> BodyFram
         origin_xy[row_idx] = eye_midpoint.astype(np.float32)
         forward_axis_xy[row_idx] = forward.astype(np.float32)
         left_axis_xy[row_idx] = left_axis.astype(np.float32)
-        heading_deg[row_idx] = np.float32(math.degrees(math.atan2(-float(forward[1]), float(forward[0]))))
+        heading_deg[row_idx] = np.float32(float(heading_degrees(float(forward[0]), float(forward[1]))))
         valid[row_idx] = True
         reasons[row_idx] = "ok"
     return BodyFrameBatch(

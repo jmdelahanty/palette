@@ -27,6 +27,7 @@ def _write_evidence(
     total_frames: int = 4,
     keyframe_frames: list[int] | None = None,
     resolved_gop_length: int = 1,
+    extra_summary: dict | None = None,
 ) -> OrangeCropSyncEvidence:
     summary = tmp_path / "crop_summary.json"
     keyframes = tmp_path / "crop_keyframe.json"
@@ -39,6 +40,7 @@ def _write_evidence(
                 "resolved_gop_length": resolved_gop_length,
                 "frames_encoded": frames_encoded,
                 "outputs": {"mp4_keyframe": str(keyframes)},
+                **(extra_summary or {}),
             }
         ),
         encoding="utf-8",
@@ -156,6 +158,115 @@ def test_orange_interframe_stream_cannot_claim_all_samples_sync(
 
     assert result["sync_sample_proof"] == "orange_idr_sidecar_contradiction"
     assert "inter-frame GOP length" in result["orange_evidence"]["error"]
+
+
+def _encoder_block(resolved: int, requested: int = 25) -> dict:
+    return {
+        "video_metadata": {
+            "encoder": {
+                "resolved_gop_length": resolved,
+                "requested_gop_length": requested,
+            }
+        }
+    }
+
+
+def test_routing_period_at_top_level_does_not_hide_an_all_intra_encoder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Recorder summaries before Orange d06f782 put the shard routing period
+    # (25) at the top level; the encoder ran GOP 1 (2026-10-08 delivery).
+    video = tmp_path / "crop.mp4"
+    _write_mp4(video, has_stss=False)
+    evidence = _write_evidence(
+        tmp_path, resolved_gop_length=25, extra_summary=_encoder_block(1)
+    )
+    monkeypatch.setattr(container, "_probe_codec_name", lambda _: "hevc")
+
+    result = container.check_hevc_keyframe_flags(
+        video, orange_crop_evidence=evidence
+    )
+
+    assert result["sync_sample_proof"] == "orange_idr_sidecar_verified"
+    assert result["needs_fix"] is False
+    assert result["orange_evidence"]["resolved_gop_length"] == 1
+
+
+def test_current_recorder_summary_with_routing_period_verifies(
+    tmp_path: Path, monkeypatch
+) -> None:
+    video = tmp_path / "crop.mp4"
+    _write_mp4(video, has_stss=False)
+    evidence = _write_evidence(
+        tmp_path,
+        resolved_gop_length=1,
+        extra_summary={"routing_gop_period": 25, **_encoder_block(1)},
+    )
+    monkeypatch.setattr(container, "_probe_codec_name", lambda _: "hevc")
+
+    result = container.check_hevc_keyframe_flags(
+        video, orange_crop_evidence=evidence
+    )
+
+    assert result["sync_sample_proof"] == "orange_idr_sidecar_verified"
+
+
+def test_interframe_encoder_gop_is_refused_even_if_top_level_says_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    video = tmp_path / "crop.mp4"
+    _write_mp4(video, has_stss=False)
+    evidence = _write_evidence(
+        tmp_path, resolved_gop_length=1, extra_summary=_encoder_block(25)
+    )
+    monkeypatch.setattr(container, "_probe_codec_name", lambda _: "hevc")
+
+    result = container.check_hevc_keyframe_flags(
+        video, orange_crop_evidence=evidence
+    )
+
+    assert result["sync_sample_proof"] == "orange_idr_sidecar_contradiction"
+    assert "inter-frame GOP length of 25" in result["orange_evidence"]["error"]
+
+
+def test_all_intra_encoder_still_requires_full_keyframe_sidecar(
+    tmp_path: Path, monkeypatch
+) -> None:
+    video = tmp_path / "crop.mp4"
+    _write_mp4(video, has_stss=False)
+    evidence = _write_evidence(
+        tmp_path,
+        resolved_gop_length=25,
+        keyframe_frames=[0, 1, 2],
+        extra_summary=_encoder_block(1),
+    )
+    monkeypatch.setattr(container, "_probe_codec_name", lambda _: "hevc")
+
+    result = container.check_hevc_keyframe_flags(
+        video, orange_crop_evidence=evidence
+    )
+
+    assert result["sync_sample_proof"] == "orange_idr_sidecar_contradiction"
+    assert "does not cover every" in result["orange_evidence"]["error"]
+
+
+def test_malformed_encoder_gop_is_unavailable_not_top_level_fallback(
+    tmp_path: Path, monkeypatch
+) -> None:
+    video = tmp_path / "crop.mp4"
+    _write_mp4(video, has_stss=False)
+    evidence = _write_evidence(
+        tmp_path,
+        resolved_gop_length=1,
+        extra_summary={"video_metadata": {"encoder": {"resolved_gop_length": "1"}}},
+    )
+    monkeypatch.setattr(container, "_probe_codec_name", lambda _: "hevc")
+
+    result = container.check_hevc_keyframe_flags(
+        video, orange_crop_evidence=evidence
+    )
+
+    assert result["sync_sample_proof"] == "orange_idr_sidecar_unavailable"
 
 
 def test_large_keyframe_sidecar_is_validated_incrementally(

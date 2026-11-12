@@ -28,9 +28,12 @@ from fisheye.shared.acquisition_publication_status import (
     EXTERNAL_ACQUISITION_PUBLISHED_REASON,
     stamp_acquisition_authority_publication_status,
 )
+from fisheye.shared import clipped_video_collection as collection_module
 from fisheye.shared.clipped_video_collection import (
     build_clipped_video_collection_metadata,
+    verify_clipped_video_collection_live_files,
 )
+from fisheye.shared.pixel_frame_authority import parse_source_video_metadata
 from fisheye.shared.import_video_metadata import (
     publish_clipped_video_collection_acquisition_authority,
 )
@@ -192,7 +195,12 @@ def test_clipped_clock_rejects_wrong_locator_and_domain(
 
 
 def _encoded_clip(
-    recording: Path, clip_index: int, *, width: int = 64, height: int = 48
+    recording: Path,
+    clip_index: int,
+    *,
+    width: int = 64,
+    height: int = 48,
+    color_range: str | None = None,
 ) -> dict:
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         pytest.skip(
@@ -222,6 +230,14 @@ def _encoded_clip(
             "2",
             "-pix_fmt",
             "yuv420p",
+            # mp4 keeps the range tag only in a colr box with explicit colorimetry.
+            *(
+                ["-color_range", color_range, "-colorspace", "bt709",
+                 "-color_primaries", "bt709", "-color_trc", "bt709",
+                 "-movflags", "+write_colr"]
+                if color_range
+                else []
+            ),
             str(video),
         ],
         capture_output=True,
@@ -266,10 +282,13 @@ def _encoded_clip(
 
 
 def _publish_clipped_import(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    color_ranges: tuple[str | None, str | None] = (None, None),
 ) -> tuple[Path, RecordingImportReceipt]:
     recording = tmp_path / "recordings" / "recording-clipped"
-    clips = [_encoded_clip(recording, i) for i in range(2)]
+    clips = [_encoded_clip(recording, i, color_range=color_ranges[i]) for i in range(2)]
     (recording / "recording_clip_index.json").write_text(
         json.dumps(
             {
@@ -558,3 +577,75 @@ def test_receipt_v1_golden_bytes_remain_unchanged() -> None:
         sha256(receipt.to_json_bytes()).hexdigest()
         == "be98ba4ddd2f0db2b2cc9db6ca5be754458b047fa05a752373e343acdeb132fb"
     )
+
+
+def test_collection_v2_records_one_color_range_through_the_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output, receipt = _publish_clipped_import(tmp_path, monkeypatch, color_ranges=("pc", "pc"))
+    metadata = zarr.open_group(str(output), mode="r").attrs["source_video_metadata"]
+    collection = metadata["collection"]
+    assert collection["schema_version"] == 2
+    assert [member["color_range"] for member in collection["members"]] == ["pc", "pc"]
+    assert collection_module.collection_color_range(collection) == "pc"
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        verified = registry.finalize_current_source_import(
+            zarr_path=output, receipt=receipt, decided_by="test"
+        )
+        members = verified.acquisition_frame.record.source_video_metadata["collection"]["members"]
+        assert {member["color_range"] for member in members} == {"pc"}
+    finally:
+        registry.close()
+
+
+def test_clips_with_different_color_ranges_are_refused(tmp_path: Path) -> None:
+    # One recording with tv- and pc-tagged clips would misdecode some of them.
+    recording = tmp_path / "recordings" / "recording-clipped"
+    clips = [_encoded_clip(recording, i, color_range=r) for i, r in enumerate(("tv", "pc"))]
+    (recording / "recording_clip_index.json").write_text(
+        json.dumps(
+            {
+                "recording_id": "recording-clipped",
+                "session_id": "session-clipped",
+                "clips": clips,
+                "camera_ranges": {CAMERA: {"clip_count": 2, "total_frame_count": 4}},
+            }
+        )
+    )
+    build_recording_frame_index(recording)
+    with pytest.raises(ValueError, match="color range changes across source members"):
+        build_clipped_video_collection_metadata(recording)
+
+
+def test_version_1_collections_still_verify_and_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Archives imported before version 2 have no colorimetry and stay readable.
+    output, _receipt = _publish_clipped_import(tmp_path, monkeypatch)
+    recording = output.parent.parent
+    v2 = zarr.open_group(str(output), mode="r").attrs["source_video_metadata"]
+    basis = {key: value for key, value in v2["collection"].items() if key != "collection_sha256"}
+    basis["schema_version"] = 1
+    basis["members"] = [
+        {key: value for key, value in member.items()
+         if key not in collection_module.COLLECTION_COLORIMETRY_FIELDS}
+        for member in basis["members"]
+    ]
+    v1 = {**v2, "collection": {**basis, "collection_sha256": collection_module._canonical_sha256(basis)}}
+    verify_clipped_video_collection_live_files(recording, v1)
+    assert parse_source_video_metadata(v1)["collection"]["schema_version"] == 1
+    assert collection_module.collection_color_range(v1["collection"]) is None
+
+
+def test_version_2_member_without_colorimetry_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output, _receipt = _publish_clipped_import(tmp_path, monkeypatch)
+    recording = output.parent.parent
+    v2 = zarr.open_group(str(output), mode="r").attrs["source_video_metadata"]
+    basis = {key: value for key, value in v2["collection"].items() if key != "collection_sha256"}
+    basis["members"] = [{k: v for k, v in m.items() if k != "color_range"} for m in basis["members"]]
+    broken = {**v2, "collection": {**basis, "collection_sha256": collection_module._canonical_sha256(basis)}}
+    with pytest.raises(Exception, match="color_range"):
+        verify_clipped_video_collection_live_files(recording, broken)

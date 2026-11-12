@@ -389,7 +389,7 @@ def _build_new_authorities(
     }
     for field in _IDENTITY_FIELDS:
         metadata.pop(field, None)
-    subject_record = build_subject_metadata_record(metadata)
+    subject_record = build_subject_metadata_record(metadata, translator="manual_assertion")
     subject_digest = subject_metadata_sha256(subject_record)
     subject_ref = (
         "analysis/subject_metadata_runs/" f"subject_metadata_{subject_digest[:16]}"
@@ -959,6 +959,7 @@ def apply_plan(registry_path: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
                 subject = publish_subject_metadata(
                     root,
                     metadata,
+                    translator="manual_assertion",
                     provenance_command=PROVENANCE_COMMAND,
                     provenance_params={
                         "assertion_kind": ASSERTION_KIND,

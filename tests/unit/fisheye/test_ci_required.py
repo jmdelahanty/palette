@@ -161,12 +161,16 @@ def test_unexpected_jobs_fail(context, jobs):
         )
 
 
-def test_running_gate_is_not_its_own_prerequisite(context, jobs):
+@pytest.mark.parametrize(
+    "status", ["in_progress", "queued", "waiting", "pending", "requested"]
+)
+def test_running_gate_is_not_its_own_prerequisite(context, jobs, status):
+    # The jobs API can lag and still report the executing gate as queued.
     current = {
         **jobs[0],
         "name": "ci-required",
         "id": 999,
-        "status": "in_progress",
+        "status": status,
         "conclusion": None,
     }
     gate.validate_jobs(jobs + [current], context)
@@ -180,6 +184,29 @@ def test_previous_terminal_gate_success_cannot_substitute_for_current_evidence(
     previous = {**jobs[0], "name": "ci-required", "id": 999}
     with pytest.raises(gate.GateError, match="Unexpected terminal gate state"):
         gate.validate_jobs(jobs + [previous], context)
+
+
+@pytest.mark.parametrize(
+    "status, conclusion",
+    [
+        ("completed", "failure"),
+        ("completed", None),
+        ("in_progress", "success"),
+        ("queued", "cancelled"),
+        (None, None),
+        ("unknown", None),
+    ],
+)
+def test_gate_record_must_be_non_terminal(context, jobs, status, conclusion):
+    gate_job = {
+        **jobs[0],
+        "name": "ci-required",
+        "id": 999,
+        "status": status,
+        "conclusion": conclusion,
+    }
+    with pytest.raises(gate.GateError, match=r"Unexpected terminal gate state \("):
+        gate.validate_jobs(jobs + [gate_job], context)
 
 
 @pytest.mark.parametrize("result", ["failure", "skipped", "cancelled", None])

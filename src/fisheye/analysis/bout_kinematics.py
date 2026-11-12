@@ -61,6 +61,7 @@ from fisheye.visualization.bout_kinematics_interactive import (
     BOUT_MOVEMENT_PLOT_SPEC_SCHEMA_ID,
     BOUT_MOVEMENT_PNG_PREFIX,
 )
+from fisheye.shared.heading_convention import wrap_delta_degrees
 
 
 SCHEMA_ID = "analysis.bout_kinematics_runs"
@@ -726,7 +727,7 @@ def _movement_metrics_dtype() -> np.dtype:
 def _wrap_degrees(delta: float) -> float:
     if not np.isfinite(delta):
         return float("nan")
-    return float((delta + 180.0) % 360.0 - 180.0)
+    return float(wrap_delta_degrees(delta))
 
 
 def _circular_mean_deg(values: np.ndarray) -> float:

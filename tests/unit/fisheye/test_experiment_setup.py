@@ -88,6 +88,69 @@ def test_setup_models_multiple_anonymous_subjects_as_count_only() -> None:
     assert record["source"]["kind"] == "manual_operator_assertion"
 
 
+def test_setup_counts_a_singular_subject_id_like_the_subject_record() -> None:
+    # Citrus subject identity v3 writes one ``subject_id``; the setup must count
+    # ids with the subject-metadata rule, not its own (B3).
+    from fisheye.shared.subject_metadata import build_subject_metadata_record
+
+    metadata = {
+        "subject_count": "1",
+        "subject_type": "individual",
+        "subject_id": "4512e0a1-2d7e-496a-8eb0-8d25f7aa93d9",
+    }
+    record = _build_setup_record(metadata)
+
+    assert build_subject_metadata_record(metadata)["subject_ids"] == [
+        "4512e0a1-2d7e-496a-8eb0-8d25f7aa93d9"
+    ]
+    assert record["assigned_subject_count"] == 1
+    assert record["subject_assignment_status"] == "explicit"
+
+
+def test_setup_does_not_count_a_dish_group_id_as_an_individual() -> None:
+    # A Citrus v3 dish_group subject_id names the group, not a fish.
+    record = _build_setup_record(
+        {"subject_count": "3", "subject_type": "dish_group", "subject_id": "g-1"}
+    )
+
+    assert record["assigned_subject_count"] is None
+    assert record["subject_assignment_status"] == "count_only"
+
+
+def test_setup_counts_a_dish_group_id_list_as_individuals() -> None:
+    # An explicit list names individual fish, even in a dish_group (as on main).
+    record = _build_setup_record(
+        {"subject_count": "3", "subject_type": "dish_group", "subject_ids": ["f-1", "f-2"]}
+    )
+
+    assert record["assigned_subject_count"] == 2
+    assert record["subject_assignment_status"] == "partial"
+
+
+def test_setup_counts_an_untyped_single_id_for_one_subject() -> None:
+    record = _build_setup_record({"subject_count": "1", "subject_id": "s-1"})
+
+    assert record["assigned_subject_count"] == 1
+    assert record["subject_assignment_status"] == "explicit"
+
+
+@pytest.mark.parametrize("field", ["subject_ids", "fish_ids"])
+def test_setup_counts_id_lists_unchanged(field: str) -> None:
+    record = _build_setup_record(
+        {"subject_count": "3", field: ["a", " b ", "a", ""]}
+    )
+
+    assert record["assigned_subject_count"] == 2
+    assert record["subject_assignment_status"] == "partial"
+
+
+def test_setup_refuses_subject_id_with_legacy_fish_id() -> None:
+    from fisheye.shared.subject_metadata import SubjectMetadataError
+
+    with pytest.raises(SubjectMetadataError, match="both subject_id and legacy fish_id"):
+        _build_setup_record({"subject_count": "1", "subject_id": "s", "fish_id": "f"})
+
+
 def test_publish_resolve_is_idempotent_and_rejects_explicit_contradiction(
     tmp_path: Path,
 ) -> None:

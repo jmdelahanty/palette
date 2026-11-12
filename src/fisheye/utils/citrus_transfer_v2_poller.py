@@ -9,9 +9,14 @@ never submitted. Full inventory verification stays in the LSF job
 
 Recording context is the producer's per-camera declaration in the snapshot,
 so the operator JSON config (``--config`` or ``CITRUS_V2_POLLER_CONFIG``) holds
-only operations: ``staging_dir``, ``state_dir``, ``log_dir``, optional
-``writer_host``, and ``submit`` = ``{"transport": "local"|"ssh", "host": ...,
-"repo": ...}``. A config that still declares recording context is refused.
+only operations: ``staging_dir``, ``state_dir``, ``log_dir``, ``submit`` =
+``{"transport": "local"|"ssh", "host": ..., "repo": ...}`` and optionally
+``registration``, which may only be ``"workstation"``: jobs always run
+``--no-register`` and ``register_completed_imports`` registers from the
+writer host (``fisheye.intake.register_delivery``). Job-mode registration is
+retired, so a config declaring ``"registration": "job"`` is refused rather
+than silently reinterpreted. A config that still declares recording context
+is refused. Marker validation is ``fisheye.intake.discovery.check_marker``.
 
 Installation (cron entry, config file, retiring the v1 poller) is a separate,
 user-authorized step. This module installs nothing and edits no crontab; run
@@ -30,20 +35,16 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
-from fisheye.shared.recording_transfer_snapshot import (
-    CONSUMER_PROFILE,
-    MARKER_NAME,
-    MARKER_SCHEMA,
-    SNAPSHOT_PATH,
+from fisheye.intake.discovery import (
+    LEGACY_MARKER_SCHEMA,
+    MarkerRefusal as PollerRefusal,
+    check_marker,
+    staging_marker_paths,
 )
+from fisheye.shared.recording_transfer_snapshot import MARKER_NAME, SNAPSHOT_PATH
 
-LEGACY_MARKER_SCHEMA = "citrus.transfer_completion_marker.v1"
 LAUNCHER = "scripts/submit_citrus_session_import_bsub.sh"
 Runner = Callable[[list[str]], subprocess.CompletedProcess]
-
-
-class PollerRefusal(ValueError):
-    pass
 
 
 def log(message: str) -> None:
@@ -79,40 +80,12 @@ def load_config(path: Path) -> dict:
         raise PollerRefusal("submit needs transport local|ssh and repo")
     if submit["transport"] == "ssh" and not submit.get("host"):
         raise PollerRefusal("ssh transport needs submit.host")
+    if config.get("registration", "workstation") != "workstation":
+        raise PollerRefusal(
+            'job-mode registration is retired; registration must be "workstation" '
+            "(the writer host registers with register_completed_imports)"
+        )
     return config
-
-
-def check_marker(marker_path: Path) -> dict | None:
-    """Return the v2 marker, None for a legacy v1 marker; raise if malformed."""
-
-    marker_bytes = marker_path.read_bytes()
-    try:
-        marker = json.loads(marker_bytes)
-    except ValueError as exc:
-        raise PollerRefusal(f"invalid JSON: {exc}") from exc
-    if not isinstance(marker, dict):
-        raise PollerRefusal("marker is not a JSON object")
-    if marker.get("schema_id") == LEGACY_MARKER_SCHEMA:
-        return None
-    snapshot = marker.get("snapshot")
-    if (
-        marker.get("schema_id") != MARKER_SCHEMA
-        or marker.get("schema_version") != 2
-        or marker.get("status") != "transfer_complete"
-        or marker.get("required_consumer_profile") != CONSUMER_PROFILE
-        or not isinstance(snapshot, dict)
-        or snapshot.get("path") != SNAPSHOT_PATH
-        or marker.get("recording_payload_kind") not in ("citrus_h5", "video_only")
-    ):
-        raise PollerRefusal(f"not a complete transfer-v2 marker (schema_id={marker.get('schema_id')!r})")
-    snapshot_file = marker_path.parent / SNAPSHOT_PATH
-    if not snapshot_file.is_file():
-        raise PollerRefusal("snapshot file missing")
-    digest = hashlib.sha256(snapshot_file.read_bytes()).hexdigest()
-    if digest != snapshot.get("sha256") or marker.get("snapshot_id") != f"sha256:{digest}":
-        raise PollerRefusal("snapshot bytes do not match marker binding")
-    marker["_marker_sha256"] = hashlib.sha256(marker_bytes).hexdigest()
-    return marker
 
 
 def claim_key(marker_path: Path, marker_sha256: str) -> str:
@@ -128,8 +101,11 @@ def build_command(config: dict, session_dir: Path, key: str) -> list[str]:
         "--marker-key", key,
         "--log-dir", str(Path(config["log_dir"]) / "bsub_submissions"),
     ]
-    if config.get("writer_host"):
-        launcher += ["--writer-host", config["writer_host"]]
+    # The job imports only; register_completed_imports registers from the
+    # designated writer host after the job completes. --no-register is a
+    # no-op for the current launcher but keeps an older checkout at
+    # submit.repo (whose default was to register) from registering.
+    launcher.append("--no-register")
     submit = config["submit"]
     remote = f"cd {shlex.quote(submit['repo'])} && {shlex.join(launcher)}"
     if submit["transport"] == "ssh":
@@ -147,7 +123,8 @@ def poll(config: dict, *, dry_run: bool, runner: Runner = _run) -> int:
     if not staging.is_dir():
         raise PollerRefusal(f"staging directory does not exist: {staging}")
     failures = 0
-    for marker_path in sorted(staging.rglob(MARKER_NAME)):
+    legacy = 0
+    for marker_path in staging_marker_paths(staging):
         session_dir = marker_path.parent
         try:
             marker = check_marker(marker_path)
@@ -155,20 +132,22 @@ def poll(config: dict, *, dry_run: bool, runner: Runner = _run) -> int:
             log(f"refused marker={marker_path}: {exc}")
             continue
         if marker is None:
-            log(f"legacy v1 marker ignored: {marker_path}")
+            legacy += 1
             continue
         key = claim_key(marker_path, marker["_marker_sha256"])
         command = build_command(config, session_dir, key)
         claimed, submitted = state / f"{key}.claimed", state / f"{key}.submitted"
-        if claimed.exists() or submitted.exists():
+        if submitted.exists():
             continue
+        if claimed.exists():
+            # Polls run one at a time under poller.lock, so a claim without a
+            # submission belongs to an earlier poll that died before recording
+            # it. Retry: the launcher returns the earlier job if LSF has one.
+            log(f"retrying unfinished claim key={key}")
         if dry_run:
             log(f"dry-run: would submit {shlex.join(command)}")
             continue
-        try:
-            fd = os.open(claimed, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-        except FileExistsError:
-            continue
+        fd = os.open(claimed, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
         with os.fdopen(fd, "w") as handle:
             json.dump({"marker": str(marker_path), "marker_sha256": marker["_marker_sha256"],
                        "snapshot_id": marker["snapshot_id"], "command": command}, handle)
@@ -182,6 +161,8 @@ def poll(config: dict, *, dry_run: bool, runner: Runner = _run) -> int:
             (state / f"{key}.failed").write_text((result.stdout or "") + (result.stderr or ""))
             log(f"submission failed rc={result.returncode}; will retry key={key}")
             failures += 1
+    if legacy:
+        log(f"legacy v1 markers ignored: {legacy}")
     return 1 if failures else 0
 
 
@@ -208,6 +189,20 @@ def main(argv: list[str] | None = None) -> int:
     except PollerRefusal as exc:
         log(f"refusing to poll: {exc}")
         return 2
+
+
+__all__ = [
+    "LEGACY_MARKER_SCHEMA",
+    "MARKER_NAME",
+    "PollerRefusal",
+    "SNAPSHOT_PATH",
+    "build_command",
+    "check_marker",
+    "claim_key",
+    "load_config",
+    "main",
+    "poll",
+]
 
 
 if __name__ == "__main__":  # pragma: no cover

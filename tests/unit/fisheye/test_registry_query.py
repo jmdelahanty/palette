@@ -3372,3 +3372,22 @@ def test_registry_query_rejects_detect_and_keypoint_group_by_conflict(tmp_path: 
         assert "--group-by cannot be combined with --keypoint-group-by." in str(exc)
     else:  # pragma: no cover - defensive branch
         raise AssertionError("Expected SystemExit for detect/keypoint summary conflict.")
+
+
+def test_registry_query_hides_missing_datasets_unless_asked(tmp_path: Path, capsys) -> None:
+    # Rows for deleted Zarrs stay for lineage/provenance but are hidden by default.
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_subject_filters(registry_path)
+    registry = Registry(registry_path)
+    try:
+        registry.conn.execute("UPDATE datasets SET status = 'missing' WHERE dataset_id = 'dataset_a'")
+        registry.conn.commit()
+    finally:
+        registry.close()
+
+    def ids(*extra: str) -> set[str]:
+        assert registry_query_main(["--registry", str(registry_path), "--json", *extra]) == 0
+        return {row["dataset_id"] for row in json.loads(capsys.readouterr().out)}
+
+    assert "dataset_a" not in ids()
+    assert "dataset_a" in ids("--include-missing")

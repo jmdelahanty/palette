@@ -17,7 +17,9 @@ from fisheye.registry.shadow_publish import (
     RegistryShadowPublishError,
     publish_registry_shadow,
     shadow_synchronize_recording_import,
+    shadow_synchronize_recording_imports,
     validate_registry_sqlite,
+    validate_registry_sqlite_copy,
 )
 
 
@@ -85,7 +87,14 @@ def test_shadow_publication_preserves_backup_and_atomically_publishes(
         sqlite3.version
     )
     assert publication.source_validation.python_executable == sys.executable
-    assert publication.source_validation.validation_backend == "python_stdlib_sqlite3"
+    # Checked on a byte-identical local copy, and recorded as such.
+    assert publication.source_validation.validation_backend == (
+        "python_stdlib_sqlite3_local_byte_copy"
+    )
+    assert publication.source_validation.path == str(canonical.resolve())
+    assert publication.staged_validation.validation_backend == (
+        "python_stdlib_sqlite3_local_byte_copy"
+    )
     assert publication.published_validation.integrity_check == "ok"
     assert not list(tmp_path.glob(".registry.sqlite.publish_tmp.*"))
 
@@ -344,3 +353,174 @@ def test_shadow_synchronize_candidate_failure_preserves_canonical_hash(
     assert _sha256(canonical) == source_hash
     assert _read_value(canonical) == "before"
     assert observed["registry_path"] != canonical
+
+
+class _RecordingBatchRegistry:
+    """Writes one row per artifact into the candidate; may fail on one target."""
+
+    fail_on: str | None = None
+    opened: list[Path] = []
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        type(self).opened.append(self.path)
+
+    def synchronize_recording_import(self, *, zarr_path, receipt, decided_by) -> str:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "INSERT INTO records (value) VALUES (?);", (f"{zarr_path.name}:{receipt}",)
+            )
+            connection.commit()
+        if zarr_path.name == type(self).fail_on:
+            raise RegistryShadowPublishError(f"synchronization failed for {zarr_path.name}")
+        return f"dataset-{zarr_path.name}"
+
+    def close(self) -> None:
+        pass
+
+
+def test_batch_synchronization_publishes_a_whole_delivery_once(monkeypatch, tmp_path: Path) -> None:
+    canonical = tmp_path / "registry.sqlite"
+    _create_registry(canonical)
+    _RecordingBatchRegistry.fail_on, _RecordingBatchRegistry.opened = None, []
+    monkeypatch.setattr(registry_db, "Registry", _RecordingBatchRegistry)
+    calls = []
+    real_publish = shadow_publish.publish_registry_shadow
+    monkeypatch.setattr(
+        shadow_publish,
+        "publish_registry_shadow",
+        lambda **kwargs: calls.append(kwargs) or real_publish(**kwargs),
+    )
+
+    publication = shadow_synchronize_recording_imports(
+        canonical_registry=canonical,
+        imports=[(tmp_path / "cam_a.zarr", "ra"), (tmp_path / "cam_b.zarr", "rb")],
+        decided_by="pytest",
+    )
+
+    assert len(calls) == 1 and len(_RecordingBatchRegistry.opened) == 1
+    assert publication.mutation_result == {
+        "operation": "synchronize_recording_imports",
+        "datasets": [
+            {"zarr_path": str((tmp_path / "cam_a.zarr").resolve()), "dataset_id": "dataset-cam_a.zarr"},
+            {"zarr_path": str((tmp_path / "cam_b.zarr").resolve()), "dataset_id": "dataset-cam_b.zarr"},
+        ],
+        "decided_by": "pytest",
+    }
+    with sqlite3.connect(canonical) as connection:
+        values = [row[0] for row in connection.execute("SELECT value FROM records ORDER BY id")]
+    assert values == ["before", "cam_a.zarr:ra", "cam_b.zarr:rb"]
+    assert _read_value(Path(publication.backup_path)) == "before"
+    assert ".before-recording-imports-" in Path(publication.backup_path).name
+
+
+def test_batch_failure_on_a_later_artifact_publishes_nothing(monkeypatch, tmp_path: Path) -> None:
+    canonical = tmp_path / "registry.sqlite"
+    _create_registry(canonical)
+    source_hash = _sha256(canonical)
+    _RecordingBatchRegistry.fail_on, _RecordingBatchRegistry.opened = "cam_b.zarr", []
+    monkeypatch.setattr(registry_db, "Registry", _RecordingBatchRegistry)
+
+    with pytest.raises(RegistryShadowPublishError, match="failed for cam_b.zarr"):
+        shadow_synchronize_recording_imports(
+            canonical_registry=canonical,
+            imports=[(tmp_path / "cam_a.zarr", "ra"), (tmp_path / "cam_b.zarr", "rb")],
+            decided_by="pytest",
+        )
+
+    assert _sha256(canonical) == source_hash  # cam_a's row never reached the registry
+
+
+@pytest.mark.parametrize("imports", [[], "duplicate"])
+def test_batch_refuses_empty_or_repeated_artifacts(monkeypatch, tmp_path: Path, imports) -> None:
+    canonical = tmp_path / "registry.sqlite"
+    _create_registry(canonical)
+    if imports == "duplicate":
+        imports = [(tmp_path / "a.zarr", None), (tmp_path / "x/../a.zarr", None)]
+    monkeypatch.setattr(registry_db, "Registry", _RecordingBatchRegistry)
+    with pytest.raises(RegistryShadowPublishError, match="at least one|twice"):
+        shadow_synchronize_recording_imports(
+            canonical_registry=canonical, imports=imports, decided_by="pytest"
+        )
+    assert not (tmp_path / ".palette-registry-backups").exists()
+
+
+
+def _corrupt_index(path: Path) -> None:
+    """Make the records index disagree with its table (integrity_check fails)."""
+
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA writable_schema = ON;")
+        connection.execute(
+            "UPDATE sqlite_master SET sql = 'CREATE INDEX idx_records_value ON records(id)'"
+            " WHERE name = 'idx_records_value';"
+        )
+        connection.commit()
+
+
+def test_copy_validation_refuses_a_corrupt_registry(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.sqlite"
+    _create_registry(registry)
+    _corrupt_index(registry)
+    with pytest.raises(RegistryShadowPublishError, match="integrity_check failed"):
+        validate_registry_sqlite(registry)
+    with pytest.raises(RegistryShadowPublishError, match="integrity_check failed"):
+        validate_registry_sqlite_copy(registry, temp_root=tmp_path / "local")
+
+
+def test_copy_validation_refuses_a_registry_that_changes_while_copied(
+    tmp_path: Path, monkeypatch
+) -> None:
+    registry = tmp_path / "registry.sqlite"
+    _create_registry(registry)
+    real_copy = shadow_publish.shutil.copyfile
+
+    def copy_then_change(source, destination, *args, **kwargs):
+        result = real_copy(source, destination, *args, **kwargs)
+        with sqlite3.connect(registry) as connection:
+            connection.execute("UPDATE records SET value = 'concurrent' WHERE id = 1;")
+            connection.commit()
+        return result
+
+    monkeypatch.setattr(shadow_publish.shutil, "copyfile", copy_then_change)
+    with pytest.raises(RegistryShadowPublishError, match="changed while being copied"):
+        validate_registry_sqlite_copy(registry, temp_root=tmp_path / "local")
+
+
+def test_copy_validation_refuses_sqlite_sidecars(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.sqlite"
+    _create_registry(registry)
+    (tmp_path / "registry.sqlite-journal").write_bytes(b"pending")
+    with pytest.raises(RegistryShadowPublishError):
+        validate_registry_sqlite_copy(registry, temp_root=tmp_path / "local")
+
+
+def test_copy_validation_matches_in_place_validation(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.sqlite"
+    _create_registry(registry)
+    direct = validate_registry_sqlite(registry)
+    copied = validate_registry_sqlite_copy(registry, temp_root=tmp_path / "local")
+    assert (copied.integrity_check, copied.foreign_key_issue_count) == (
+        direct.integrity_check, direct.foreign_key_issue_count,
+    )
+    assert copied.path == str(registry.resolve())
+    assert not list((tmp_path / "local").iterdir())
+
+
+def test_publication_refuses_a_corrupt_canonical_before_mutating(tmp_path: Path) -> None:
+    canonical = tmp_path / "registry.sqlite"
+    _create_registry(canonical)
+    _corrupt_index(canonical)
+    called = False
+
+    def mutate(_candidate: Path) -> dict[str, object]:
+        nonlocal called
+        called = True
+        return {}
+
+    with pytest.raises(RegistryShadowPublishError, match="integrity_check failed"):
+        publish_registry_shadow(
+            canonical_registry=canonical, backup_path=tmp_path / "b" / "before.sqlite",
+            mutate=mutate, local_temp_root=tmp_path / "local",
+        )
+    assert called is False

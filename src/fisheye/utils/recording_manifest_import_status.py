@@ -11,6 +11,10 @@ from typing import Any, Iterable, Optional, Sequence
 
 from fisheye.registry.db import Registry
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.recording_manifest_seal import (
+    SealedRecordingManifestError,
+    require_unsealed_recording_manifest,
+)
 
 
 @dataclass(frozen=True)
@@ -116,6 +120,17 @@ def write_manifest_import_status(update: ManifestImportStatusUpdate) -> Manifest
     changed = json.dumps(payload, sort_keys=True, default=str) != old_payload
     if not changed:
         return ManifestImportStatusResult(manifest_path=manifest_path, status="unchanged", changed=False)
+    try:
+        require_unsealed_recording_manifest(
+            manifest_path, tool="fisheye.utils.recording_manifest_import_status"
+        )
+    except SealedRecordingManifestError as exc:
+        return ManifestImportStatusResult(
+            manifest_path=manifest_path,
+            status="refused_sealed",
+            changed=False,
+            error=str(exc),
+        )
     try:
         manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     except Exception as exc:

@@ -50,6 +50,8 @@ from fisheye.shared.clipped_video_collection import (
     SOURCE_VIDEO_COLLECTION_LOCATOR_KIND,
     SOURCE_VIDEO_COLLECTION_METADATA_SCHEMA_ID,
     SOURCE_VIDEO_COLLECTION_SCHEMA_ID,
+    SOURCE_VIDEO_COLLECTION_SCHEMA_VERSIONS,
+    COLLECTION_COLORIMETRY_FIELDS,
 )
 from fisheye.shared.coordinate_descriptor import PIXEL_CONVENTIONS
 from fisheye.shared.coordinate_identity import (
@@ -1901,7 +1903,8 @@ def _parse_clipped_video_collection_metadata(value: Any) -> dict[str, Any]:
     )
     if (
         raw_collection["schema_id"] != SOURCE_VIDEO_COLLECTION_SCHEMA_ID
-        or raw_collection["schema_version"] != 1
+        or type(raw_collection["schema_version"]) is not int
+        or raw_collection["schema_version"] not in SOURCE_VIDEO_COLLECTION_SCHEMA_VERSIONS
         or raw_collection["fingerprint_strategy"]
         != SOURCE_VIDEO_COLLECTION_FINGERPRINT_STRATEGY
     ):
@@ -1948,6 +1951,11 @@ def _parse_clipped_video_collection_metadata(value: Any) -> dict[str, Any]:
                     "pix_fmt",
                     "file_fingerprint",
                 }
+                | (
+                    frozenset(COLLECTION_COLORIMETRY_FIELDS)
+                    if raw_collection["schema_version"] == 2
+                    else frozenset()
+                )
             ),
             field_name=field,
         )
@@ -2018,6 +2026,15 @@ def _parse_clipped_video_collection_metadata(value: Any) -> dict[str, Any]:
                 "fps": member_fps,
                 "codec": member["codec"],
                 "pix_fmt": member["pix_fmt"],
+                **{
+                    name: (
+                        None
+                        if member[name] is None
+                        else _required_text(member[name], field_name=f"{field}.{name}")
+                    )
+                    for name in COLLECTION_COLORIMETRY_FIELDS
+                    if name in member
+                },
                 "file_fingerprint": _parse_clipped_collection_fingerprint(
                     member["file_fingerprint"], field_name=f"{field}.file_fingerprint"
                 ),
@@ -2028,9 +2045,15 @@ def _parse_clipped_video_collection_metadata(value: Any) -> dict[str, Any]:
         raise PixelFrameAuthorityError(
             "Clipped collection member coverage differs from total_frames."
         )
+    if raw_collection["schema_version"] == 2 and len(
+        {member["color_range"] for member in members}
+    ) != 1:
+        raise PixelFrameAuthorityError(
+            "Clipped collection members declare different color ranges."
+        )
     collection_basis = {
         "schema_id": SOURCE_VIDEO_COLLECTION_SCHEMA_ID,
-        "schema_version": 1,
+        "schema_version": raw_collection["schema_version"],
         "fingerprint_strategy": SOURCE_VIDEO_COLLECTION_FINGERPRINT_STRATEGY,
         **file_evidence,
         "members": members,

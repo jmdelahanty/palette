@@ -17,6 +17,13 @@ recordings. They test scoped row/reference joins; the full importer separately
 requires global completion, the external exact-file receipt, full protocol and
 geometry checks, and numerical appearance replay.
 
+The five `v3_*` cases (`v3_dish_collected`, `v3_dish_group`, `v3_no_dish`,
+`v3_lookup_failed`, `v3_version_read_failed`) are sealed `full_bound_pair`
+recordings from Citrus main `288f14d` (correspondence v2, chaser v2, global
+finalization, external receipt) carrying Citrus subject identity v3 written by
+the production DishAPI code (delivery `citrus-subject-v3-288f14d-20261006`,
+agent-contracts PR 52). Each has its own `.receipt.json`.
+
 `base.receipt.json` and `appearance.receipt.json` are the corresponding external
 synthetic finalization receipts. Tests that mutate a fresh temporary copy may
 build an explicitly test-only outer receipt to reach inner refusal checks. Such

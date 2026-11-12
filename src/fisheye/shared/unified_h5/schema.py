@@ -10,6 +10,11 @@ from importlib.resources import files
 import h5py
 import numpy as np
 
+from fisheye.shared.heading_convention import (
+    LEGACY_CANVAS_ANGLE,
+    STIMULUS_ANGLE_CONVENTION,
+)
+
 from .common import (
     canonical_json,
     current_admission_scan,
@@ -35,18 +40,336 @@ CONTRACT_HASHES = {
     "experimental_h5_correspondence_input_v2.schema.json": "a33e06819e966b7273015bfffe4aa0d01f24a04fb9ffac69abb29ed5c76329a3",
     "experimental_h5_correspondence_receipt_v2.schema.json": "8d2a414f46f6d6263f2609c55e15add9d7a2b61ad98349cf1ac3aef598b8d4e8",
     "experimental_h5_capacity_preflight_v1.schema.json": "d5d7ebf5249de35ce7234ddfec3c7cb51b57ac3b6fdcb25bf75724f25223d068",
+    # Admission revision 3 (bounding_boxes v2, agent-contracts PR 73).
+    "unified_h5_admission_v3.json": "c32282b68dc5d0057abe3b4144df27a19afbc69f4a920a64aabd09db6b8647b0",
+    "unified_h5_producer_policy_b2af7764.json": "b2af7764c7f27f6295007ba3049dcf8a35d0f84c5801f8a1ff56150c7f9e7fc1",
+    "experimental_h5_core_bounding_boxes_v2.json": "55f94f83e6f43824488161b7238846b2233933be871ac8044bef04d3fa6df4f8",
+    # Citrus 4d9d04d docs/schemas/experimental_h5_capacity_preflight_v1.schema.json,
+    # renamed here because its revision-2 predecessor keeps the original name.
+    "experimental_h5_capacity_preflight_v1_ba8333a3.schema.json": "ba8333a35526dc1fc655734d938b14a816fd143d2c5eb395ad17065f79718a54",
+    # Admission revision 4 (frame identity v1; agent-contracts PR 88, Citrus PR 24).
+    "unified_h5_admission_v4.json": "e702df25e5164548c72fa94a683922836567245ed7b7880316ea8ead2d33a0a4",
+    "unified_h5_producer_policy_3c9866ed.json": "3c9866eda2f78c4aa37d1b68a9f4b6245aab8415b3ce8e3412cb3cbf5ab7eb78",
+    "experimental_h5_core_frame_identity_v1.json": "4365821df9cdde35d0417fec5b656de12607c211e24232b408e87344883a8264",
+    "experimental_h5_capacity_preflight_v2.schema.json": "3f78bff9fd51207d035ed9a2feb32660f5232b91d3674389882a4914fbf6bbc3",
+    "experimental_h5_correspondence_receipt_v3.schema.json": "7143f9cff038b4dda1c184e5f0ca7b1b924b541074d24b25b9b0d67dab9d34b4",
+    # Admission revision 5 (angle_v1: stimulus angle convention v1; agent-contracts
+    # PRs 91/92, Citrus PR 27 at c9d52be). Merged unchanged: 7a2e5d2, f3d97d4, 576481f.
+    "unified_h5_admission_v5.json": "7b1448f83b68df898e1022388581ae833151c8a83d375bb51abb82c13c99ce71",
+    "unified_h5_producer_policy_9af921ca.json": "9af921cab2aedae8af66a00600f5eee6b076c5d8218b6f0e928f93b4df3fbedd",
+    "experimental_h5_core_angle_v1.json": "0c054c7d5d3c1a4f7b39f800b63e272bb43bac30b5b640993a94974e2be24f07",
+    "experimental_h5_capacity_preflight_v3.schema.json": "00b201da455c8f1fc021506ceaf291092f0d61b1d2d5a2689f3ba386be5c60ea",
+    # Admission revision 6 (phototaxis_v1: reactive heading-split states table;
+    # agent-contracts PR 101 head b069be2, Citrus PR 41 at d6754a3).
+    "unified_h5_admission_v6.json": "3936d67ef4e9b34a9d38a73fa8dfb9f67a701086e9b3813b0d4e7a3ed3c6a491",
+    "unified_h5_producer_policy_012cd25f.json": "012cd25f4cb1344f8be8da0f1c48423e0972b0854c7dd17a6ceb522de14532c7",
+    "experimental_h5_core_phototaxis_v1.json": "cb6b86fe16f46a7aef64b051a388dc9d4b3e6bc4fbf0c6cc9791f76b755d33ed",
+    "experimental_h5_capacity_preflight_v4.schema.json": "5892090691243097abbd952f72655c45bcc7d8998fce74a86a1e4b71d87eeb9e",
+    "reactive_phototaxis_states_v1.json": "4270da37b8cacc2722494eef99a0652576902955e35de07904fd23ee9c77408c",
+    # Admission revision 7 (video_overlay_v1: video tracking overlay states and
+    # pose observation v3; agent-contracts PR 104 head c8c92f1, Citrus PR 42 at
+    # a3849567 / 1855e374 / 20f27395).
+    "unified_h5_admission_v7.json": "82d9d3ca0205c23e8d0e2936d60a866677d9ba094c37e616a8699c29b70a57a7",
+    "unified_h5_producer_policy_543102f7.json": "543102f7b9610f2ab7d55880ab02cf863e0bd791fcc62b067d964a55ffd24e5d",
+    "experimental_h5_core_video_overlay_v1.json": "544d7d1095a1591961b307b5acd0a0d61a0c486ea475d7ea218289f62f980733",
+    "experimental_h5_capacity_preflight_v5.schema.json": "dfad0cd22cb3a6de6b18adf768395ef30713d9dbe6618fac6ae872d0188c1337",
+    "video_tracking_overlay_states_v1.json": "a407533eb5e5dcde9963643a5af95910efcfa5be35ae8965c5544e15ae1245d1",
 }
-# Core catalogs by the chaser state table's schema_version. Only v2 (explicit
-# camera-id validity) is admitted; the original v1 catalog stays pinned
-# byte-for-byte for provenance and for the legacy adapter, never for admission.
-# Only the chaser table differs between them.
+# The admission revision a file is judged under is chosen by its capacity
+# preflight's schema_version: preflight v1 files (no catalog_id) keep revision
+# 3 and its (chaser_state, bounding_boxes) pair key; preflight v2 files carry
+# catalog_id and are selected by revision 4's full table-version map; preflight
+# v3 files (catalog_id angle_v1) are selected the same way by revision 5, and
+# preflight v4 files (catalog_id phototaxis_v1) by revision 6, and preflight v5
+# files (catalog_id video_overlay_v1) by revision 7. Any other
+# preflight version is refused. A later catalog needs only its pins here.
+ADMISSIONS_BY_PREFLIGHT_VERSION = {
+    1: "unified_h5_admission_v3.json",
+    2: "unified_h5_admission_v4.json",
+    3: "unified_h5_admission_v5.json",
+    4: "unified_h5_admission_v6.json",
+    5: "unified_h5_admission_v7.json",
+}
+ADMISSION = ADMISSIONS_BY_PREFLIGHT_VERSION[1]
+# Every pinned core catalog. The original v1 catalog stays pinned byte-for-byte
+# for provenance and for the legacy adapter, never for admission.
+CORE_CATALOG_FILES = (
+    "experimental_h5_core_v1.json",
+    "experimental_h5_core_chaser_v2.json",
+    "experimental_h5_core_bounding_boxes_v2.json",
+    "experimental_h5_core_frame_identity_v1.json",
+    "experimental_h5_core_angle_v1.json",
+    "experimental_h5_core_phototaxis_v1.json",
+    "experimental_h5_core_video_overlay_v1.json",
+)
 CORE_CATALOGS = {
     1: "experimental_h5_core_v1.json",
     2: "experimental_h5_core_chaser_v2.json",
 }
 ADMITTED_CHASER_VERSION = 2
+# Table-independent catalog sections (component outcomes, attributes) are
+# identical across the pinned catalogs; tests assert it.
 CORE_CATALOG = CORE_CATALOGS[ADMITTED_CHASER_VERSION]
 CHASER_STATES = "/components/chaser/states"
+BOUNDING_BOXES = "/observations/bounding_boxes"
+# Admission revision 3 names each admitted catalog's pair of table versions.
+_PIN_TABLES = {"chaser_state": CHASER_STATES, "bounding_boxes": BOUNDING_BOXES}
+# Stimulus angle convention (agent-contracts citrus-palette/angles v1): fixed by
+# the admitted catalog binding, never by the file's date or by the session
+# attribute alone. Catalog pins of revisions 3 and 4 carry no
+# ``stimulus_angle_convention`` field; every catalog they admit is legacy.
+SESSION = "/metadata/session"
+SESSION_ANGLE_ATTRIBUTE = "stimulus_angle_convention"
+PROTOCOL_ANGLE_DECLARATIONS = (
+    "/protocol/authored/protocol_definition_json",
+    "/protocol/authored/protocol_trial_index_json",
+    "/protocol/authored/protocol_semantic_json",
+)
+CORRESPONDENCE_RECEIPT_SCHEMAS = {
+    2: "experimental_h5_correspondence_receipt_v2.schema.json",
+    3: "experimental_h5_correspondence_receipt_v3.schema.json",
+}
+
+
+def _template(path: str) -> str | None:
+    if path.startswith("/definitions/enums/") and len(path.split("/")) == 4:
+        return "/definitions/enums/{component}"
+    if (
+        path.startswith("/correspondence/")
+        and path.endswith("/sources")
+        and path != "/correspondence/frames/sources"
+    ):
+        return "/correspondence/{component}/sources" if len(path.split("/")) == 4 else None
+    return path
+
+
+def table_template(path: str) -> str:
+    """The catalog path a concrete core table path is defined under."""
+    template = _template(path)
+    require(template is not None, f"unknown_table:{path}")
+    return template
+
+
+def catalog_table_versions(catalog_file: str) -> dict[str, int]:
+    """A pinned catalog's {catalog table path -> schema_version} map."""
+    return {t["path"]: t["schema_version"] for t in _contract(catalog_file)["tables"]}
+
+
+@lru_cache(maxsize=1)
+def _table_definitions() -> dict:
+    """(catalog path, schema_version) -> its one definition over every pinned catalog.
+
+    A version names one definition: two catalogs that define the same
+    (path, version) differently are a pin error, refused here.
+    """
+    definitions = {}
+    for name in CORE_CATALOG_FILES:
+        for table in _contract(name)["tables"]:
+            key = (table["path"], table["schema_version"])
+            require(
+                definitions.setdefault(key, table) == table,
+                f"conflicting_table_definition:{key[0]}:{key[1]}",
+            )
+    return definitions
+
+
+def _admitted_catalogs(admission: dict) -> dict[str, dict]:
+    pins = admission["core_definition_pins"]
+    return {
+        name: pin
+        for name, pin in pins.items()
+        if isinstance(pin, dict) and pin.get("admitted_by_this_revision")
+    }
+
+
+def _catalog_file(pin: dict) -> str:
+    return pin["catalog_path"].rsplit("/", 1)[-1]
+
+
+@lru_cache(maxsize=1)
+def admitted_table_versions() -> dict[str, frozenset[int]]:
+    """Catalog path -> the versions some admitted catalog of some revision pins."""
+    versions: dict[str, set[int]] = {}
+    for admission_name in ADMISSIONS_BY_PREFLIGHT_VERSION.values():
+        for pin in _admitted_catalogs(_contract(admission_name)).values():
+            for path, version in catalog_table_versions(_catalog_file(pin)).items():
+                versions.setdefault(path, set()).add(version)
+    return {path: frozenset(values) for path, values in versions.items()}
+
+
+def preflight_admission(document: dict) -> str:
+    """The admission revision a capacity preflight's schema_version selects."""
+    version = document.get("schema_version")
+    require(
+        type(version) is int and version in ADMISSIONS_BY_PREFLIGHT_VERSION,
+        "capacity_preflight_unknown_schema_version",
+    )
+    return ADMISSIONS_BY_PREFLIGHT_VERSION[version]
+
+
+def _present_declared_versions(h5, declared_paths) -> dict[str, int]:
+    """{declared, present core table path -> its schema_version}."""
+    known = admitted_table_versions()
+    observed = {}
+    for path in declared_paths:
+        if path in h5 and _template(path) in known:
+            observed[path] = table_version(h5, path)
+    return observed
+
+
+def _map_matches(observed: dict[str, int], catalog_versions: dict[str, int]) -> bool:
+    return all(
+        catalog_versions.get(table_template(path)) == version
+        for path, version in observed.items()
+    )
+
+
+def admitted_binding(h5, declared_policy_sha256: str, preflight: dict | None = None) -> dict:
+    """The one admitted catalog binding for this file.
+
+    The capacity preflight's schema_version selects the admission revision.
+    Revisions 4 and 5 (preflight v2, v3) select the same way. The result's
+    ``stimulus_angle_convention`` is the selected catalog pin's convention
+    (``canvas_y_down_clockwise_legacy`` for every catalog of revisions 3-4
+    and for the legacy pins of revision 5); readers of stimulus angles use it.
+    Revision 3 (preflight v1): present (chaser_state, bounding_boxes) versions
+    and the declared producer policy select one pair-keyed catalog. Revision 4
+    (preflight v2): the declared, present core tables' {path -> schema_version}
+    map must equal an admitted catalog's map, the declared catalog_id must name
+    that same catalog (otherwise ``catalog_id_mismatch``), and the declared
+    policy must be the one bound to it. Absent and undeclared tables do not
+    constrain. Exactly one binding must remain, or the file is refused.
+    """
+    if preflight is None:
+        preflight = {"schema_version": 1}
+    admission_name = preflight_admission(preflight)
+    admission = contract(admission_name)
+    bindings = admission["admitted_catalog_bindings"]
+    catalogs = _admitted_catalogs(admission)
+    declared = "sha256:" + declared_policy_sha256
+    if admission["core_definition_pins"]["selection"]["key"] == "table_version_map":
+        declared_paths = [table.get("path") for table in preflight.get("tables", [])]
+        observed = _present_declared_versions(
+            h5, [path for path in declared_paths if isinstance(path, str)]
+        )
+        matches = [
+            name
+            for name, pin in catalogs.items()
+            if _map_matches(observed, catalog_table_versions(_catalog_file(pin)))
+        ]
+        catalog_id = preflight.get("catalog_id")
+        chosen = [name for name in matches if catalogs[name].get("catalog_id") == catalog_id]
+        require(
+            catalog_id is not None and len(chosen) == 1, "catalog_id_mismatch"
+        )
+        require(
+            bindings[chosen[0]]["producer_policy"]["file_sha256"] == declared
+            and bindings[chosen[0]].get("catalog_id") == catalog_id,
+            "capacity_preflight_producer_policy",
+        )
+        matches = chosen
+    else:
+        matches = []
+        for name, pin in catalogs.items():
+            tables_agree = all(
+                path not in h5 or table_version(h5, path) == pin["table_versions"][key]
+                for key, path in _PIN_TABLES.items()
+            )
+            if tables_agree and bindings[name]["producer_policy"]["file_sha256"] == declared:
+                matches.append(name)
+        require(len(matches) == 1, "capacity_preflight_producer_policy")
+    binding = bindings[matches[0]]
+    schema_sha = binding["capacity_preflight_schema"]["file_sha256"].removeprefix("sha256:")
+    (schema_name,) = [name for name, digest in CONTRACT_HASHES.items() if digest == schema_sha]
+    receipt_pin = admission["correspondence_definition_pins"]["receipt_schema"]
+    angle = catalogs[matches[0]].get("stimulus_angle_convention", LEGACY_CANVAS_ANGLE)
+    require(angle in (LEGACY_CANVAS_ANGLE, STIMULUS_ANGLE_CONVENTION), "stimulus_angle_convention_unknown")
+    return {
+        "catalog": matches[0],
+        "stimulus_angle_convention": angle,
+        # Revision 6: only a catalog pin that declares phototaxis semantics
+        # (phototaxis_v1) admits a reactive heading-split trial-index step.
+        "admits_heading_split": "phototaxis_semantics" in catalogs[matches[0]],
+        # Revision 7: only a catalog pin that declares video overlay semantics
+        # (video_overlay_v1) admits the video_tracking_overlay component, and
+        # a file under it that carries pose observations must carry v3.
+        "admits_video_overlay": "video_overlay_semantics" in catalogs[matches[0]],
+        "catalog_file": _catalog_file(catalogs[matches[0]]),
+        "preflight_schema": schema_name,
+        "admission": admission_name,
+        "correspondence_receipt_version": receipt_pin["schema_version"],
+        **binding,
+    }
+
+
+def require_stimulus_angle_convention(h5, binding: dict) -> str:
+    """The file's stimulus angle declarations agree with its binding's convention.
+
+    A legacy binding (``canvas_y_down_clockwise_legacy``) never carries the
+    ``/metadata/session`` attribute or a protocol declaration: either is
+    refused as ``stimulus_angle_convention_unexpected``, and the sign is never
+    taken from it. An ``angle_v1`` binding requires the session attribute and
+    the authored protocol definition, trial index and semantic identity to
+    declare exactly ``atan2_negative_y_x_degrees``; anything else is
+    ``stimulus_angle_convention_mismatch``. Returns the binding's convention.
+    """
+    convention = binding["stimulus_angle_convention"]
+    attrs = h5[SESSION].attrs if SESSION in h5 else {}
+    session = attrs.get(SESSION_ANGLE_ATTRIBUTE) if SESSION_ANGLE_ATTRIBUTE in attrs else None
+    if isinstance(session, bytes):
+        session = session.decode("utf-8", errors="replace")
+    protocol = []
+    for path in PROTOCOL_ANGLE_DECLARATIONS:
+        document = read_json(h5, path) if path in h5 else {}
+        protocol.append(
+            document.get(SESSION_ANGLE_ATTRIBUTE) if isinstance(document, dict) else None
+        )
+    if convention == LEGACY_CANVAS_ANGLE:
+        require(
+            SESSION_ANGLE_ATTRIBUTE not in attrs
+            and all(value is None for value in protocol),
+            "stimulus_angle_convention_unexpected",
+        )
+        return convention
+    require(
+        session == convention and all(value == convention for value in protocol),
+        "stimulus_angle_convention_mismatch",
+    )
+    return convention
+
+
+def require_selected_catalog_versions(h5, catalog_file: str) -> None:
+    """Every present core table carries the selected catalog's version for it."""
+    versions = catalog_table_versions(catalog_file)
+    known = admitted_table_versions()
+
+    def visit(name, node):
+        path = "/" + name
+        if not isinstance(node, h5py.Dataset):
+            return
+        template = _template(path)
+        if template in versions and template in known:
+            require(
+                table_version(h5, path) == versions[template],
+                f"table_version_not_in_selected_catalog:{path}",
+            )
+
+    h5.visititems(visit)
+
+
+def require_declared_core_tables(h5, declared_paths, catalog_file: str) -> None:
+    """The selected catalog's literal tables are present iff the preflight declares them.
+
+    Templated catalog paths (``/correspondence/{component}/sources``, enums) and
+    non-core tables follow their own contracts (admission revision 3,
+    ``admitted_catalog_bindings.declared_tables``).
+    """
+    declared = set(declared_paths)
+    for table in contract(catalog_file)["tables"]:
+        path = table["path"]
+        if "{" in path:
+            continue
+        require((path in declared) == (path in h5), f"declared_core_table_mismatch:{path}")
 CORRESPONDENCE_CATALOG = "experimental_h5_correspondence_tables_v2.json"
 
 
@@ -116,34 +439,34 @@ def validate_catalog_table(h5, path: str) -> dict:
 
 
 def table_version(h5, path: str) -> int | None:
-    """The chaser table's declared schema_version; only v2 is admitted."""
-    if path != CHASER_STATES or path not in h5:
+    """A core table's declared schema_version, refused unless some admitted catalog pins it."""
+    if path not in h5:
+        return None
+    versions = admitted_table_versions().get(_template(path))
+    if versions is None:
         return None
     version = h5[path].attrs.get("schema_version")
     require(
-        version is not None and int(version) == ADMITTED_CHASER_VERSION,
+        version is not None and int(version) in versions,
         f"unsupported_table_version:{path}",
     )
     return int(version)
 
 
 def table_schema(path: str, version: int | None = None) -> dict:
-    template = path
-    if path.startswith("/definitions/enums/") and len(path.split("/")) == 4:
-        template = "/definitions/enums/{component}"
-    elif (
-        path.startswith("/correspondence/")
-        and path.endswith("/sources")
-        and path != "/correspondence/frames/sources"
-    ):
-        require(len(path.split("/")) == 4, f"unknown_table:{path}")
-        template = "/correspondence/{component}/sources"
-    catalog = CORE_CATALOGS[version] if version is not None else CORE_CATALOG
-    matches = [
-        table
-        for table in _contract(catalog)["tables"]
-        if table["path"] == template
-    ]
+    """The pinned definition of ``path`` at ``version`` (any pinned catalog).
+
+    A (path, version) pair names one definition across every pinned catalog;
+    without a version the revision 2 core catalog's definition is returned.
+    """
+    template = table_template(path)
+    if version is None:
+        matches = [
+            table for table in _contract(CORE_CATALOG)["tables"] if table["path"] == template
+        ]
+    else:
+        definition = _table_definitions().get((template, version))
+        matches = [] if definition is None else [definition]
     require(len(matches) == 1, f"unknown_table:{path}")
     result = deepcopy(matches[0])
     result["path"] = path

@@ -59,6 +59,9 @@ function TaskRow({ row, busy, onStart }) {
       <span class="queue-recording" title=${row.dataset ? `Dataset: ${row.dataset}` : ""}>${row.recording}</span>
       ${row.title !== row.taskId && html`<span class="ink">${row.title}</span>`}
       ${row.notes && html`<span class="muted small clamp-2" title=${row.notes}>${row.notes}</span>`}
+      ${row.openFlags > 0 &&
+      html`<a class="small text-pending" href=${`/peer?task_id=${encodeURIComponent(row.taskId)}`}>
+        ${row.openFlags} ${row.openFlags === 1 ? "frame" : "frames"} flagged by reviewers</a>`}
     </div>
     <span class=${`chip chip-${row.kind}`}>${row.kindLabel}</span>
     <${Progress} progress=${row.progress} />
@@ -148,6 +151,7 @@ function QueuePage() {
           <p class="muted">${payload ? queueSummary(payload, rows) : problem ? "" : "Loading your queue…"}</p>
         </div>
         <span class="spacer"></span>
+        <a class="btn btn-small" href=${(payload && payload.links.peer_review) || "/peer"}>Review others' work</a>
         ${rows.length > 0 &&
         html`<div class="segmented" role="group" aria-label="Filter by task type">
           ${queueFilters(rows).map(

@@ -9,6 +9,7 @@ from typing import Any, Literal, Mapping, Sequence
 import numpy as np
 
 from fisheye.analysis.local_rostral_heartrate import LocalCoordinateDataset
+from fisheye.shared.heading_convention import wrap_delta_radians
 
 
 InjectionPattern = Literal[
@@ -119,7 +120,7 @@ def circular_difference_rad(observed: float | np.ndarray, expected: float | np.n
     difference = np.asarray(observed, dtype=np.float64) - np.asarray(
         expected, dtype=np.float64
     )
-    return (difference + np.pi) % (2.0 * np.pi) - np.pi
+    return wrap_delta_radians(difference)
 
 
 def phase_equivalent_timing_error_ms(

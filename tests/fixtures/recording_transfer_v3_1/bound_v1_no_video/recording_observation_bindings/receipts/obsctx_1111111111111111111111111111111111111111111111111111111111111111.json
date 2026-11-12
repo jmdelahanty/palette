@@ -1,0 +1,37 @@
+{
+  "schema_id": "citrus.recording_observation_finalized_receipt",
+  "schema_version": 1,
+  "canonicalization": "canonical_json_utf8_sort_keys_compact_v1",
+  "receipt_id": "obsbindfin_ba45ed855805d3de38dc7f3509cc61428e3c5181dcc2c5a50158ba70def985c7",
+  "contract_sha256": "sha256:ba45ed855805d3de38dc7f3509cc61428e3c5181dcc2c5a50158ba70def985c7",
+  "contract": {
+    "schema_id": "citrus.recording_observation_finalized_receipt",
+    "schema_version": 1,
+    "request_id": "obsbindreq_1111111111111111111111111111111111111111111111111111111111111111",
+    "request_contract_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "acceptance_id": "obsbindacc_1111111111111111111111111111111111111111111111111111111111111111",
+    "acceptance_contract_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+    "observation_context_id": "obsctx_1111111111111111111111111111111111111111111111111111111111111111",
+    "finalized_at_utc": "2026-10-10T00:05:00Z",
+    "citrus_experiment_id": "citexp_2222222222222222222222222222222222222222222222222222222222222222",
+    "citrus_session_uuid": "citsess_1111111111111111111111111111111111111111111111111111111111111111",
+    "target": {
+      "rig_id": "fixture-rig",
+      "canvas_name": "fixture",
+      "arena_id": "arena_1",
+      "camera_id": "02010093",
+      "source_camera_stream_id": "02010093"
+    },
+    "h5_artifact": {
+      "relative_path": "citrus/citsess_1111111111111111111111111111111111111111111111111111111111111111_snow_1h.h5",
+      "size_bytes": 78,
+      "sha256": "sha256:77168fd06beef8150dcecbcc399335babf10a0950f3af2f02f34831e8f35b835"
+    },
+    "session_status": "COMPLETE",
+    "runtime_geometry_contract_sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+    "protocol_semantic": {
+      "status": "available",
+      "semantic_sha256": "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+    }
+  }
+}

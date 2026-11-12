@@ -12,9 +12,11 @@ import zarr
 from fisheye.labeling import web
 from fisheye.labeling.admin_apply_on_behalf import apply_on_behalf
 from fisheye.labeling.rebase_stale_mask_saves import (
+    PROOF_RECEIPT_CHAIN,
     REBASE_EVENT,
     REBASE_REASON,
     RebaseRefused,
+    main,
     rebase_plan,
     rebase_stale_saves,
 )
@@ -132,3 +134,66 @@ def test_refuses_open_sessions_and_a_backup_at_another_revision(stale_body_save,
     assert any("revision" in r for r in rebase_plan(store.path, "original-mask", wrong)["refusals"])
     store.create_session(task_id="original-mask", user="reviewer")
     assert any("open editor session" in r for r in rebase_plan(store.path, "original-mask", base_backup)["refusals"])
+
+
+def test_receipt_chain_proves_the_stale_body_save_and_it_then_applies(stale_body_save):
+    store, path, run_rel, _base_backup, body = stale_body_save
+    plan = rebase_plan(store.path, "original-mask", None)
+    assert plan["ok"], plan["refusals"]
+    assert plan["proof"] == PROOF_RECEIPT_CHAIN and plan["base_backup"] is None and len(plan["stale_rows"]) == 1
+    assert [(r["task_id"], r["component_name"]) for r in plan["receipt_chain"]] == [("eyes-task", "eyes_union")]
+
+    report = rebase_stale_saves(store.path, "original-mask", None, actor="operator", skip_backup=True)
+    assert report["outcome"] == {"ok": True, "rebased_rows": 1, "row_count": 1, "failures": []}
+    audit = json.loads(store.conn.execute(
+        "SELECT before_json FROM labeling_task_events WHERE event_type = ? AND user = 'operator';", (REBASE_EVENT,)
+    ).fetchone()[0])
+    assert audit["proof"] == PROOF_RECEIPT_CHAIN and audit["receipt_chain"] == plan["receipt_chain"]
+    applied = apply_on_behalf(store.path, "original-mask", actor="operator", skip_backup=True)["outcome"]
+    assert applied["ok"] and applied["applied_checkpoint_count"] == 1, applied
+    run = zarr.open_group(str(path), mode="r", use_consolidated=False)[run_rel]
+    np.testing.assert_array_equal(np.asarray(run["masks_roi"][1, 0]), (body > 0).astype(np.uint8))
+
+
+def _refusals_after(store, path, run_rel, change):
+    change(store, zarr.open_group(str(path), mode="a", use_consolidated=False)[run_rel])
+    plan = rebase_plan(store.path, "original-mask", None)
+    assert not plan["ok"]
+    with pytest.raises(RebaseRefused):
+        rebase_stale_saves(store.path, "original-mask", None, actor="operator", skip_backup=True)
+    assert store.conn.execute(
+        "SELECT target_edit_revision FROM labeling_session_checkpoints WHERE task_id='original-mask';"
+    ).fetchone()[0] == plan["base_revision"]
+    return " | ".join(plan["refusals"])
+
+
+def test_receipt_chain_refuses_a_revision_step_this_store_did_not_apply(stale_body_save):
+    store, path, run_rel, _b, _m = stale_body_save
+    bump = lambda _s, run: run.attrs.update(edit_revision=int(run.attrs["edit_revision"]) + 1)  # noqa: E731
+    assert "0 Apply receipt(s)" in _refusals_after(store, path, run_rel, bump)
+
+
+def test_receipt_chain_refuses_when_the_run_names_another_last_apply(stale_body_save):
+    store, path, run_rel, _b, _m = stale_body_save
+    other = lambda _s, run: run.attrs.update(edit_revision_last_apply_id="written-elsewhere")  # noqa: E731
+    assert "last Apply" in _refusals_after(store, path, run_rel, other)
+
+
+def test_receipt_chain_refuses_a_step_that_wrote_this_component(stale_body_save):
+    store, path, run_rel, _b, _m = stale_body_save
+
+    def same_component(s, _run):
+        s.conn.execute("UPDATE labeling_checkpoint_apply_receipts SET component_name = 'subject_body' WHERE task_id = 'eyes-task';")
+        s.conn.commit()
+
+    assert "wrote subject_body itself" in _refusals_after(store, path, run_rel, same_component)
+
+
+def test_cli_requires_exactly_one_proof(stale_body_save, tmp_path):
+    store = stale_body_save[0]
+    with pytest.raises(SystemExit):
+        main(["--store", str(store.path), "--task-id", "original-mask", "--actor", "operator"])
+    with pytest.raises(SystemExit):
+        main(["--store", str(store.path), "--task-id", "original-mask", "--actor", "operator",
+              "--receipt-chain", "--base-backup", str(tmp_path)])
+    assert main(["--store", str(store.path), "--task-id", "original-mask", "--actor", "operator", "--receipt-chain"]) == 0

@@ -51,6 +51,7 @@ from .validated_behavior_distribution_specs import (
     DistributionMetricSpec,
     validate_distribution_metric_specs,
 )
+from fisheye.shared.heading_convention import wrap_delta_degrees
 
 SCHEMA_ID = "palette.analytics.validated_behavior.distributions"
 SCHEMA_VERSION = 1
@@ -298,11 +299,8 @@ class _SparseAccumulator:
     axis_audits: dict[str, _AxisAudit] = field(default_factory=dict)
 
 
-def wrap_heading_delta_degrees(values: np.ndarray | float) -> np.ndarray:
-    """Wrap signed angles to the exact ``[-180, 180]`` convention."""
-
-    array = np.asarray(values, dtype=np.float64)
-    return (array + 180.0) % 360.0 - 180.0
+# Public name kept for importers; the convention lives in heading_convention.
+wrap_heading_delta_degrees = wrap_delta_degrees
 
 
 def derive_bout_heading_values(

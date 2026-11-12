@@ -97,7 +97,12 @@ def analyze_frame_gaps(
 
     name = _resolve_field(frame_metadata.dtype.names or (), ("triggering_camera_frame_id", "camera_frame_id"))
     camera_ids = frame_metadata[name]
-    unique_ids = np.unique(camera_ids)
+    # Citrus writes 0 until it receives its first camera frame id; 0 is "unknown",
+    # not frame 0, so it must not anchor the range that gaps are filled across.
+    unique_ids = np.unique(camera_ids[camera_ids > 0])
+    if unique_ids.size == 0:
+        _log(console, "[yellow]No known camera frame ids; skipping interpolation.[/yellow]")
+        return None
     sorted_ids = np.sort(unique_ids)
     full_range = np.arange(sorted_ids[0], sorted_ids[-1] + 1)
     missing_frames = np.setdiff1d(full_range, sorted_ids)
@@ -157,6 +162,8 @@ def interpolate_metadata(
 
     for record in frame_metadata:
         cam = int(record[cam_field])
+        if cam <= 0:
+            continue  # unknown camera frame (see analyze_frame_gaps)
         stim = int(record[stim_field])
         ts = int(record[ts_field])
         camera_to_stim.setdefault(cam, []).append(stim)

@@ -23,7 +23,6 @@ from fisheye.analysis.track_kinematics import (
     prefer_refined_detection,
     resolve_detection_from_path,
 )
-from fisheye.analysis.chaser_phase_analysis import _collect_pipeline_provenance
 from fisheye.diagnostics.check_provenance_consistency import _collect_provenance
 from fisheye.refinement.refine_detect import _resolve_detection_quality_labels
 from fisheye.registry.maintenance import _build_recording_step_rows_from_root
@@ -160,11 +159,6 @@ def _lineage_issues(issues: list[str]) -> list[str]:
     return sorted(issue for issue in issues if "references detect" in issue)
 
 
-def _chaser_provenance_resolution(archive: Path) -> list[str]:
-    root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
-    return _lineage_issues(_collect_pipeline_provenance(root)["issues"])
-
-
 def _provenance_consistency_resolution(archive: Path) -> list[str]:
     root = zarr.open_group(str(archive), mode="r", use_consolidated=False)
     return _lineage_issues(_collect_provenance(root).issues)
@@ -180,7 +174,6 @@ CONSUMERS: dict[str, Callable[[Path], object]] = {
     "track_kinematics_prefer_refined": _track_kinematics_resolution,
     "refine_detect_quality_labels": _refine_detect_quality_resolution,
     "analysis_staleness_audit": _staleness_resolution,
-    "chaser_phase_provenance": _chaser_provenance_resolution,
     "provenance_consistency": _provenance_consistency_resolution,
     "detect_quality_batch_plan": _detect_quality_batch_resolution,
 }
@@ -216,7 +209,6 @@ def test_consumers_resolve_identically_after_real_activation(
         "labels": [0, 1],
     }
     assert before["analysis_staleness_audit"] != "source_not_latest"
-    assert before["chaser_phase_provenance"] == []
     assert before["provenance_consistency"] == []
     assert before["detect_quality_batch_plan"] == ("skipped", True)
     assert canonical_detection_lineage_equivalent_runs(archive, LEGACY) == {LEGACY}
@@ -285,7 +277,6 @@ def test_invalid_successor_grants_no_equivalence(
     assert resolved["detect_quality_run"] is None
     assert _track_kinematics_resolution(archive)["is_refined"] is False
     assert _staleness_resolution(archive) == "source_not_latest"
-    assert _chaser_provenance_resolution(archive) != []
     assert _provenance_consistency_resolution(archive) != []
     assert _detect_quality_batch_resolution(archive)[1] is False
 
