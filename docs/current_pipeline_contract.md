@@ -4,7 +4,7 @@
 version: 3
 status: active
 implementation: implemented
-last_verified: 2026-08-27
+last_verified: 2026-11-12
 -->
 
 Purpose: define the current operator-facing source-of-truth contract for Palette

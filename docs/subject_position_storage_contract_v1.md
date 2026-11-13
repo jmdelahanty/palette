@@ -13,6 +13,8 @@ subject-position providers. Palette implements the pure evaluator, strict
 source adapters, immutable selector-ineligible publication, exact source
 handles, and union-key cross-provider canary comparison. Production provider
 selection remains intentionally unimplemented pending reviewed evidence.
+Writer step 6 below (recording the maximum float64-to-float32 quantization
+error) is not yet recorded in the run manifest.
 
 The Phase 1 logical-metadata helper is not a complete run manifest and cannot
 authorize publication. A pure evaluator result does not itself prove source

@@ -5,15 +5,16 @@ from __future__ import annotations
 import json
 import os
 import re
-import smtplib
+import smtplib  # noqa: F401 -- tests patch fisheye.labeling.notifications.smtplib.SMTP
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
-from email.utils import formatdate, make_msgid
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import quote, urlparse
+
+from fisheye.shared.email_delivery import SmtpConfig, build_message, send, write_outbox
 
 
 NOTIFICATION_MODES = ("disabled", "outbox", "smtp")
@@ -271,20 +272,22 @@ def _build_email_message(
     config: LabelingNotificationConfig,
     actor_user: str | None,
 ) -> EmailMessage:
-    message = EmailMessage()
-    message["From"] = config.sender
-    message["To"] = notification.to_email
-    message["Subject"] = notification.subject
-    message["Date"] = formatdate(localtime=False)
-    message["Message-ID"] = make_msgid(domain="palette-labeling.local")
-    message["X-Palette-Labeling-Notification-Kind"] = notification.kind
-    message["X-Palette-Labeling-User"] = notification.to_user
+    headers = {
+        "X-Palette-Labeling-Notification-Kind": notification.kind,
+        "X-Palette-Labeling-User": notification.to_user,
+    }
     if actor_user:
-        message["X-Palette-Labeling-Actor"] = str(actor_user)
-    message.set_content(notification.text_body)
-    if notification.html_body is not None:
-        message.add_alternative(notification.html_body, subtype="html")
-    return message
+        headers["X-Palette-Labeling-Actor"] = str(actor_user)
+    return build_message(
+        sender=config.sender,
+        to=notification.to_email,
+        subject=notification.subject,
+        text_body=notification.text_body,
+        html_body=notification.html_body,
+        headers=headers,
+        message_id_domain="palette-labeling.local",
+        localtime=False,
+    )
 
 
 def _write_outbox_message(
@@ -295,14 +298,12 @@ def _write_outbox_message(
     context: Mapping[str, object] | None,
 ) -> dict[str, object]:
     outbox_dir = config.outbox_dir
-    outbox_dir.mkdir(parents=True, exist_ok=True)
     notification_id = str(uuid.uuid4())
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     safe_user = _safe_file_token(notification.to_user or "unknown")
     stem = f"{stamp}_{notification.kind}_{safe_user}_{notification_id}"
-    eml_path = outbox_dir / f"{stem}.eml"
+    eml_path = write_outbox(message, outbox_dir, stem)
     json_path = outbox_dir / f"{stem}.json"
-    eml_path.write_bytes(bytes(message))
     payload = _result_payload(
         ok=True,
         notification_id=notification_id,
@@ -338,13 +339,17 @@ def _send_smtp_message(
         )
     notification_id = str(uuid.uuid4())
     try:
-        smtp_cls = smtplib.SMTP_SSL if config.smtp_ssl else smtplib.SMTP
-        with smtp_cls(config.smtp_host, config.smtp_port, timeout=30) as server:
-            if config.smtp_starttls and not config.smtp_ssl:
-                server.starttls()
-            if config.smtp_username:
-                server.login(config.smtp_username, config.smtp_password or "")
-            server.send_message(message)
+        send(
+            message,
+            SmtpConfig(
+                host=config.smtp_host,
+                port=config.smtp_port,
+                username=config.smtp_username,
+                password=config.smtp_password,
+                starttls=config.smtp_starttls,
+                ssl=config.smtp_ssl,
+            ),
+        )
     except Exception as exc:
         return _failed_result(
             kind=notification.kind,
