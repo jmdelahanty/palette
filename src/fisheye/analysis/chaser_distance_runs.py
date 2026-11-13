@@ -19,7 +19,8 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from fisheye.analysis.chaser_behavior import (
-    BEHAVIOR_CLASS_LABELS,
+    ChaserBehaviorClass,
+    behavior_class_label,
     resolve_configured_chaser_behaviors,
 )
 from fisheye.analysis.chaser_distance_coordinate_publication import (
@@ -94,6 +95,22 @@ EPOCH_DISTRIBUTION_VISUALIZATION_RENDERER = (
     "palette-chaser-distance-epoch-distribution-v1"
 )
 STATIC_VISUALIZATION_RENDERER_VERSION = "1"
+
+
+def _refuse_programmed_chasers(class_ids: np.ndarray) -> None:
+    """Refuse programmed chasers until a phase-aware analysis exists.
+
+    A programmed chaser is target-directed only during its chase phases, so a
+    whole-recording role would misstate it; it is never relabelled or pooled
+    with aggressive chasers.
+    """
+
+    if np.any(np.asarray(class_ids) == int(ChaserBehaviorClass.PROGRAMMED)):
+        raise ValueError(
+            "chaser distance runs do not support programmed chasers (behavior "
+            "class 4); their chasing is defined per frame by the behavior "
+            "program, not by a whole-recording role."
+        )
 
 
 def _artifact_signature(payload: Mapping[str, Any]) -> str:
@@ -595,8 +612,9 @@ def _build_legacy_chaser_distance_result(
         [behavior_by_index.get(int(index)).behavior_class_id if int(index) in behavior_by_index else 0 for index in chaser_indices],
         dtype=np.int8,
     )
+    _refuse_programmed_chasers(chaser_behavior_class_id)
     chaser_behavior_labels = tuple(
-        BEHAVIOR_CLASS_LABELS.get(int(class_id), "unknown") for class_id in chaser_behavior_class_id
+        behavior_class_label(class_id) for class_id in chaser_behavior_class_id
     )
     try:
         canonical_chasers = canonical_chaser_set_from_protocol_payload(
@@ -846,9 +864,9 @@ def _build_canonical_chaser_distance_result(
         ],
         dtype=np.int8,
     )
+    _refuse_programmed_chasers(chaser_behavior_class_id)
     chaser_behavior_labels = tuple(
-        BEHAVIOR_CLASS_LABELS.get(int(class_id), "unknown")
-        for class_id in chaser_behavior_class_id
+        behavior_class_label(class_id) for class_id in chaser_behavior_class_id
     )
 
     try:

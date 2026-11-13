@@ -351,11 +351,10 @@ def validate_phototaxis_states(
         prior_age = np.r_[
             -1 if previous_row is None else int(previous_row["held_age_updates"]), age[:-1].astype(np.int64)
         ]
-        prior_used = np.r_[
-            0 if previous_row is None else int(previous_row["input_used"]), used[:-1]
-        ]
         stale = ~drives
-        counted = stale & continues & (prior_used != INPUT_FALLBACK)
+        # No exception after a fallback update (agent-contracts PR 119): every
+        # stale update counts one more than the step's previous update.
+        counted = stale & continues
         require(np.all(age[counted].astype(np.int64) == prior_age[counted] + 1), "phototaxis_age_not_counted")
         require(np.all(age[stale & ~continues] == 1), "phototaxis_age_at_step_start")
         require(np.all(age[stale] >= 1), "phototaxis_age_without_fresh_heading")

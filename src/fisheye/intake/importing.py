@@ -52,6 +52,7 @@ from fisheye.intake.outcomes import (
 from fisheye.intake.probes import ProbeResult, import_probe_result
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.recording_transfer_snapshot import (
+    digest_memo,
     MARKER_NAME,
     TRANSFER_PARENT_LAYOUTS,
     TransferSnapshotError,
@@ -59,6 +60,11 @@ from fisheye.shared.recording_transfer_snapshot import (
 )
 
 STATUS_SCHEMA = "palette.citrus_transfer_parent_intake.status.v1"
+# Execution resource, not a scientific parameter: how many independent parents
+# of one delivery are indexed and imported at the same time. Measured on the
+# 2026-11-05 four-arena delivery, a parent needs well under 1 GB, and the
+# per-parent work is NFS reads, hashing and a stimulus-import child process.
+DEFAULT_PARENT_WORKERS = 4
 STATUS_NAME = "citrus_session_import.status.json"
 PLAN_NAME = "organization_plan.json"
 LEASE_FD_ENV = "PALETTE_RECORDING_IMPORT_LEASE_FD"
@@ -103,15 +109,22 @@ def _lease_environment(descriptor: int) -> Iterator[None]:
 
 
 def import_parents(
-    plan: Mapping[str, Any], *, recording_only: bool, lease_fd: int
+    plan: Mapping[str, Any],
+    *,
+    recording_only: bool,
+    lease_fd: int,
+    parent_workers: int = 1,
 ) -> list[ParentImportResult]:
     """Import every planned parent through the recording import owner.
 
     ``build_plans`` resolves each organized parent and marks one whose
     receipt already verifies as ``skipped`` (resume); every other parent goes
     through ``process_recording_import`` in this process. Every planned
-    parent is attempted; the structured per-parent results are returned and
-    the caller decides. The resolved Zarr must be the organizer's planned one.
+    parent is attempted; the structured per-parent results are returned in
+    plan order and the caller decides. The resolved Zarr must be the
+    organizer's planned one. Parents write disjoint recording directories and
+    Zarr archives, so up to ``parent_workers`` of them run concurrently; the
+    workflow lock is lent to every stimulus child for the whole batch.
     """
 
     from fisheye.utils.import_organized_recordings_analysis import build_plans
@@ -120,7 +133,10 @@ def import_parents(
         RecordingImportOptions,
         process_recording_import,
     )
-    from fisheye.utils.organize_transfer_recordings import parent_zarr_paths
+    from fisheye.utils.organize_transfer_recordings import (
+        run_parents_in_parallel,
+        parent_zarr_paths,
+    )
 
     import_stimulus = not recording_only
     options = RecordingImportOptions(
@@ -132,69 +148,65 @@ def import_parents(
         stimulus_overwrite=False,
         stimulus_quiet=False,
     )
-    results = []
+    planned = dict(zip(
+        (parent["identity"]["recording_id"] for parent in plan["parents"]),
+        parent_zarr_paths(plan),
+    ))
+
+    def import_one(parent: Mapping[str, Any]) -> ParentImportResult:
+        directory = Path(parent["destination_dir"])
+        planned_zarr = planned[parent["identity"]["recording_id"]]
+        base = {
+            "recording_id": parent["identity"]["recording_id"],
+            "camera_id": parent["identity"]["camera_id"],
+            "recording_dir": str(directory),
+            "zarr_path": str(planned_zarr),
+        }
+        try:
+            [resolved] = build_plans(
+                [directory],
+                import_stimulus=import_stimulus,
+                skip_existing=True,
+                check_stimulus=import_stimulus,
+            )
+            if resolved.zarr_path.resolve() != planned_zarr.resolve():
+                raise _PlanRefusal(
+                    f"import owner resolved {resolved.zarr_path}, planned {planned_zarr}"
+                )
+            if resolved.status == "missing":
+                raise _PlanRefusal(f"organized parent is not importable: {resolved.reason}")
+            if resolved.status == "skipped":
+                return ParentImportResult(**base, outcome="already_imported")
+            result = process_recording_import(
+                RecordingAnalysisPlan(
+                    recording_dir=resolved.recording_dir,
+                    h5_path=resolved.h5_path,
+                    cam_video=resolved.cam_video,
+                    zarr_path=resolved.zarr_path,
+                    recording_layout=resolved.recording_layout,
+                ),
+                options,
+            )
+        except _PlanRefusal as exc:  # deterministic: refused
+            return ParentImportResult(**base, outcome="failed", failed_step="plan_refused", error=str(exc))
+        except Exception as exc:  # I/O, zarr/h5py, a code bug: retried
+            return ParentImportResult(
+                **base, outcome="failed", failed_step="plan_error",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        if result.ok:
+            return ParentImportResult(**base, outcome="imported")
+        return ParentImportResult(
+            **base,
+            outcome="failed",
+            failed_step=result.failed_step,
+            returncode=result.returncode,
+            error=result.error
+            or (f"returncode={result.returncode}" if result.returncode is not None else None),
+        )
+
     with _lease_environment(lease_fd):
-        for parent, planned_zarr in zip(plan["parents"], parent_zarr_paths(plan)):
-            directory = Path(parent["destination_dir"])
-            base = {
-                "recording_id": parent["identity"]["recording_id"],
-                "camera_id": parent["identity"]["camera_id"],
-                "recording_dir": str(directory),
-                "zarr_path": str(planned_zarr),
-            }
-            try:
-                [resolved] = build_plans(
-                    [directory],
-                    import_stimulus=import_stimulus,
-                    skip_existing=True,
-                    check_stimulus=import_stimulus,
-                )
-                if resolved.zarr_path.resolve() != planned_zarr.resolve():
-                    raise _PlanRefusal(
-                        f"import owner resolved {resolved.zarr_path}, planned {planned_zarr}"
-                    )
-                if resolved.status == "missing":
-                    raise _PlanRefusal(f"organized parent is not importable: {resolved.reason}")
-                if resolved.status == "skipped":
-                    results.append(ParentImportResult(**base, outcome="already_imported"))
-                    continue
-                result = process_recording_import(
-                    RecordingAnalysisPlan(
-                        recording_dir=resolved.recording_dir,
-                        h5_path=resolved.h5_path,
-                        cam_video=resolved.cam_video,
-                        zarr_path=resolved.zarr_path,
-                        recording_layout=resolved.recording_layout,
-                    ),
-                    options,
-                )
-            except _PlanRefusal as exc:  # deterministic: refused
-                results.append(
-                    ParentImportResult(**base, outcome="failed", failed_step="plan_refused", error=str(exc))
-                )
-                continue
-            except Exception as exc:  # I/O, zarr/h5py, a code bug: retried
-                results.append(
-                    ParentImportResult(
-                        **base, outcome="failed", failed_step="plan_error",
-                        error=f"{type(exc).__name__}: {exc}",
-                    )
-                )
-                continue
-            if result.ok:
-                results.append(ParentImportResult(**base, outcome="imported"))
-            else:
-                results.append(
-                    ParentImportResult(
-                        **base,
-                        outcome="failed",
-                        failed_step=result.failed_step,
-                        returncode=result.returncode,
-                        error=result.error
-                        or (f"returncode={result.returncode}" if result.returncode is not None else None),
-                    )
-                )
-    return results
+        return run_parents_in_parallel(list(plan["parents"]), import_one, workers=parent_workers)
 
 
 def _deterministic(parent: ParentImportResult) -> bool:
@@ -274,6 +286,64 @@ def _require_one_producer_commit(plan: Mapping[str, Any]) -> None:
                 "importer_git_sha": current,
                 "zarr_paths": sorted(foreign),
             },
+        )
+
+
+def _individual_fish(zarr_path: Path) -> str | None:
+    """The one individual fish a parent's published subject record names, or None.
+
+    The MetaZebrobot ``mzb_fish_id`` when the record carries one (snapshot v3
+    keeps a Citrus-local ``subject_id`` beside it); otherwise the single
+    explicit subject id of an ``individual``. Groups, placeholders and parents
+    with no subject record name no fish.
+    """
+
+    import zarr
+
+    from fisheye.shared.subject_metadata import (
+        MissingSubjectMetadataError,
+        resolve_subject_metadata,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    try:
+        resolved = resolve_subject_metadata(root, allow_legacy=False)
+    except MissingSubjectMetadataError:
+        return None
+    subject = resolved.subject
+    if subject.get("identity_scope") == "recording_local_placeholder":
+        return None
+    if subject.get("mzb_fish_id"):
+        return str(subject["mzb_fish_id"])
+    if subject.get("subject_type") == "individual" and len(resolved.subject_ids) == 1:
+        return resolved.subject_ids[0]
+    return None
+
+
+def _require_distinct_individual_fish(plan: Mapping[str, Any]) -> None:
+    """Refuse a delivery that records one individual fish in two arenas.
+
+    One fish cannot be in two arenas at once, so a repeat is an operator
+    mis-pick (the 2026-10-16, 10-17 and 11-06 deliveries), never a valid
+    recording. Checked after the parents are imported and before staging is
+    retired or anything is registered: the as-recorded archives stay for a
+    correction to bind to, and the staged session stays in place.
+    """
+
+    from fisheye.utils.organize_transfer_recordings import parent_zarr_paths
+
+    arenas: dict[str, list[str]] = {}
+    for parent, zarr_path in zip(plan["parents"], parent_zarr_paths(plan)):
+        fish = _individual_fish(zarr_path)
+        if fish is not None:
+            arenas.setdefault(fish, []).append(parent["identity"]["recording_id"])
+    repeated = {fish: ids for fish, ids in sorted(arenas.items()) if len(ids) > 1}
+    if repeated:
+        raise IntakeRefused(
+            "one individual fish is recorded in more than one arena of this delivery: "
+            + "; ".join(f"{fish} in {', '.join(ids)}" for fish, ids in repeated.items()),
+            code="delivery_duplicate_individual_fish",
+            details={"repeated_fish": repeated},
         )
 
 
@@ -406,6 +476,7 @@ def import_delivery(
     session_dir: Path | None = None,
     staging_dir: Path | None = None,
     status_path: Path | None = None,
+    parent_workers: int = DEFAULT_PARENT_WORKERS,
 ) -> ProbeResult:
     """Organize, import and retire one delivery; return its true import probe.
 
@@ -414,10 +485,40 @@ def import_delivery(
     Raises :class:`IntakeRefused` (65) for invalid input, :class:`IntakeHeld`
     (75) when another live job holds the delivery, anything else (1) for a
     retryable failure. No registry is opened.
+
+    The whole job hashes each unchanged file once (``digest_memo``): every
+    later verification pass of the same bytes is a stat-identity check, and
+    any file whose identity moved is hashed again. ``parent_workers``
+    independent parents are indexed and imported at a time. Both are recorded
+    under ``execution`` in the status; neither changes any written byte.
     """
 
     sha = validate_snapshot_sha(snapshot_sha)
+    parent_workers = int(parent_workers)
+    if parent_workers < 1:
+        raise IntakeRefused(f"parent_workers must be at least 1, not {parent_workers}")
     destination = Path(destination_root) if destination_root is not None else default_destination_root()
+    with ExitStack() as job:
+        memo = job.enter_context(digest_memo())
+        return _import_delivery(
+            sha, run_dir, resume_plan, destination=destination, session_dir=session_dir,
+            staging_dir=staging_dir, status_path=status_path, parent_workers=parent_workers,
+            memo=memo,
+        )
+
+
+def _import_delivery(
+    sha: str,
+    run_dir: Path,
+    resume_plan: Path | None,
+    *,
+    destination: Path,
+    session_dir: Path | None,
+    staging_dir: Path | None,
+    status_path: Path | None,
+    parent_workers: int,
+    memo,
+) -> ProbeResult:
     try:
         plan, state = _resolve_plan(
             sha,
@@ -441,6 +542,7 @@ def import_delivery(
         "apply": True,
         "registry": None,
         "snapshot_sha": sha,
+        "execution": {"parent_workers": parent_workers, "digest_memo": None},
     }
     status: _Status | None = None
     with ExitStack() as resources:
@@ -454,24 +556,30 @@ def import_delivery(
             try:
                 result = _import_under_lock(
                     sha, plan, recording_only=recording_only, verify_lock=verify_lock,
-                    lock_fd=lock_fd, payload=payload,
+                    lock_fd=lock_fd, payload=payload, parent_workers=parent_workers,
                 )
             except Exception as exc:
                 classified = classify_organizer_failure(exc)
                 if classified is exc:
                     raise
                 raise classified from exc
+            payload["execution"]["digest_memo"] = _memo_record(memo)
             payload.update(status="complete", probe_import=result.to_json())
             status.publish()
             return result
         except BaseException as exc:
             payload["error"] = str(exc)
+            payload["execution"]["digest_memo"] = _memo_record(memo)
             if status is not None:
                 try:
                     status.publish()
                 except Exception as status_exc:
                     print(f"Status not written: {status_exc}", file=sys.stderr)
             raise
+
+
+def _memo_record(memo) -> dict[str, int]:
+    return {"hits": memo.hits, "misses": memo.misses, "unsettled": memo.unsettled}
 
 
 def _import_under_lock(
@@ -482,6 +590,7 @@ def _import_under_lock(
     verify_lock,
     lock_fd: int,
     payload: dict,
+    parent_workers: int = 1,
 ) -> ProbeResult:
     from fisheye.utils.organize_transfer_recordings import (
         finalize_transfer_staging,
@@ -502,10 +611,15 @@ def _import_under_lock(
         )
     else:
         prepare_transfer_parent_recordings(
-            plan, registry_path=None, require_stimulus=not recording_only
+            plan,
+            registry_path=None,
+            require_stimulus=not recording_only,
+            parent_workers=parent_workers,
         )
         _require_one_producer_commit(plan)
-        parents = import_parents(plan, recording_only=recording_only, lease_fd=lock_fd)
+        parents = import_parents(
+            plan, recording_only=recording_only, lease_fd=lock_fd, parent_workers=parent_workers
+        )
         payload["parents"] = [parent.to_json() for parent in parents]
         failed = [parent for parent in parents if parent.outcome == "failed"]
         if failed:
@@ -515,6 +629,7 @@ def _import_under_lock(
             if all(_deterministic(parent) for parent in failed):
                 raise IntakeRefused(message, code="parent_import_refused")
             raise _ImportFailed(message)
+        _require_distinct_individual_fish(plan)
         payload["import_complete"] = True
         verify_lock()
         final = finalize_transfer_staging(
@@ -531,6 +646,7 @@ def _import_under_lock(
 
 
 __all__ = [
+    "DEFAULT_PARENT_WORKERS",
     "LEASE_FD_ENV",
     "ParentImportResult",
     "STATUS_NAME",
