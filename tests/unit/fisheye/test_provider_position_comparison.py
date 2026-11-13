@@ -44,6 +44,7 @@ from fisheye.shared.subject_position_storage import (
 from fisheye.shared.subject_position_types import (
     POSITION_FAILURE_REASON_CODES,
     empty_position_xy,
+    float32_quantization_record,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.utils.materialize_position_provider_comparison_canary import (
@@ -123,6 +124,9 @@ def _prepared(
         software_sha256=canonical_json_sha256(records["software"]),
         coordinate_record=coordinate,
         coordinate_sha256=canonical_json_sha256(coordinate),
+        float32_quantization=float32_quantization_record(
+            arrays["position_xy"].astype(np.float64), arrays["position_xy"], arrays["valid"]
+        ),
     )
 
 

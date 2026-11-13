@@ -744,3 +744,120 @@ def test_clipped_session_requires_matching_proxy_entry(tmp_path: Path) -> None:
             manual_score=1.0,
             manual_class_id=0,
         )
+
+
+def _clipped_fixture(
+    tmp_path: Path,
+    *,
+    frame_columns: dict[str, list[object]] | None = None,
+    selected_runs: list[dict[str, object]] | None = None,
+    refined_attrs: dict[str, object] | None = None,
+) -> tuple[Path, zarr.Group, Path]:
+    source_video = tmp_path / "recording" / "clips" / "clip_000000" / "Cam2010093.mp4"
+    source_video.parent.mkdir(parents=True)
+    source_video.write_bytes(b"source")
+    frame_index = tmp_path / "recording" / "recording_frame_index.parquet"
+    columns: dict[str, list[object]] = {
+        "camera_serial": ["2010093"] * 3,
+        "clip_id": ["clip_000000"] * 3,
+        "clip_local_frame_index": [0, 1, 2],
+        "recording_frame_id": [1, 2, 3],
+        "video_path": [str(source_video)] * 3,
+    }
+    columns.update(frame_columns or {})
+    pq.write_table(pa.table(columns), frame_index)
+    zarr_path = tmp_path / "recording" / "zarr" / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.attrs.update({"width": 4512, "height": 4512, "fps": 30})
+    collection = root.create_group("experiment_index").create_group("finalized_runs").create_group("collection_a")
+    selected = {
+        "clip_id": "clip_000000",
+        "camera_serial": "2010093",
+        "refined_group_path": "clips/clip_000000/cameras/2010093/refined_detect_runs/refined_a",
+        "source": {"video_path": str(source_video)},
+    }
+    collection.attrs["selected_runs"] = selected_runs if selected_runs is not None else [selected]
+    refined = root.require_group("clips/clip_000000/cameras/2010093/refined_detect_runs/refined_a")
+    refined.attrs.update(refined_attrs or {})
+    return zarr_path, root, frame_index
+
+
+def _open_clipped(zarr_path: Path, root: zarr.Group, frame_index: Path) -> backend.VideoDetectReviewSession:
+    return backend._clipped_session(  # noqa: SLF001
+        zarr_path,
+        root,
+        collection_id="collection_a",
+        recording_frame_index=frame_index,
+        review_proxy_manifest=None,
+        editable=False,
+        manual_score=1.0,
+        manual_class_id=0,
+    )
+
+
+def test_clipped_session_rejects_duplicate_selected_pairs(tmp_path: Path) -> None:
+    run = {
+        "clip_id": "clip_000000",
+        "camera_serial": "2010093",
+        "refined_group_path": "clips/clip_000000/cameras/2010093/refined_detect_runs/refined_a",
+    }
+    zarr_path, root, frame_index = _clipped_fixture(
+        tmp_path,
+        selected_runs=[run, {**run, "refined_detect_run": "refined_b"}],
+    )
+    with pytest.raises(RuntimeError, match="more than one run"):
+        _open_clipped(zarr_path, root, frame_index)
+
+
+def test_clipped_session_derives_parent_from_recording_frame_id_and_logs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    zarr_path, root, frame_index = _clipped_fixture(tmp_path)
+    with caplog.at_level("WARNING", logger=backend.__name__):
+        session = _open_clipped(zarr_path, root, frame_index)
+    assert "recording_frame_id - 1" in caplog.text
+    assert session.frame_records[2].recording_frame_id == 3
+    assert session.frame_records[2].source_frame_index == 2
+
+
+def test_clipped_session_without_parent_column_refuses_misaligned_frame_ids(tmp_path: Path) -> None:
+    # Row position 0 would be accepted under the old behaviour; the contract
+    # projection recording_frame_id - 1 = 9 does not match it.
+    zarr_path, root, frame_index = _clipped_fixture(
+        tmp_path, frame_columns={"recording_frame_id": [10, 11, 12]}
+    )
+    session = _open_clipped(zarr_path, root, frame_index)
+    with pytest.raises(RuntimeError, match="row-aligned"):
+        session.frame_records[0]
+
+
+def test_clipped_session_refuses_null_parent_frame_index(tmp_path: Path) -> None:
+    zarr_path, root, frame_index = _clipped_fixture(
+        tmp_path, frame_columns={"parent_frame_index": [0, None, 2]}
+    )
+    session = _open_clipped(zarr_path, root, frame_index)
+    assert session.frame_records[0].parent_frame_index == 0
+    with pytest.raises(RuntimeError, match="null parent_frame_index"):
+        session.frame_records[1]
+
+
+def test_clipped_session_refuses_conflicting_source_geometry(tmp_path: Path) -> None:
+    zarr_path, root, frame_index = _clipped_fixture(
+        tmp_path, refined_attrs={"source_video_width": 2256, "source_video_height": 4512}
+    )
+    with pytest.raises(RuntimeError, match="Conflicting source video geometry"):
+        _open_clipped(zarr_path, root, frame_index)
+
+
+def test_clipped_session_accepts_agreeing_geometry_and_ignores_inference_size(tmp_path: Path) -> None:
+    zarr_path, root, frame_index = _clipped_fixture(
+        tmp_path,
+        refined_attrs={
+            "source_video_width": 4512,
+            "source_video_height": 4512,
+            "inference_width": 640,
+            "inference_height": 640,
+        },
+    )
+    video = next(iter(_open_clipped(zarr_path, root, frame_index).videos.values()))
+    assert (video.width, video.height) == (4512, 4512)
