@@ -3,7 +3,7 @@
 version: 1
 status: active
 implementation: implemented
-last_verified: 2026-08-13
+last_verified: 2026-11-13
 stage_arrays_spec: DETECT_SPEC
 -->
 
@@ -82,8 +82,13 @@ The complete accepted boundary and implementation checklist are in
 The direct canonical batch call, the direct single-recording pipeline call, and
 the `submit_detect_quality_refine_bsub.sh` latest-based convenience chain were
 retired. The supported combined workflow is
-`submit_detect_artifact_quality_refine_bsub.sh`; ordinary full-recording arrays
-use `submit_detect_batches_bsub.sh` and node-local atomic publication.
+`submit_detect_artifact_quality_refine_bsub.sh`, and a single recording uses
+`submit_detect_artifact_bsub.sh`. `submit_detect_batches_bsub.sh` and
+`run_detections_batch --apply` were retired on 2026-11-13 and refuse before
+doing any work: since `05f133a4` (2026-08-14) the flat node-local publication
+they used refuses unless called with `legacy_compatibility_publish=True`, which
+they never passed, so they failed on every recording. `run_detections_batch`
+remains a planner (`--dry-run`, `--resolve-models`) for the artifact chain.
 
 The completed implementation brief and former batch-agent work plan are kept
 under `docs/archive/`; neither is an operator runbook.
