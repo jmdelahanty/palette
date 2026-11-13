@@ -161,7 +161,7 @@ def test_v3_is_refused_under_the_legacy_binding():
 
 
 def test_an_unknown_policy_is_refused():
-    text = _mutated_v3("snow", lambda s: s.update(normalization_policy="citrus.protocol.semantic.v4"))
+    text = _mutated_v3("snow", lambda s: s.update(normalization_policy="citrus.protocol.semantic.v5"))
     with pytest.raises(ProtocolSemanticContractError, match="normalization_policy must be"):
         _validate(text)
 

@@ -1,0 +1,11 @@
+{
+  "capture_selected": false,
+  "cameras": {
+    "2010095": {
+      "status": "missing_in_capture"
+    },
+    "2010096": {
+      "status": "not_selected"
+    }
+  }
+}

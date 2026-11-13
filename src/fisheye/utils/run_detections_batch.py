@@ -920,6 +920,16 @@ def _run_detect_plan(
     )
 
 
+APPLY_RETIRED_MESSAGE = (
+    "run_detections_batch --apply is retired: flat detect_runs publication was "
+    "retired from production on 2026-08-14 (05f133a4), so it refused every "
+    "recording. Use the artifact-first route: scripts/submit_detect_artifact_bsub.sh "
+    "(one recording) or scripts/submit_detect_artifact_quality_refine_bsub.sh "
+    "(registry-scoped, with quality and refinement). See "
+    "docs/detection_publication_contract.md. --dry-run planning still works."
+)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Batch run registry-backed detect on analysis zarr archives.",
@@ -1058,6 +1068,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    if args.apply:
+        # Retired 2026-11-13. Flat detect_runs publication has refused since
+        # 05f133a4 (2026-08-14), so --apply could only fail per recording.
+        # Planning (--dry-run, incl. --resolve-models for the artifact chain)
+        # is unchanged.
+        print(APPLY_RETIRED_MESSAGE, file=sys.stderr)
+        return 2
 
     if args.source == "registry" and not args.paths and not args.file_list:
         inputs: list[Path] = []
