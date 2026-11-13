@@ -45,6 +45,21 @@ def reads(monkeypatch):
     return seen
 
 
+@pytest.fixture
+def parses(monkeypatch):
+    """Names of the metadata files whose rows were actually parsed, in order."""
+
+    seen: list[str] = []
+    real = transfer._frame_map_rows
+
+    def counting(path, kind, previous, crop_offset, on_row):
+        seen.append(Path(path).name)
+        return real(path, kind, previous, crop_offset, on_row)
+
+    monkeypatch.setattr(transfer, "_frame_map_rows", counting)
+    return seen
+
+
 @pytest.fixture(autouse=True)
 def _files_have_settled(monkeypatch):
     """Fixture files were written moments ago; the job's clock says they settled."""
@@ -399,3 +414,147 @@ def test_a_file_written_moments_ago_is_not_memoized(tmp_path, reads, monkeypatch
         assert transfer.file_ref(root, rel) == transfer.file_ref(root, rel) == first
         assert (memo.hits, memo.misses, memo.unsettled) == (1, 1, 0)
     assert reads == ["a.json"] * 3
+
+
+# ------------------------------------------------------- unsettled entries
+
+
+def test_unsettled_entries_are_described_by_path_and_age(tmp_path, reads, monkeypatch):
+    monkeypatch.setattr(transfer, "_now_ns", time.time_ns)  # the real clock
+    root, rel = _artifact(tmp_path)
+    with transfer.digest_memo() as memo:
+        transfer.file_ref(root, rel)
+        transfer.file_ref(root, rel)
+        report = memo.report()
+    assert (report["hits"], report["misses"], report["unsettled"]) == (0, 2, 2)
+    assert report["unsettled_files"] == 1
+    assert [entry["path"] for entry in report["unsettled_sample"]] == [rel, rel]
+    ages = [entry["age_s"] for entry in report["unsettled_sample"]]
+    assert all(0 <= age < transfer.DIGEST_MEMO_SETTLE_NS / 10**9 for age in ages)
+    assert report["unsettled_age_s"] == {"min": min(ages), "max": max(ages)}
+    assert report["frame_maps"] == {"hits": 0, "misses": 0, "unsettled": 0}
+    assert list(report)[:3] == ["hits", "misses", "unsettled"]
+
+
+def test_the_sample_is_bounded_and_the_counts_are_not(tmp_path, reads, monkeypatch):
+    monkeypatch.setattr(transfer, "_now_ns", time.time_ns)
+    monkeypatch.setattr(transfer, "UNSETTLED_SAMPLE_SIZE", 3)
+    root, rel = _artifact(tmp_path)
+    with transfer.digest_memo() as memo:
+        for _ in range(5):
+            transfer.file_ref(root, rel)
+        report = memo.report()
+    assert report["unsettled"] == 5 and len(report["unsettled_sample"]) == 3
+
+
+def test_a_settled_memo_reports_no_unsettled_detail(tmp_path, reads):
+    root, rel = _artifact(tmp_path)
+    with transfer.digest_memo() as memo:
+        transfer.file_ref(root, rel)
+        report = memo.report()
+    assert report["unsettled"] == 0 and report["unsettled_files"] == 0
+    assert report["unsettled_age_s"] is None and report["unsettled_sample"] == []
+
+
+# ------------------------------------------------------------- frame maps
+
+
+def _metadata(tmp_path: Path) -> Path:
+    source = FIXTURES / "rolling/clips/clip_0000/Cam02010093_full.csv"
+    path = tmp_path / source.name
+    shutil.copyfile(source, path)
+    return path
+
+
+def test_outside_a_memo_every_frame_map_parses_the_rows(tmp_path, parses):
+    path = _metadata(tmp_path)
+    first = transfer.frame_map(path, "full", 0, 0)
+    assert transfer.frame_map(path, "full", 0, 0) == first
+    assert parses == [path.name, path.name]
+
+
+def test_inside_a_memo_an_unchanged_frame_map_is_parsed_once(tmp_path, parses):
+    path = _metadata(tmp_path)
+    fresh = transfer.frame_map(path, "full", 0, 0)
+    parses.clear()
+    with transfer.digest_memo() as memo:
+        first = transfer.frame_map(path, "full", 0, 0)
+        second = transfer.frame_map(path, "full", 0, 0)
+        assert (memo.frame_map_hits, memo.frame_map_misses) == (1, 1)
+    assert first == second == fresh
+    assert parses == [path.name]
+    # The caller owns its copy: mutating one result never changes a later one.
+    first["frame_count"] = -1
+    with transfer.digest_memo():
+        assert transfer.frame_map(path, "full", 0, 0) == fresh
+
+
+def test_the_arguments_are_part_of_the_frame_map_key(tmp_path, parses):
+    path = _metadata(tmp_path)
+    with transfer.digest_memo():
+        first = transfer.frame_map(path, "full", 0, 0)
+        with pytest.raises(transfer.TransferSnapshotError):
+            transfer.frame_map(path, "full", first["last_recording_frame_id"], 0)
+        with pytest.raises(transfer.TransferSnapshotError):
+            transfer.frame_map(path, "crop", 0, 0)
+    assert parses == [path.name] * 3
+
+
+def test_a_row_callback_always_streams_the_rows(tmp_path, parses):
+    path = _metadata(tmp_path)
+    streamed: list[int] = []
+    with transfer.digest_memo() as memo:
+        first = transfer.frame_map(path, "full", 0, 0)
+        again = transfer.frame_map(path, "full", 0, 0, on_row=lambda *row: streamed.append(row[1]))
+        assert (memo.frame_map_hits, memo.frame_map_misses) == (0, 1)
+    assert first == again and len(streamed) == first["frame_count"]
+    assert parses == [path.name, path.name]
+
+
+def test_a_rewritten_metadata_file_is_parsed_again(tmp_path, parses):
+    path = _metadata(tmp_path)
+    with transfer.digest_memo():
+        first = transfer.frame_map(path, "full", 0, 0)
+        _next_timestamp_tick(path)
+        lines = path.read_bytes().splitlines(keepends=True)
+        path.write_bytes(b"".join(lines[:-1]))  # one row fewer
+        second = transfer.frame_map(path, "full", 0, 0)
+    assert second["frame_count"] == first["frame_count"] - 1
+    assert parses == [path.name, path.name]
+
+
+def test_a_frame_map_of_a_file_written_moments_ago_is_not_memoized(tmp_path, parses, monkeypatch):
+    monkeypatch.setattr(transfer, "_now_ns", time.time_ns)
+    path = _metadata(tmp_path)
+    with transfer.digest_memo() as memo:
+        assert transfer.frame_map(path, "full", 0, 0) == transfer.frame_map(path, "full", 0, 0)
+        report = memo.report()
+    assert report["frame_maps"] == {"hits": 0, "misses": 2, "unsettled": 2}
+    assert report["unsettled_files"] == 1 and report["unsettled_sample"][0]["path"] == str(path)
+    assert parses == [path.name, path.name]
+
+
+def test_snapshot_verification_under_a_memo_parses_each_frame_map_once(tmp_path, parses):
+    root = _staging(tmp_path)
+    fresh = transfer.verify_transfer_snapshot(root)
+    fresh_parses = sorted(parses)
+    assert fresh_parses  # every clip output's metadata is validated
+    parses.clear()
+    with transfer.digest_memo():
+        first = transfer.verify_transfer_snapshot(root)
+        assert sorted(parses) == fresh_parses
+        second = transfer.verify_transfer_snapshot(root)
+        assert sorted(parses) == fresh_parses  # nothing parsed again
+    assert first.snapshot == second.snapshot == fresh.snapshot
+
+
+def test_a_changed_metadata_file_under_a_memo_is_refused_by_verification(tmp_path, parses):
+    root = _staging(tmp_path)
+    with transfer.digest_memo():
+        transfer.verify_transfer_snapshot(root)
+        path = next(root.rglob("*_full.csv"))
+        _next_timestamp_tick(path)
+        lines = path.read_bytes().splitlines(keepends=True)
+        path.write_bytes(b"".join(lines[:-1]))
+        with pytest.raises(transfer.TransferSnapshotError):
+            transfer.verify_transfer_snapshot(root)
