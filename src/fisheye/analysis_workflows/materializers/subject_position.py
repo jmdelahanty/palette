@@ -51,7 +51,10 @@ from fisheye.shared.subject_position_storage import (
     canonical_observation_position_logical_metadata,
     validate_observation_position_arrays,
 )
-from fisheye.shared.subject_position_types import SUBJECT_POSITION_STORAGE_SCHEMA_ID
+from fisheye.shared.subject_position_types import (
+    SUBJECT_POSITION_STORAGE_SCHEMA_ID,
+    validate_float32_quantization_record,
+)
 from fisheye.shared.zarr.analysis_array_contracts import (
     AnalysisArrayDeclaration,
     AnalysisAuthorityRole,
@@ -100,7 +103,10 @@ from fisheye.shared.zarr_run_completion import (
 SUBJECT_POSITION_PUBLISH_SCHEMA_ID = "palette.subject_position_run_publish"
 SUBJECT_POSITION_PUBLISH_SCHEMA_VERSION = 1
 SUBJECT_POSITION_MANIFEST_SCHEMA_ID = "palette.subject_position_run_manifest"
-SUBJECT_POSITION_MANIFEST_SCHEMA_VERSION = 1
+# v2 adds the measured float32 quantization record (contract writer step 6).
+# v1 manifests stay readable as historical runs; the writer emits only v2.
+SUBJECT_POSITION_MANIFEST_SCHEMA_VERSION = 2
+SUBJECT_POSITION_MANIFEST_READABLE_SCHEMA_VERSIONS = (1, 2)
 SUBJECT_POSITION_PARENT_PATH = "analysis/subject_position_runs/observation"
 SUBJECT_POSITION_STORAGE_PLAN_ATTR = "subject_position_storage_plan"
 SUBJECT_POSITION_MANIFEST_ATTR = "subject_position_manifest"
@@ -378,6 +384,10 @@ def plan_subject_position_run(
         raise ValueError("Scratch root must be outside the authoritative archive.")
     if not isinstance(storage_profile, StorageProfile):
         raise TypeError("storage_profile must be a StorageProfile.")
+    if prepared.float32_quantization is None:
+        raise ValueError(
+            "Subject-position publication requires the measured float32 quantization record."
+        )
 
     attempt = str(uuid.UUID(publication_attempt_uuid)) if publication_attempt_uuid else str(uuid.uuid4())
     chosen_name = _safe_run_name(run_name or f"position_{uuid.UUID(attempt).hex}")
@@ -484,6 +494,7 @@ def build_subject_position_manifest(
             prepared.arrays
         ),
         "physical_storage_plan": plan.storage_receipt.as_manifest(),
+        "float32_quantization": _thaw_json(prepared.float32_quantization),
         "publication": {
             "policy_id": SUBJECT_POSITION_PUBLISH_POLICY,
             "retry_policy": SUBJECT_POSITION_RETRY_POLICY,
@@ -507,7 +518,10 @@ def subject_position_manifest_digest(manifest: Mapping[str, Any]) -> str:
         raise ValueError("Subject-position manifest envelope is not exact.")
     if manifest["schema_id"] != SUBJECT_POSITION_MANIFEST_SCHEMA_ID:
         raise ValueError("Subject-position manifest schema ID mismatch.")
-    if manifest["schema_version"] != SUBJECT_POSITION_MANIFEST_SCHEMA_VERSION:
+    if (
+        type(manifest["schema_version"]) is not int
+        or manifest["schema_version"] not in SUBJECT_POSITION_MANIFEST_READABLE_SCHEMA_VERSIONS
+    ):
         raise ValueError("Subject-position manifest schema version mismatch.")
     payload = manifest["payload"]
     if not isinstance(payload, Mapping) or manifest["payload_digest"] != canonical_json_sha256(payload):
@@ -529,6 +543,8 @@ def validate_subject_position_manifest(
         "source", "policy", "software", "coordinate", "arrays",
         "decoded_content_sha256", "physical_storage_plan", "publication",
     }
+    if manifest["schema_version"] >= 2:
+        expected_fields.add("float32_quantization")
     if set(payload) != expected_fields:
         raise ValueError("Subject-position manifest payload field set is not exact.")
     if payload["namespace"] != OBSERVATION_POSITION_NAMESPACE or payload["row_axis"] != "observation_instance":
@@ -607,9 +623,14 @@ def validate_subject_position_manifest(
     if publication["selector_activation"] != "forbidden" or publication["parent_selector_mutation"] != "forbidden":
         raise ValueError("Subject-position publication cannot activate or mutate selectors.")
     str(uuid.UUID(str(publication["publication_attempt_uuid"])))
+    quantization = payload.get("float32_quantization")
+    if quantization is not None:
+        validate_float32_quantization_record(quantization)
     return {
         "valid": True,
         "manifest_sha256": digest,
+        "schema_version": manifest["schema_version"],
+        "float32_quantization": quantization,
         "payload": payload,
         "coordinate_record": coordinate_record,
         "coordinate_sha256": coordinate_digest,
@@ -747,6 +768,12 @@ def _validate_run_group(
     )
     if canonical_observation_position_arrays_sha256(arrays) != manifest_result["payload"]["decoded_content_sha256"]:
         raise ValueError("Subject-position decoded content digest differs from its manifest.")
+    if manifest_result["float32_quantization"] is not None:
+        validate_float32_quantization_record(
+            manifest_result["float32_quantization"],
+            position_xy=arrays["position_xy"],
+            valid=arrays["valid"],
+        )
     if run_group.attrs.get(SUBJECT_POSITION_MANIFEST_DIGEST_ATTR) != manifest_result["manifest_sha256"]:
         raise ValueError("Subject-position manifest attribute digest is stale.")
     return {
@@ -757,6 +784,8 @@ def _validate_run_group(
         "manifest_sha256": manifest_result["manifest_sha256"],
         "decoded_content_sha256": manifest_result["payload"]["decoded_content_sha256"],
         "storage_plan_digest": receipt.as_manifest()["payload_digest"],
+        "manifest_schema_version": manifest_result["schema_version"],
+        "float32_quantization": manifest_result["float32_quantization"],
     }
 
 
@@ -954,6 +983,7 @@ def publish_subject_position_run(
 __all__ = [
     "SUBJECT_POSITION_MANIFEST_ATTR",
     "SUBJECT_POSITION_MANIFEST_SCHEMA_ID",
+    "SUBJECT_POSITION_MANIFEST_READABLE_SCHEMA_VERSIONS",
     "SUBJECT_POSITION_MANIFEST_SCHEMA_VERSION",
     "SUBJECT_POSITION_PARENT_PATH",
     "SUBJECT_POSITION_PUBLISH_SCHEMA_ID",

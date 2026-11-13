@@ -21,6 +21,7 @@ from fisheye.shared.subject_position_storage import (
     OBSERVATION_POSITION_MANDATORY_ARRAYS,
     canonical_observation_position_logical_metadata,
 )
+from fisheye.shared.subject_position_types import validate_float32_quantization_record
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -51,6 +52,14 @@ def _freeze_json(value: Any) -> Any:
         )
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _thaw_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
     return value
 
 
@@ -108,6 +117,9 @@ class SubjectPositionPreparedInput:
     software_sha256: str
     coordinate_record: Mapping[str, Any]
     coordinate_sha256: str
+    # Measured by the evaluator at the float64-to-float32 cast. Publication
+    # requires it (contract writer step 6); None only for unpublished inputs.
+    float32_quantization: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         copied = _copy_readonly_arrays(self.arrays)
@@ -159,6 +171,14 @@ class SubjectPositionPreparedInput:
         if coordinate_digest != canonical_json_sha256(coordinate):
             raise ValueError("Coordinate record digest does not match its record.")
         object.__setattr__(self, "coordinate_record", _freeze_json(coordinate))
+
+        if self.float32_quantization is not None:
+            quantization = validate_float32_quantization_record(
+                _thaw_json(self.float32_quantization),
+                position_xy=copied["position_xy"],
+                valid=copied["valid"],
+            )
+            object.__setattr__(self, "float32_quantization", _freeze_json(quantization))
 
 
 __all__ = ["SubjectPositionPreparedInput"]

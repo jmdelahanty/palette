@@ -56,6 +56,7 @@ from fisheye.tracking.single_subject_per_arena import (
 from fisheye.shared.traditional_heading_compatibility import (
     load_traditional_v3_heading_compatibility,
 )
+from fisheye.shared.subject_position_types import float32_quantization_record
 from tests.unit.fisheye.test_body_frame_source_handle import _published_fixture
 
 
@@ -132,6 +133,9 @@ def _publish_matching_position(destination, publication, tmp_path):  # type: ign
         software_sha256=canonical_json_sha256(software),
         coordinate_record=coordinate,
         coordinate_sha256=canonical_json_sha256(coordinate),
+        float32_quantization=float32_quantization_record(
+            positions.astype(np.float64), positions, np.ones(rows, dtype=bool)
+        ),
     )
     direct = zarr.open_group(
         str(destination), mode="r+", zarr_format=3, use_consolidated=False

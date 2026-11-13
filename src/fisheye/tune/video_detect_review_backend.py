@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,8 @@ import zarr
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from fisheye.tune import detect_review as detect_review_mod
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -93,6 +96,9 @@ class ClippedFrameRecords:
         self._video_id_by_path = dict(video_id_by_path)
         self._video_id_by_pair = dict(video_id_by_pair or {})
         self._video_frame_ranges: dict[str, dict[str, int]] | None = None
+        # Contract compatibility fallback: without parent_frame_index, the
+        # parent frame is recording_frame_id - 1 (never the row position).
+        self.parent_from_recording_frame_id = "parent_frame_index" not in self._columns
 
     def __len__(self) -> int:
         return int(self._table.num_rows)
@@ -104,11 +110,21 @@ class ClippedFrameRecords:
         value = column[index].as_py()
         return default if value is None else value
 
+    def _parent_frame(self, index: int) -> int:
+        if self.parent_from_recording_frame_id:
+            value = self._value("recording_frame_id", index)
+            if value is None:
+                raise RuntimeError(f"recording_frame_index row {index} has no recording_frame_id.")
+            return int(value) - 1
+        value = self._value("parent_frame_index", index)
+        if value is None:
+            raise RuntimeError(f"recording_frame_index row {index} has a null parent_frame_index.")
+        return int(value)
+
     def __getitem__(self, parent_frame_index: int) -> FrameRecord:
         if parent_frame_index < 0 or parent_frame_index >= len(self):
             raise IndexError(parent_frame_index)
-        stored_parent = self._value("parent_frame_index", parent_frame_index, parent_frame_index)
-        if int(stored_parent) != int(parent_frame_index):
+        if self._parent_frame(parent_frame_index) != int(parent_frame_index):
             raise RuntimeError(
                 "Clipped video review currently requires parent_frame_index to be contiguous and row-aligned."
             )
@@ -151,7 +167,7 @@ class ClippedFrameRecords:
             if not video_id:
                 continue
 
-            parent_frame = int(self._value("parent_frame_index", row_index, row_index))
+            parent_frame = self._parent_frame(row_index)
             source_frame = int(self._value("clip_local_frame_index", row_index, row_index))
             current = ranges.setdefault(
                 video_id,
@@ -215,6 +231,51 @@ def _as_positive_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return out if np.isfinite(out) and out > 0 else None
+
+
+_WIDTH_ATTRS = ("width", "source_video_width", "video_width", "palette_video_width")
+_HEIGHT_ATTRS = ("height", "source_video_height", "video_height", "palette_video_height")
+
+
+def _resolve_consistent_dimensions(groups: Sequence[zarr.Group | None]) -> tuple[int, int]:
+    """Resolve source full-frame geometry, refusing conflicting positive values.
+
+    Every positive width/height declaration on the given groups (selected runs
+    and root) must agree. ``inference_width``/``inference_height`` describe
+    model input resizing and are never consulted.
+    """
+
+    widths: dict[int, list[str]] = {}
+    heights: dict[int, list[str]] = {}
+    for group in groups:
+        if group is None:
+            continue
+        attrs = dict(group.attrs)
+        label = str(getattr(group, "path", "") or "/")
+        for key in _WIDTH_ATTRS:
+            value = _as_positive_int(attrs.get(key))
+            if value is not None:
+                widths.setdefault(value, []).append(f"{label}:{key}")
+        for key in _HEIGHT_ATTRS:
+            value = _as_positive_int(attrs.get(key))
+            if value is not None:
+                heights.setdefault(value, []).append(f"{label}:{key}")
+        resolution = attrs.get("source_video_resolution")
+        if isinstance(resolution, Sequence) and not isinstance(resolution, str) and len(resolution) >= 2:
+            # Palette stores source_video_resolution as [height, width].
+            height = _as_positive_int(resolution[0])
+            width = _as_positive_int(resolution[1])
+            if width is not None:
+                widths.setdefault(width, []).append(f"{label}:source_video_resolution")
+            if height is not None:
+                heights.setdefault(height, []).append(f"{label}:source_video_resolution")
+    if len(widths) > 1 or len(heights) > 1:
+        raise RuntimeError(
+            f"Conflicting source video geometry: widths={widths} heights={heights}"
+        )
+    if not widths or not heights:
+        raise RuntimeError("Could not resolve source video width/height from Zarr attrs.")
+    return next(iter(widths)), next(iter(heights))
 
 
 def _resolve_dimensions(root: zarr.Group, refined_group: zarr.Group | None = None) -> tuple[int, int]:
@@ -629,6 +690,11 @@ def _clipped_session(
         key = (str(row.get("camera_serial") or ""), str(row.get("clip_id") or ""))
         if not all(key):
             raise RuntimeError(f"Selected run missing camera_serial/clip_id: {row}")
+        if key in selected_by_pair:
+            raise RuntimeError(
+                f"Clipped collection {resolved_collection_id} selects more than one run for "
+                f"camera={key[0]!r} clip={key[1]!r}."
+            )
         selected_by_pair[key] = row
 
     frame_index_path = _resolve_recording_frame_index_path(
@@ -653,12 +719,9 @@ def _clipped_session(
     first_selected = selected_runs[0]
     first_refined_group_path = str(first_selected.get("refined_group_path") or "").strip("/")
     first_refined_group = _group_at_path(root, first_refined_group_path) if first_refined_group_path else None
-    try:
-        width, height = _resolve_dimensions(root, first_refined_group)
-    except RuntimeError:
-        first_detect_group_path = str(first_selected.get("detect_group_path") or "").strip("/")
-        first_detect_group = _group_at_path(root, first_detect_group_path) if first_detect_group_path else None
-        width, height = _resolve_dimensions(root, first_detect_group)
+    first_detect_group_path = str(first_selected.get("detect_group_path") or "").strip("/")
+    first_detect_group = _group_at_path(root, first_detect_group_path) if first_detect_group_path else None
+    width, height = _resolve_consistent_dimensions((first_refined_group, first_detect_group, root))
     fps = _resolve_fps(root, default=30.0)
     videos: dict[str, VideoSource] = {}
     video_id_by_path: dict[str, str] = {}
@@ -711,6 +774,12 @@ def _clipped_session(
         video_id_by_path=video_id_by_path,
         video_id_by_pair=video_id_by_pair,
     )
+    if records.parent_from_recording_frame_id:
+        LOGGER.warning(
+            "%s has no parent_frame_index; deriving parent_frame_index = recording_frame_id - 1 "
+            "(compatibility fallback).",
+            frame_index_path,
+        )
     return VideoDetectReviewSession(
         zarr_path=str(zarr_path),
         root=root,
