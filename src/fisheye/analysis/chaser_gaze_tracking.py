@@ -59,11 +59,12 @@ from fisheye.analysis.chaser_radial_occupancy import (
     _safe_float,
 )
 from fisheye.shared.arena_geometry import require_dish_mask_arena_geometry
+from fisheye.analysis.eye_angle_io import read_compact_axis_columns
 from fisheye.analysis.gaze_convention_validation import (
     EXPECTED_BODY_FRAME_CONVENTION,
     EXPECTED_GAZE_SIGN_CONVENTION,
 )
-from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
+from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
 from fisheye.shared.system_metadata import get_git_info
@@ -294,41 +295,6 @@ def _resolve_eye_run(root: zarr.Group, requested: str) -> tuple[zarr.Group, str,
         raise ValueError(f"Eye-angle run {requested!r} is not available.")
     path = f"analysis/eye_angle_runs/{run_name}"
     return parent[run_name], str(run_name), path
-
-
-def _decode_channel_names(index_group: zarr.Group, count: int) -> list[str]:
-    if "name" not in index_group:
-        raise ValueError(f"Channel index {index_group.path!r} is missing name.")
-    values = np.asarray(index_group["name"][:])
-    names = [str(decode_null_terminated_text(value)) for value in values]
-    if len(names) != int(count):
-        raise ValueError(f"Channel index has {len(names)} names for {count} channels.")
-    return names
-
-
-def _packed_columns(run_group: zarr.Group, data_name: str, index_name: str, requested: Sequence[str]) -> dict[str, np.ndarray]:
-    if data_name not in run_group or index_name not in run_group:
-        raise ValueError(f"Eye-angle run lacks compact {data_name}/{index_name}.")
-    data = run_group[data_name]
-    names = _decode_channel_names(run_group[index_name], int(data.shape[1]))
-    missing = [name for name in requested if name not in names]
-    if missing:
-        raise ValueError(f"{data_name} is missing required channels: {missing}.")
-    indexes = [names.index(name) for name in requested]
-    try:
-        packed = np.asarray(
-            data.get_orthogonal_selection((slice(None), indexes))
-        )
-    except (AttributeError, TypeError, IndexError):
-        packed = np.column_stack(
-            [np.asarray(data[:, index]) for index in indexes]
-        )
-    if packed.ndim == 1:
-        packed = packed.reshape(-1, 1)
-    return {
-        name: np.asarray(packed[:, output_index])
-        for output_index, name in enumerate(requested)
-    }
 
 
 def _dense_frame_row_lookup(
@@ -804,21 +770,21 @@ def build_chaser_gaze_tracking_result(
     if camera_frame_id.size and (int(np.min(camera_frame_id)) < 0):
         raise ValueError("Chaser-distance camera_frame_id contains negative values.")
 
-    eye_fields = _packed_columns(
+    eye_fields = read_compact_axis_columns(
         eye_group,
-        "frame_angles",
-        "angle_channel_index",
-        (
+        family="angle",
+        axis="frame",
+        names=(
             "left_gaze_signed_deg_smoothed",
             "right_gaze_signed_deg_smoothed",
             "vergence_eye_angle_deg_smoothed",
         ),
     )
-    eye_qa = _packed_columns(
+    eye_qa = read_compact_axis_columns(
         eye_group,
-        "frame_qa",
-        "qa_channel_index",
-        ("valid_frame", "major_axis_marginal"),
+        family="qa",
+        axis="frame",
+        names=("valid_frame", "major_axis_marginal"),
     )
     eye_frame_count = int(next(iter(eye_fields.values())).shape[0])
     eye_row_index, eye_row_present = _dense_frame_row_lookup(

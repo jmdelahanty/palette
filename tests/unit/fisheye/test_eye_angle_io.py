@@ -16,6 +16,7 @@ from fisheye.analysis.eye_angle_io import (
     load_eye_angle_series_window,
     load_eye_gaze_frame_series,
     optional_1d_array,
+    read_compact_axis_columns,
     resolve_eye_angle_run,
 )
 
@@ -465,3 +466,93 @@ def test_load_eye_gaze_frame_series_checks_frame_bounds(tmp_path: Path) -> None:
             allowed_families=("gaze",),
             legacy_compatibility=True,
         )
+
+
+def _axis_column_run(*, include_frame_available: bool = True) -> zarr.Group:
+    run = zarr.open_group(zarr.storage.MemoryStore(), mode="w")
+    angle_names = ["left_eye_angle_deg", "heading_deg"]
+    angle_index = run.create_group("angle_channel_index")
+    angle_index.create_array("name", data=_fixed_text(angle_names, width=32))
+    angle_index.create_array("roi_available", data=np.asarray([True, True]))
+    if include_frame_available:
+        angle_index.create_array("frame_available", data=np.asarray([True, False]))
+    run.create_array(
+        "roi_angles",
+        data=np.asarray([[1.0, 90.0], [2.0, 91.0], [3.0, 92.0]], dtype=np.float32),
+    )
+    run.create_array(
+        "frame_angles",
+        data=np.asarray(
+            [[1.0, np.nan], [2.0, np.nan], [3.0, np.nan], [4.0, np.nan]],
+            dtype=np.float32,
+        ),
+    )
+    qa_names = ["valid_left", "valid_frame"]
+    qa_index = run.create_group("qa_channel_index")
+    qa_index.create_array("name", data=_fixed_text(qa_names, width=32))
+    qa_index.create_array("roi_available", data=np.asarray([True, True]))
+    if include_frame_available:
+        qa_index.create_array("frame_available", data=np.asarray([False, True]))
+    run.create_array(
+        "roi_qa", data=np.asarray([[1, 1], [1, 0], [0, 0]], dtype=np.uint16)
+    )
+    run.create_array(
+        "frame_qa", data=np.asarray([[0, 1], [0, 0], [0, 0], [0, 1]], dtype=np.uint16)
+    )
+    return run
+
+
+def test_compact_axis_columns_read_available_channels_by_name() -> None:
+    run = _axis_column_run()
+
+    angles = read_compact_axis_columns(
+        run, family="angle", axis="frame", names=("left_eye_angle_deg",)
+    )
+    qa = read_compact_axis_columns(run, family="qa", axis="roi", names=("valid_left", "valid_frame"))
+    windows = read_compact_axis_columns(
+        run,
+        family="angle",
+        axis="roi",
+        names=("heading_deg",),
+        row_windows=(slice(0, 1), slice(2, 3)),
+    )
+
+    np.testing.assert_array_equal(angles["left_eye_angle_deg"], [1.0, 2.0, 3.0, 4.0])
+    np.testing.assert_array_equal(qa["valid_left"], [1, 1, 0])
+    np.testing.assert_array_equal(qa["valid_frame"], [1, 0, 0])
+    np.testing.assert_array_equal(windows["heading_deg"], [90.0, 92.0])
+
+
+@pytest.mark.parametrize(
+    ("family", "name"),
+    [("qa", "valid_left"), ("angle", "heading_deg")],
+)
+def test_compact_axis_columns_refuse_frame_placeholders(family: str, name: str) -> None:
+    run = _axis_column_run()
+
+    with pytest.raises(EyeAngleIOError, match="placeholders"):
+        read_compact_axis_columns(run, family=family, axis="frame", names=(name,))
+
+
+def test_compact_axis_columns_require_the_availability_flag() -> None:
+    run = _axis_column_run(include_frame_available=False)
+
+    with pytest.raises(EyeAngleIOError, match="missing frame_available"):
+        read_compact_axis_columns(run, family="qa", axis="frame", names=("valid_frame",))
+
+
+def test_compact_axis_columns_refuse_malformed_indexes() -> None:
+    run = _axis_column_run()
+    with pytest.raises(EyeAngleIOError, match="missing required channels"):
+        read_compact_axis_columns(run, family="qa", axis="frame", names=("valid_right",))
+
+    duplicated = _axis_column_run()
+    duplicated["qa_channel_index"]["name"][:] = _fixed_text(["valid_frame", "valid_frame"], width=32)
+    with pytest.raises(EyeAngleIOError, match="empty or duplicated"):
+        read_compact_axis_columns(duplicated, family="qa", axis="frame", names=("valid_frame",))
+
+    short = _axis_column_run()
+    del short["angle_channel_index"]["frame_available"]
+    short["angle_channel_index"].create_array("frame_available", data=np.asarray([True]))
+    with pytest.raises(EyeAngleIOError, match="expected 2"):
+        read_compact_axis_columns(short, family="angle", axis="frame", names=("left_eye_angle_deg",))

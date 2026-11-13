@@ -3,7 +3,7 @@
 version: 1
 status: active
 implementation: implemented
-last_verified: 2026-08-27
+last_verified: 2026-11-12
 purpose: Define derived browser-review proxy videos for Palette video-backed detection review.
 -->
 
@@ -63,7 +63,7 @@ Example:
   "proxy_height": 1024,
   "frame_count_policy": "same_as_source_clip",
   "timebase_policy": "same_fps_same_frame_index",
-  "coordinate_policy": "scale_source_image_to_proxy_for_display_only",
+  "coordinate_policy": "linear_scale_source_image_to_proxy_for_display_only",
   "clips": [
     {
       "clip_id": "clip_000000",
@@ -207,6 +207,12 @@ frontend. The proxy MP4 is only the media source for display.
 - Proxy dimensions match manifest `proxy_width` and `proxy_height`.
 - The reviewer renders boxes by scaling source/normalized coordinates to proxy
   media dimensions.
+
+The builder and finalizer mechanically check the schema, one entry per
+selected pair, and that each proxy file exists and is non-empty. The
+manifest's per-clip `fps` and `frame_count` are taken from the source clip
+(clip index or ffprobe of the source), not re-probed from the written proxy,
+so the frame-count, FPS, and proxy-dimension items are operator checks.
 
 The 2026-08-27 verification passed the focused proxy builder, deferred-manifest
 shard/finalizer, clipped collection, and video-review backend suites (36

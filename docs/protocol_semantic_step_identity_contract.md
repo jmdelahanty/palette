@@ -5,7 +5,7 @@ status: active
 implementation: partial
 version: 2
 last_updated: 2026-08-24
-last_verified: 2026-08-25
+last_verified: 2026-11-12
 -->
 
 ## Purpose
@@ -55,7 +55,7 @@ analysis/stimulus_runs/<run>/protocol_semantic_snapshot/
   protocol_semantic_json_utf8
   protocol_trial_index_json_utf8
 analysis/stimulus_runs/<run>/protocol_execution/
-  protocol_execution_json_utf8
+  execution_index_json_utf8
   frame_correspondence_proxy/
     stimulus_frame_num
     camera_frame_id_correspondence

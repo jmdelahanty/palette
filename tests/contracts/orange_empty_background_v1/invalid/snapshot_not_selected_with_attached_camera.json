@@ -1,0 +1,16 @@
+{
+  "capture_selected": false,
+  "cameras": {
+    "2010095": {
+      "status": "attached",
+      "image": {
+        "relative_path": "Cam2010095_empty_background.png",
+        "size_bytes": 5123456,
+        "sha256": "sha256:abababababababababababababababababababababababababababababababab"
+      }
+    },
+    "2010096": {
+      "status": "not_selected"
+    }
+  }
+}

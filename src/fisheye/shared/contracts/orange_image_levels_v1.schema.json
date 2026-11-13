@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orange.image_levels.v1",
+  "title": "Orange image levels statistics (whole 8-bit Mono8 image; version 1 DRAFT)",
+  "description": "DRAFT 2026-11-02, shared by the empty-background capture descriptor (cameras[].statistics) and the per-camera image-levels check, so recordings carry one shape. Computed over every pixel of one 8-bit Mono8 image at the native recorded raster, no ROI. Exact definitions, so a reader can recompute every value to the integer from the image: count(L) is the number of pixels at level L; pixel_count = sum of count(L) = width x height; saturated_fraction = count(255) / pixel_count; zero_fraction = count(0) / pixel_count; mean = sum(L x count(L)) / pixel_count; fractions and mean are rounded half away from zero to 8 and 3 decimals. Percentile pK uses k = 10, 50, 500, 950, 990, 999 for p01, p05, p50, p95, p99, p999: rank = ceil(k x pixel_count / 1000), computed in integer arithmetic; pK is the smallest level L whose cumulative count (sum of count(0..L)) is at least rank (nearest rank, so always an exact grey level). p999 is there because p99 is already 255 on a near-clipped background (2026-11-01 setup: about 3.4% of background pixels at 255 in one frame).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "saturation_value",
+    "pixel_count",
+    "saturated_fraction",
+    "zero_fraction",
+    "mean",
+    "p01",
+    "p05",
+    "p50",
+    "p95",
+    "p99",
+    "p999"
+  ],
+  "properties": {
+    "saturation_value": {
+      "const": 255,
+      "description": "The level counted as saturated, declared rather than implied."
+    },
+    "pixel_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615,
+      "description": "Pixels measured (width x height); the denominator of the fractions."
+    },
+    "saturated_fraction": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "x-orange-decimals": 8,
+      "description": "Fraction of pixels equal to saturation_value."
+    },
+    "zero_fraction": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "x-orange-decimals": 8,
+      "description": "Fraction of pixels equal to 0."
+    },
+    "mean": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 255,
+      "x-orange-decimals": 3
+    },
+    "p01": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "p05": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "p50": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "p95": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "p99": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "p999": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    }
+  }
+}
