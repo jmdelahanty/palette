@@ -24,6 +24,7 @@ from fisheye.analysis_workflows.core_paradigm_authority import (
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.shared.heading_convention import wrap_delta_degrees
 
 SCHEMA_ID = "palette.analysis.chaser_gaze_tracking"
 SCHEMA_VERSION = 3
@@ -82,10 +83,6 @@ def _float_array(value: Any, *, name: str, shape: tuple[int, ...]) -> np.ndarray
     if result.dtype.kind != "f" or result.shape != shape:
         _fail(f"{name} must be one floating array with shape {shape!r}.")
     return np.asarray(result, dtype=np.float64)
-
-
-def _wrap_deg(value: Any) -> np.ndarray:
-    return (np.asarray(value, dtype=np.float64) + 180.0) % 360.0 - 180.0
 
 
 def _freeze(value: Any) -> Any:
@@ -170,8 +167,8 @@ def _dynamic_fit(
     if not math.isfinite(typical_interval_s) or typical_interval_s <= 0:
         return 0, math.nan, math.nan, 0, math.nan
     maximum_lag_frames = max(0, int(math.floor(maximum_lag_s / typical_interval_s)))
-    delta_bearing = _wrap_deg(np.diff(bearing))
-    delta_gaze = _wrap_deg(np.diff(gaze))
+    delta_bearing = wrap_delta_degrees(np.diff(bearing))
+    delta_gaze = wrap_delta_degrees(np.diff(gaze))
     invalid_prefix = np.concatenate(
         (np.asarray([0], dtype=np.int64), np.cumsum(~transition, dtype=np.int64))
     )
@@ -670,7 +667,7 @@ def prepare_gaze_tracking_successor(source: GazeTrackingInput) -> PreparedGazeTr
             accessible[eye_rows] = (row_bearing[eye_rows] >= low) & (
                 row_bearing[eye_rows] <= high
             )
-    error = _wrap_deg(row_gaze - row_bearing)
+    error = wrap_delta_degrees(row_gaze - row_bearing)
     lock = valid & accessible & (np.abs(error) <= parameters["lock_threshold_deg"])
 
     arrays: dict[str, np.ndarray] = {
@@ -988,7 +985,7 @@ def prepare_gaze_tracking_successor(source: GazeTrackingInput) -> PreparedGazeTr
                         <= eye_range[eye_position, 1]
                     )
                 )
-                virtual_error = _wrap_deg(
+                virtual_error = wrap_delta_degrees(
                     gaze[:, eye_position] - virtual_bearing[:, reference_index]
                 )
                 locked_virtual = accessible_virtual & (

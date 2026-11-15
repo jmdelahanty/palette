@@ -122,6 +122,8 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_argument("--resume-plan", type=Path, default=None)
     sub.add_argument("--session-dir", type=Path, default=None)
     sub.add_argument("--staging-dir", type=Path, default=None)
+    sub.add_argument("--parent-workers", type=int, default=None,
+                     help="Independent parents indexed and imported at a time (default: the intake owner's).")
     destination(sub)
     sub.add_argument("--json", action="store_true")
 
@@ -169,6 +171,9 @@ def _run(args: argparse.Namespace) -> tuple[int, dict]:
         result = probe_register(args.snapshot_sha, destination_root=destination, registry=args.registry)
         return (EXIT_DONE if result.verdict else EXIT_FAILED), result.to_json()
     if args.command == "import-delivery":
+        execution = {}
+        if args.parent_workers is not None:
+            execution["parent_workers"] = args.parent_workers
         result = import_delivery(
             args.snapshot_sha,
             args.run_dir,
@@ -176,6 +181,7 @@ def _run(args: argparse.Namespace) -> tuple[int, dict]:
             destination_root=destination,
             session_dir=args.session_dir,
             staging_dir=args.staging_dir,
+            **execution,
         )
         return EXIT_DONE, result.to_json()
     result = register_delivery(

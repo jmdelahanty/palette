@@ -12,7 +12,7 @@ from fisheye.shared.unified_h5.display_submissions import (
     build_stimulus_display_submissions,
 )
 
-TABLE_ATTRS = {**TABLE_SCHEMA, "timing_semantics": "software_observed_cpu_enqueue"}
+TABLE_ATTRS = {**TABLE_SCHEMA, "schema_version": 1, "timing_semantics": "software_observed_cpu_enqueue"}
 PARENT_ATTRS = {**PARENT_SCHEMA, "display_submission_rate_target_hz": 120.0, "glfw_swap_interval": 0}
 DTYPE = [
     ("display_frame_index", "<u8"),
@@ -81,10 +81,21 @@ def test_malformed_rows_are_refused(mutate, reason: str) -> None:
 
 
 def test_unpinned_schema_is_refused() -> None:
-    with pytest.raises(UnifiedH5ContractError, match="display_submission_schema:schema_version"):
-        _build(_rows([0]), np.arange(1), table_attrs={**TABLE_ATTRS, "schema_version": 2})
+    for version in (0, 3, True, "2"):
+        with pytest.raises(UnifiedH5ContractError, match="display_submission_schema:schema_version"):
+            _build(_rows([0]), np.arange(1), table_attrs={**TABLE_ATTRS, "schema_version": version})
     with pytest.raises(UnifiedH5ContractError, match="display_timing_schema:schema_id"):
         _build(_rows([0]), np.arange(1), parent_attrs={**PARENT_ATTRS, "schema_id": "other"})
+
+
+def test_frame_identity_v2_table_reduces_like_v1() -> None:
+    """v2 (admission revision 4) only drops source_camera_frame_id, which is never read."""
+    v1 = _build(_rows([0, 0, 1, 2]), np.arange(3))
+    v2 = _build(
+        _rows([0, 0, 1, 2]), np.arange(3), table_attrs={**TABLE_ATTRS, "schema_version": 2}
+    )
+    for name in ("submitted", "first_swap_end_ns_epoch", "first_display_frame_index", "submission_count"):
+        assert np.array_equal(getattr(v1, name), getattr(v2, name))
 
 
 def test_scalar_number_decodes_typed_descriptors() -> None:

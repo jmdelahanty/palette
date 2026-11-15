@@ -6,6 +6,7 @@ import numpy as np
 import zarr
 
 from .type_conversions import normalize_attr
+from fisheye.shared.heading_convention import wrap_delta_degrees
 
 HEADING_TEMPORAL_OUTLIER_THRESHOLD_DEG = 120.0
 HEADING_TEMPORAL_MAX_FRAME_GAP = 3
@@ -107,7 +108,7 @@ def _temporal_heading_policy(root: Optional[zarr.Group]) -> Dict[str, Any]:
 
 
 def _circular_heading_delta_deg(current_deg: float, neighbor_deg: float) -> float:
-    delta = (float(current_deg) - float(neighbor_deg) + 180.0) % 360.0 - 180.0
+    delta = wrap_delta_degrees(float(current_deg) - float(neighbor_deg))
     return float(abs(delta))
 
 

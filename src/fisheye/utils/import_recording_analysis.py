@@ -75,7 +75,13 @@ from fisheye.shared.run_provenance import git_identity
 from fisheye.shared.unified_h5 import PROFILE as UNIFIED_H5_PROFILE
 from fisheye.shared.unified_h5 import UnifiedH5ContractError, declared_unified_profile
 from fisheye.shared.unified_h5.citrus_subject_snapshot import SNAPSHOT_PATH as CITRUS_SNAPSHOT_PATH
-from fisheye.shared.unified_h5.citrus_subject_snapshot import admit_subject_snapshot, subject_attributes
+from fisheye.shared.unified_h5.citrus_subject_snapshot import (
+    admit_subject_snapshot,
+    check_usage_link_recording_ref,
+    subject_attributes,
+)
+from fisheye.shared.unified_h5.metadata import string_attributes
+from fisheye.shared.unified_h5.schema import contract as unified_contract
 from fisheye.shared.unified_h5.reference import new_native_run_name, open_unified_source
 from fisheye.shared.source_recording_identity import (
     SOURCE_ANALYSIS_CLASSIFICATION,
@@ -954,8 +960,9 @@ def project_unified_subject_metadata(
     Reads ``/metadata/subject`` through the sealed reference's verified
     attribute snapshot (not by reopening the raw H5 unchecked) and publishes it through the same subject/setup owners as legacy import,
     to the same locations. Missing fields such as ``subject_count`` refuse;
-    nothing is inferred. ``subject_id`` is the Citrus-local identity and
-    legacy ``fish_id`` its alias; a source carrying both refuses.
+    nothing is inferred. ``subject_id`` is the Citrus-local identity in
+    snapshot v3 and the MetaZebrobot fish UUID for a v4 individual; legacy
+    ``fish_id`` is its alias, and a source carrying both refuses.
     """
 
     read_root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=True)
@@ -974,9 +981,12 @@ def project_unified_subject_metadata(
             raise
         snapshot = None
     snapshot_admission = admit_subject_snapshot(snapshot, attributes)
-    if snapshot_admission["citrus_snapshot_status"] == "admitted" and "subject_id" not in attributes:
-        # v3 writes /metadata/subject in every session; with no dish declared it
-        # holds only lookup statuses (declared absence). Publish them as a
+    if snapshot_admission.get("citrus_snapshot_schema_version") == 4:
+        check_usage_link_recording_ref(snapshot, **_sealed_recording_refs(source_reader))
+    if snapshot_admission["citrus_snapshot_status"] == "admitted" and "subject_type" not in attributes:
+        # v3/v4 write /metadata/subject in every session; with no dish declared it
+        # holds only lookup statuses (declared absence). A v4 dish_group declares
+        # a dish and a count but no subject_id, so it is not an absence. Publish them as a
         # statuses-only record with no experiment setup; an Orange reference for
         # the camera can still supply the dish (import_zebrobot_subject_reference).
         root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
@@ -1004,6 +1014,25 @@ def project_unified_subject_metadata(
     return _publish_subject_and_setup(
         root, subject_metadata, source_artifact=source, translator="h5_attributes"
     )
+
+
+def _sealed_recording_refs(source_reader: Any) -> dict[str, Optional[str]]:
+    """The file's own recording refs: its bound observation context (from the
+    digest-covered association claims; None when unbound) and Citrus session."""
+
+    claims_path = unified_contract("experimental_h5_identity_claims_v1.json")["component"]["claims_path"]
+    try:
+        claims = source_reader.read_json(claims_path)
+    except UnifiedH5ContractError as exc:
+        if "unified_dataset_not_admitted" not in str(exc):
+            raise
+        claims = None
+    session = source_reader.typed_attributes("/metadata/session")
+    uuid = session.get("session_uuid")
+    return {
+        "observation_context_id": None if claims is None else claims.get("observation_context_id"),
+        "session_uuid": None if uuid is None else string_attributes({"session_uuid": uuid})["session_uuid"],
+    }
 
 
 def _publish_subject_and_setup(

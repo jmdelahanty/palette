@@ -43,17 +43,17 @@ def _session(valid: bool) -> dict:
 
 def test_offset_comes_from_the_recordings_clock_contract() -> None:
     evidence = orange_exposure_clock(_session(True), None, camera_serial="2010093")
-    assert evidence["current_utc_offset_s"] == 37
+    assert evidence["orange_reported_current_utc_offset_s"] == 37
     assert evidence["current_utc_offset_valid"] is True
     assert evidence["clock_state_intervals"][0]["last_recording_frame_id"] == 10
     assert orange_exposure_clock(_session(False), None, camera_serial="2010093")["current_utc_offset_valid"] is False
 
 
-def test_offset_falls_back_to_ptp_summary_and_refuses_when_absent() -> None:
+def test_orange_evidence_falls_back_to_ptp_summary_and_never_refuses_on_a_missing_offset() -> None:
     ptp = {"host_ptp_management_evidence": {"time_properties": {"currentUtcOffset": 37}}}
     assert orange_exposure_clock(None, ptp, camera_serial="1")["source"].startswith("ptp_sync_summary")
-    with pytest.raises(StimulusDisplayCandidateError, match="currentUtcOffset"):
-        orange_exposure_clock(None, {}, camera_serial="1")
+    # The offset comes from the published frame clock; Orange's figure is evidence only.
+    assert orange_exposure_clock(None, {}, camera_serial="1")["orange_reported_current_utc_offset_s"] is None
 
 
 def _ptp(lo: int, hi: int, status: str = "Slave") -> dict:

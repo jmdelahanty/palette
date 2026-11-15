@@ -404,6 +404,124 @@ def test_current_clipped_import_refuses_wrong_sources_without_receipt(
     assert recording_import_receipt_paths(plan.zarr_path) == ()
 
 
+_READINESS_VIEW = "recording_crop_video_available_current"
+
+
+def _crop_readiness(registry: Registry) -> tuple[int, int]:
+    row = registry.conn.execute(
+        f"SELECT crop_stream_available, crop_stream_consumer_ready FROM {_READINESS_VIEW};"
+    ).fetchone()
+    return int(row[0]), int(row[1])
+
+
+def _registered_crop_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Registry:
+    recording = _write_current_clipped_recording(tmp_path, crop=True)
+    _stub_only_checkout_identity(monkeypatch)
+    plan = importer.resolve_single_recording_plan(
+        recording_dir=recording, require_h5=False
+    )
+    result = importer.process_recording_import(plan, _options())
+    assert result.ok, result
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.finalize_current_source_import(
+        zarr_path=plan.zarr_path, receipt=result.receipt, decided_by="test"
+    )
+    return registry
+
+
+def test_imported_crop_collection_is_ready_with_truthful_null_file_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = _registered_crop_collection(tmp_path, monkeypatch)
+    try:
+        row = registry.conn.execute(
+            f"""
+            SELECT crop_stream_available, crop_stream_consumer_ready, video_path,
+                   metadata_path, metadata_row_count, frame_count,
+                   canonical_ledger_row_count
+            FROM {_READINESS_VIEW};
+            """
+        ).fetchone()
+    finally:
+        registry.close()
+    assert tuple(row) == (1, 1, None, None, None, 4, 4)
+
+
+def test_migration_077_repairs_collection_rows_without_touching_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = _registered_crop_collection(tmp_path, monkeypatch)
+    try:
+        columns = [
+            row[1]
+            for row in registry.conn.execute(f"PRAGMA table_info({_READINESS_VIEW});")
+        ]
+        stored = [
+            tuple(row)
+            for row in registry.conn.execute("SELECT * FROM acquisition_video_streams;")
+        ]
+        registry._migration_056_acquisition_video_streams_registry()
+        assert _crop_readiness(registry) == (0, 0)
+        assert columns == [
+            row[1]
+            for row in registry.conn.execute(f"PRAGMA table_info({_READINESS_VIEW});")
+        ]
+        registry._migration_077_crop_collection_consumer_readiness()
+        assert _crop_readiness(registry) == (1, 1)
+        assert columns == [
+            row[1]
+            for row in registry.conn.execute(f"PRAGMA table_info({_READINESS_VIEW});")
+        ]
+        assert stored == [
+            tuple(row)
+            for row in registry.conn.execute("SELECT * FROM acquisition_video_streams;")
+        ]
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize(
+    "assignment, expected",
+    [
+        ("canonical_ledger_status = 'failed'", (1, 0)),
+        ("canonical_ledger_status = NULL", (1, 0)),
+        ("canonical_ledger_record_sha256 = NULL", (1, 0)),
+        ("canonical_ledger_row_count = frame_count - 1", (1, 0)),
+        ("frame_count = frame_count + 1", (1, 0)),
+        ("availability_status = 'missing_required_file'", (0, 0)),
+        (
+            "files_json = json_set(files_json, '$.recording_clip_index.exists', json('false'))",
+            (0, 0),
+        ),
+        ("files_json = '{}'", (0, 0)),
+        ("files_json = 'not json'", (0, 0)),
+        ("files_json = NULL", (0, 0)),
+        ("contract_json = json_set(contract_json, '$.member_count', 0)", (0, 0)),
+        ("contract_json = json_remove(contract_json, '$.member_count')", (0, 0)),
+        ("contract_json = json_set(contract_json, '$.source_profile', 'other')", (0, 0)),
+        ("contract_json = 'not json'", (0, 0)),
+        ("contract_json = NULL", (0, 0)),
+    ],
+)
+def test_crop_collection_readiness_refuses_incomplete_or_malformed_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    assignment: str,
+    expected: tuple[int, int],
+) -> None:
+    registry = _registered_crop_collection(tmp_path, monkeypatch)
+    try:
+        assert _crop_readiness(registry) == (1, 1)
+        registry.conn.execute(
+            f"UPDATE acquisition_video_streams SET {assignment} WHERE stream_key = 'crop';"
+        )
+        assert _crop_readiness(registry) == expected
+    finally:
+        registry.close()
+
+
 def test_current_full_only_inventory_does_not_invent_crop_stream(
     tmp_path: Path,
 ) -> None:

@@ -67,11 +67,27 @@ SCHEMA_FILES = {
 # docs/zebrobot_snapshot.md; Palette's reliance: agent-contracts PR 54.
 MZB_PIN = {
     "repo": "jmdelahanty/metazebrobot",
-    "commit": "509a3eb88d6ff44fe07e7ea20d212be5eafe46b7",
-    "consumer_openapi_sha256": "f5280e430d4b5f10c3643cb89a6187eacc45fdac7af55b2e81f5e315b7b754dc",
-    # agent-contracts metazebrobot-consumers/consumers.json (PR 54, merge 5fc735fe).
-    "consumers_json_sha256": "8d2b38780ad08c7111cb6f5bd81723169e5ce96cad44f489e6cf442ee071bda3",
+    "commit": "b2f4b20751fd4206ce5cc85fe996444a95043fe9",
+    "consumer_openapi_sha256": "d80e79a68c65a04c5ec3b519648b9cf82985bde987abdce378e7a7d07e92710f",
+    # agent-contracts metazebrobot-consumers/consumers.json (main ae52c9bd).
+    "consumers_json_sha256": "6d2baa4f8776eba8f9c65a0d72c2b986f316c2334e249949687e3963390c7e05",
 }
+# Consumer slices a recording's serving build may report and still match: the
+# pin, plus earlier slices the pin only adds to for everything Palette relies
+# on. c93b2530 qualifies (b2f4b20 adds only X-Delivered-By on usage links,
+# which Palette does not read); slices before it do not, because
+# GET /dishes/{dish_id}/fish changed meaning twice after 509a3eb8 (see
+# tests/contracts/metazebrobot_consumers/README.md).
+COMPATIBLE_CONSUMER_OPENAPI_SHA256 = frozenset({
+    MZB_PIN["consumer_openapi_sha256"],
+    "a8cb88841430739f16958777062e1c6ed1e01c98583e6a2b0bc14e9864752d03",  # c93b2530
+})
+
+
+def consumer_schema_matches_pin(served: str | None) -> bool | None:
+    """Whether a sealed serving build's consumer slice is compatible with the pin."""
+
+    return None if served is None else served in COMPATIBLE_CONSUMER_OPENAPI_SHA256
 
 
 def _require(condition: bool, message: str) -> None:
@@ -214,9 +230,7 @@ def _served_build(zebrobot: Mapping[str, Any]) -> dict[str, Any]:
         "zebrobot_service_commit": zebrobot["service_commit"],
         "zebrobot_service_commit_dirty": zebrobot["service_commit_dirty"],
         "zebrobot_consumer_schema_sha256": served,
-        "zebrobot_consumer_schema_matches_pin": (
-            None if served is None else served == MZB_PIN["consumer_openapi_sha256"]
-        ),
+        "zebrobot_consumer_schema_matches_pin": consumer_schema_matches_pin(served),
         "zebrobot_consumer_pin": dict(MZB_PIN),
     }
 
@@ -309,7 +323,9 @@ def resolve_subject_reference(
 
 
 __all__ = [
+    "COMPATIBLE_CONSUMER_OPENAPI_SHA256",
     "MZB_PIN",
+    "consumer_schema_matches_pin",
     "REFERENCE_SCHEMA_ID",
     "ResolvedSubjectReference",
     "SubjectReferenceError",

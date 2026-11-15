@@ -9,14 +9,14 @@
         .replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;")
         .replaceAll("\"", "&quot;");
-      const personalQueueHref = esc((typeof sessionReturnHref === "function") ? sessionReturnHref("dataset-queue", "/my-datasets") : "/my-datasets");
+      const personalQueueHref = esc((typeof sessionReturnHref === "function") ? sessionReturnHref("queue", "/queue") : "/queue");
       const personalWorkHref = esc((typeof sessionReturnHref === "function") ? sessionReturnHref("work-dashboard", "/my-work") : "/my-work");
       // A saved change's audit reference is quiet; red is reserved for errors.
       target.className = "operator-support active reference";
       target.innerHTML =
         "<details>" +
         "<summary>Saved · audit reference</summary>" +
-        "<p>This operator support reference is only needed if the operator asks for audit details; give audit event id and server target from the block below. Return to <a href=\"" + personalQueueHref + "\">your personalized dataset queue</a> or <a href=\"" + personalWorkHref + "\">your personalized work dashboard</a> before reopening stale or superseded work.</p>" +
+        "<p>This operator support reference is only needed if the operator asks for audit details; give audit event id and server target from the block below. Return to <a href=\"" + personalQueueHref + "\">your queue</a> or <a href=\"" + personalWorkHref + "\">your personalized work dashboard</a> before reopening stale or superseded work.</p>" +
         "<pre>" + esc(text) + "</pre>" +
         "<button type=\"button\" onclick=\"copySessionSupport(this)\">Copy support details</button>" +
         "</details>";

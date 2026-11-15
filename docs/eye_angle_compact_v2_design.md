@@ -173,6 +173,37 @@ variants:
   `body_frame/left_axis_xy`, `body_frame/heading_deg`, `body_frame/valid`,
   `body_frame/failure_reason_bytes`
 
+### Axis-Unavailable Columns
+
+`roi_*` and `frame_*` arrays share one channel index, so both carry the union
+of ROI and frame channel names. A channel that does not exist on an axis is
+still physically present as a column on that axis, filled with `NaN` (angles,
+vectors) or `0` (QA). The fill is not data: the index's `frame_available` or
+`roi_available` flag is the only signal that the column is a placeholder.
+
+In compact v7 runs the frame axis carries 100 of 141 angle channels and 3 of 7
+QA channels (`valid_frame`, `major_axis_marginal`, `reason_codes`). In
+particular `frame_qa` columns `valid_left`, `valid_right`,
+`left_major_axis_marginal` and `right_major_axis_marginal` are always `0`, and
+`frame_angles` column `heading_deg` is always `NaN`. A `0` in a bool QA column
+is indistinguishable from "false", so a reader that indexes `frame_qa` by name
+alone concludes "never valid".
+
+Read through `fisheye.analysis.eye_angle_io` (`load_eye_angle_run_tables`,
+`catalog_eye_angle_series`, `load_eye_angle_series_rows`), which drops
+unavailable channels. Code that reads the dense arrays directly must check the
+matching `*_available` flag and refuse a column marked `False`. Heading lives
+in `support/body_frame/heading_deg`.
+
+Per-eye frame validity is `isfinite` of that eye's angle, e.g.
+`left_eye_angle_deg`. In `reason_codes` it is `(reason_codes & (4 | 32)) == 0`
+for the left eye and `(reason_codes & (8 | 32)) == 0` for the right. Bit `4`/`8`
+alone is not enough: a frame with no detection carries only bit `32`
+(`no_detection`) and has `NaN` angles for both eyes. `valid_frame` equals
+`reason_codes == 0` and equals both eyes being finite. These equivalences
+were measured on goodbatbadbat v3 run `2026-08-10T17-20-55Z_arena_1`
+(152,035 frames, zero mismatches); the writer does not yet test them.
+
 ## Canonical Input Boundary
 
 Compact-dense-v2 changes physical output layout, not source eligibility.

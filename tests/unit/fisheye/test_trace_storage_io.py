@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import platform
 import shutil
+import sys
 
 import pytest
 
@@ -140,8 +141,12 @@ def test_real_process_tree_trace_is_replayable_and_nonpromoting(
         ),
     )
 
+    # The reader must issue read-family syscalls on the target: GitHub's
+    # ubuntu image 20261021 ships uutils coreutils, whose ``head`` reads the
+    # file without one, so a system ``head`` measured nothing. The test's own
+    # interpreter reads it with a plain buffered read on every platform.
     receipt = run_traced_storage_command(
-        ["/usr/bin/head", "-c", "5", str(payload)],
+        [sys.executable, "-c", "import sys; open(sys.argv[1], 'rb').read(5)", str(payload)],
         target_roots=[target],
         output_dir=output,
         stage_id="swim_bouts",

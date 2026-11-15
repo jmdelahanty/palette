@@ -22,6 +22,14 @@ NAMESPACE_BINDINGS = {
     "/runtime_geometry_contract": "/geometry/runtime",
     "/stimulus_renderer_snapshot": "/geometry/renderer",
 }
+# The exact namespace record Palette admits. Captured geometry references keep
+# their original spelling and resolve through these bindings by exact prefix.
+NAMESPACE_RECORD = {
+    "schema_id": "citrus.experimental_h5.geometry_source_namespaces",
+    "schema_version": 1,
+    "scope": "captured_geometry_h5_references_not_filesystem_paths_or_asset_acceptance",
+    "bindings": NAMESPACE_BINDINGS,
+}
 
 
 def _input_fields(h5, definition):
@@ -259,12 +267,7 @@ def validate_geometry(h5, binding, descriptors):
     require(
         same_json(
             read_json(h5, NAMESPACE, canonical=True),
-            {
-                "schema_id": "citrus.experimental_h5.geometry_source_namespaces",
-                "schema_version": 1,
-                "scope": "captured_geometry_h5_references_not_filesystem_paths_or_asset_acceptance",
-                "bindings": NAMESPACE_BINDINGS,
-            },
+            NAMESPACE_RECORD,
         )
         and h5[NAMESPACE].attrs.get("checksum_sha256")
         == receipt["source_namespace_sha256"],

@@ -46,6 +46,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--registry", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--status-json", type=Path, help="Optional path for final status JSON.")
     parser.add_argument("--resume-transfer-plan", type=Path, help="Exact saved organization plan for retry, including interrupted retirement.")
+    parser.add_argument(
+        "--parent-workers",
+        type=int,
+        default=None,
+        help="Independent parents indexed and imported at a time (execution resource; default: the intake owner's).",
+    )
 
     args = parser.parse_args(argv)
     if args.apply and args.dry_run:

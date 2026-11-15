@@ -23,6 +23,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.import_source_fingerprint import source_stat_fingerprint_attrs
+from fisheye.shared.orange_frame_identity import crop_meta_stream_frame_field
 from fisheye.shared.zarr.chunk_profiles import (
     create_geometry_preload_array,
     stamp_geometry_preload_attrs,
@@ -280,6 +281,8 @@ def _parse_crop_metadata(
         missing = sorted(_REQUIRED_COLUMNS - set(fieldnames))
         if missing:
             raise ValueError(f"Crop metadata is missing required columns: {missing}")
+        # frame_identity_v1: stream_frame_id (adopted) or local_frame_id (before).
+        stream_field = crop_meta_stream_frame_field(fieldnames, label=str(path))
         previous_frame_id = int(expected_first_frame_id) - 1
         for row_index, row in enumerate(reader):
             row_number = row_index + 2
@@ -386,8 +389,8 @@ def _parse_crop_metadata(
             )
             columns["source_crop_local_frame_ids"].append(
                 _optional_int(
-                    row.get("local_frame_id"),
-                    column="local_frame_id",
+                    row.get(stream_field) if stream_field else None,
+                    column=stream_field or "local_frame_id",
                     row_number=row_number,
                     default=-1,
                 )

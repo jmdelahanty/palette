@@ -70,8 +70,10 @@ class ResolvedSubjectMetadata:
 def _explicit_subject_ids(
     metadata: Mapping[str, Any], *, legacy_rule: bool = False
 ) -> tuple[list[str], str]:
-    """Citrus-local subject ids, never MetaZebrobot fish ids.
+    """Explicit subject ids as the source declares them.
 
+    In Citrus snapshot v3 these are Citrus-local; in v4 an individual's
+    ``subject_id`` is its MetaZebrobot fish UUID (agent-contracts PR 103).
     ``subject_id`` is the identity field going forward; ``fish_id`` is the
     legacy Citrus spelling of the same local id (agent-contracts PR 52), and a
     source carrying both is refused. ``legacy_rule`` reproduces the earlier

@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Retired 2026-11-13. Each job ran `run_detections_batch --apply`, which has
+# refused every recording since flat detect_runs publication was retired on
+# 2026-08-14 (05f133a4). Refuse before submitting anything.
+cat >&2 <<'RETIRED'
+submit_detect_batches_bsub.sh is retired: its jobs used run_detections_batch --apply,
+which refuses every recording since flat detect_runs publication was retired
+(2026-08-14, 05f133a4). Use the artifact-first route instead:
+  scripts/submit_detect_artifact_bsub.sh                 (one recording)
+  scripts/submit_detect_artifact_quality_refine_bsub.sh  (registry-scoped, with quality + refinement)
+See docs/detection_publication_contract.md and docs/cluster_batching_guide.md.
+RETIRED
+exit 2
+
 ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
 BATCH_SIZE=10
 MAX_ACTIVE=2

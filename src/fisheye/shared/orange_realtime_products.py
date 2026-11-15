@@ -63,8 +63,24 @@ _SCHEMAS = {
         "orange_pose_event_v2.schema.json",
         "835d413c52c4c01893da9b0f6d662e69fc695f8aefbabd0f1393d0d186774fb7",
     ),
+    # Orange 2ef8840 (agent-contracts #87 frame_identity_v1): frame.local_frame_id
+    # -> frame.stream_frame_id; the yolo frame.ipc_frame_id removed.
+    "yolo_event_v3": (
+        "orange_yolo_event_v3.schema.json",
+        "067505329c41688d0744de298aae26e57e9441cf5a14b531464a889cfd1d57c1",
+    ),
+    "pose_event_v3": (
+        "orange_pose_event_v3.schema.json",
+        "722df9391304475dae2495777b6c7212b2dbeb6f0a722f790ee73f76d66eb92e",
+    ),
 }
-LINE_SCHEMA = {"detections": "yolo_event_v2", "pose": "pose_event_v2"}
+# Line schema by (product, declared line schema_version); v1 logs are only counted.
+LINE_SCHEMAS = {
+    ("detections", 2): "yolo_event_v2",
+    ("detections", 3): "yolo_event_v3",
+    ("pose", 2): "pose_event_v2",
+    ("pose", 3): "pose_event_v3",
+}
 # Model-block schemas, newest first; a block is recorded with the first that
 # validates it, or with none (a block that predates Orange's schemas).
 MODEL_SCHEMAS = {"detect": ("detect_model_v1",), "pose": ("pose_model_v2", "pose_model_v1")}
@@ -212,10 +228,11 @@ def scan_event_log(path: Path, *, product: str, line_schema_version: int) -> Eve
         with open(path, "rb") as stream:
             rows = sum(1 for line in stream if line.strip())
         return EventLogSummary(1, rows, 0, "file_level_v1")
-    if line_schema_version != 2:
+    schema_name = LINE_SCHEMAS.get((product, line_schema_version))
+    if schema_name is None:
         raise RealtimeProductsError(f"{path.name}: unsupported line schema version {line_schema_version}")
 
-    is_valid, line_validator = _line_validator(LINE_SCHEMA[product])
+    is_valid, line_validator = _line_validator(schema_name)
     frame_kind = FRAME_EVENT_KIND[product]
     status_block = STATUS_BLOCK[product]
     header: dict | None = None
@@ -231,8 +248,8 @@ def scan_event_log(path: Path, *, product: str, line_schema_version: int) -> Eve
             except ValueError as exc:
                 raise RealtimeProductsError(f"{path.name}:{number}: not JSON: {exc}") from exc
             if not is_valid(line):
-                message = schema_error(LINE_SCHEMA[product], line) or "rejected by the compiled validator"
-                raise RealtimeProductsError(f"{path.name}:{number}: violates {LINE_SCHEMA[product]}: {message}")
+                message = schema_error(schema_name, line) or "rejected by the compiled validator"
+                raise RealtimeProductsError(f"{path.name}:{number}: violates {schema_name}: {message}")
             kind = line.get("event_kind")
             if number == 1:
                 if kind != "session_header":
@@ -264,7 +281,8 @@ def scan_event_log(path: Path, *, product: str, line_schema_version: int) -> Eve
     for status, count in statuses.items():
         kinds[_kind(product, status)] += count
     return EventLogSummary(
-        2, frame_rows, header_rows, "every_line_v2", line_validator, first, last,
+        line_schema_version, frame_rows, header_rows, f"every_line_v{line_schema_version}",
+        line_validator, first, last,
         dict(sorted(statuses.items())), dict(kinds), header,
     )
 
@@ -286,7 +304,7 @@ def check_product(
         raise RealtimeProductsError(f"{label}: line schema {line_schema['schema_id']!r} is not {LINE_SCHEMA_ID[product]!r}")
     _require_same_digests(f"{label} model_ref", declared["model_ref"], snapshot_model_digests)
     expected = {"row_count": summary.frame_rows, "header_rows": summary.header_rows}
-    if summary.line_schema_version == 2:
+    if summary.line_schema_version >= 2:
         expected.update(
             first_recording_frame_id=summary.first_recording_frame_id,
             last_recording_frame_id=summary.last_recording_frame_id,

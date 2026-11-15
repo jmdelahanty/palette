@@ -52,6 +52,7 @@ def test_migrations_record_whether_they_are_additive(tmp_path: Path) -> None:
     assert rows[LATEST_MIGRATION_VERSION] == (1 if LATEST_MIGRATION_VERSION in ADDITIVE_MIGRATIONS else 0)
     assert rows[75] == 0
     assert 76 in ADDITIVE_MIGRATIONS and rows[76] == 1
+    assert 77 in ADDITIVE_MIGRATIONS and rows[77] == 1
 
 
 def test_a_registry_at_this_code_s_version_is_writable(tmp_path: Path) -> None:

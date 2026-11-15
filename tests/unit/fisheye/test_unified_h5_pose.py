@@ -137,7 +137,7 @@ def test_a_keypoint_owned_by_the_wrong_object_is_refused(tmp_path):
 def test_the_pinned_contract_detects_drift(monkeypatch):
     pose._pinned.cache_clear()
     pose._validator.cache_clear()
-    monkeypatch.setitem(pose._PINNED, "tables", ("citrus_pose_observation_tables.v1.json", "0" * 64))
+    monkeypatch.setitem(pose._PINNED[1], "tables", ("citrus_pose_observation_tables.v1.json", "0" * 64))
     try:
         with pytest.raises(UnifiedH5ContractError, match="packaged_contract_drift"):
             pose._pinned("tables")

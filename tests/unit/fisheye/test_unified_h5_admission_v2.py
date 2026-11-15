@@ -191,7 +191,8 @@ def test_an_unpinned_bounding_boxes_version_is_refused(tmp_path):
 
     path = _mutable_copy(tmp_path)
     with h5py.File(path, "r+") as h5:
-        h5[BOUNDING_BOXES].attrs.modify("schema_version", np.uint64(3))
+        # Version 3 is pinned by admission revision 4 (frame identity v1).
+        h5[BOUNDING_BOXES].attrs.modify("schema_version", np.uint64(4))
     with h5py.File(path, "r") as h5, pytest.raises(
         UnifiedH5ContractError, match="unsupported_table_version:/observations/bounding_boxes"
     ):

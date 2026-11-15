@@ -178,7 +178,7 @@ def test_build_plan_requires_published_acquisition_authority(tmp_path: Path) -> 
     assert plan.acquisition_authority_present is False
 
 
-def test_main_apply_uses_pre_resolved_model_and_returns_failure(monkeypatch, tmp_path: Path) -> None:
+def test_main_apply_is_retired_and_runs_nothing(monkeypatch, tmp_path: Path) -> None:
     registry_path = tmp_path / "registry.sqlite"
     registry_path.write_text("", encoding="utf-8")
 
@@ -244,15 +244,10 @@ def test_main_apply_uses_pre_resolved_model_and_returns_failure(monkeypatch, tmp
 
     rc = mod.main(["--apply", "--json", "--no-log", "--registry", str(registry_path), str(tmp_path)])
 
-    assert rc == 1
-    assert len(calls) == 1
-    assert calls[0]["plan"].recording_dir == recording_dir.resolve()
-    assert calls[0]["plan"].video_path == video_path.resolve()
-    assert calls[0]["plan"].zarr_path == zarr_path.resolve()
-    assert calls[0]["registry_path"] == registry_path.resolve()
-    assert calls[0]["resolved_model"].model_path == "/tmp/model.pt"
-    assert calls[0]["detect_row_shard_rows"] == 131_072
-    assert calls[0]["detect_frame_shard_rows"] == 131_072
+    # --apply is retired (flat detect_runs publication refused since
+    # 2026-08-14): it refuses before planning or running anything.
+    assert rc == 2
+    assert calls == []
 
 
 def test_build_plan_for_zarr_uses_source_video_path_from_copied_archive(tmp_path: Path) -> None:
@@ -468,8 +463,10 @@ def test_main_apply_rejects_explicit_unregistered_model(
         str(tmp_path),
     ])
 
-    assert rc == 1
-    assert "requires a registered model" in capsys.readouterr().err
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--apply is retired" in err
+    assert "submit_detect_artifact_bsub.sh" in err
 
 
 def test_run_detect_plan_rejects_explicit_model(tmp_path: Path) -> None:

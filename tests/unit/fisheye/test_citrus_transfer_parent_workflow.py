@@ -48,7 +48,7 @@ def _arguments(tmp_path, name="rolling"):
 def _failed_import(calls):
     """Stand-in for the in-process import owner: every parent fails."""
 
-    def failed(plan, *, recording_only, lease_fd):
+    def failed(plan, *, recording_only, lease_fd, parent_workers=1):
         assert os.fstat(lease_fd)  # the workflow lock, lent to the stimulus child
         calls.append(plan["snapshot_id"])
         return [
@@ -238,7 +238,7 @@ def test_whole_workflow_lock_prevents_second_importer_invocation(tmp_path, monke
     calls = []
     failed = _failed_import(calls)
 
-    def competing(plan, *, recording_only, lease_fd):
+    def competing(plan, *, recording_only, lease_fd, parent_workers=1):
         if not calls:
             second = list(arguments)
             second[second.index("--run-dir") + 1] = str(tmp_path / "second-run")

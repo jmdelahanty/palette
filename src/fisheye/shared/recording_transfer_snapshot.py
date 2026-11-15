@@ -11,6 +11,8 @@ Transport verification and a parent plan are NOT scientific/media admission.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import copy
 import csv
 from dataclasses import dataclass
 import datetime as dt
@@ -18,11 +20,14 @@ from functools import lru_cache
 import hashlib
 from importlib.resources import files as resource_files
 import json
+import logging
 import os
 import re
 import stat
+import threading
+import time
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from fisheye.shared.source_recording_identity import (
     load_strict_json_object,
@@ -46,12 +51,18 @@ OBSERVATION_FINALIZATION_PATH = f"{OBSERVATION_BINDING_DIR}/finalized_collection
 # It changes nothing on disk, so a v3 head seals exactly like a v2 head
 # (snapshot v3, marker v4); the sealer checks subject_reference structurally
 # and leaves its semantics to Citrus (writer) and Orange/Palette (readers).
-SNAPSHOT_VERSION_CITRUS_ARTIFACTS = 3  # head receipts all v2 or all v3
+# Sealer 3.3.0: receipt v4 is v3 with contract.subject_reference
+# citrus.subject_reference v2 (subject identity v4; agent-contracts #105).
+# Receipt v3 pairs only with reference v1 and receipt v4 only with v2. A head
+# of v4 receipts seals like v2 and v3 heads (snapshot v3, marker v4); a
+# collection whose revisions mix v3 and v4 receipts is refused, and a v4 head's
+# earlier revisions must be v4 as well.
+SNAPSHOT_VERSION_CITRUS_ARTIFACTS = 3  # head receipts all v2, all v3 or all v4
 MARKER_SCHEMA_V4 = "citrus.transfer_completion_marker.v4"  # pairs with snapshot v3
 MARKER_VERSION_V4 = 4
 CITRUS_DIR = "citrus"
-RECEIPT_VERSIONS = (1, 2, 3)
-RECEIPT_VERSIONS_CITRUS_ARTIFACTS = (2, 3)
+RECEIPT_VERSIONS = (1, 2, 3, 4)
+RECEIPT_VERSIONS_CITRUS_ARTIFACTS = (2, 3, 4)
 RECEIPT_KEYS = {"schema_id", "schema_version", "canonicalization", "receipt_id",
                 "contract_sha256", "contract"}
 RECEIPT_V2_CONTRACT_KEYS = {
@@ -61,7 +72,11 @@ RECEIPT_V2_CONTRACT_KEYS = {
     "h5_artifact", "session_status", "runtime_geometry_contract_sha256",
     "protocol_semantic", "citrus_artifacts"}
 RECEIPT_V3_CONTRACT_KEYS = RECEIPT_V2_CONTRACT_KEYS | {"subject_reference"}
-RECEIPT_CONTRACT_KEYS = {2: RECEIPT_V2_CONTRACT_KEYS, 3: RECEIPT_V3_CONTRACT_KEYS}
+RECEIPT_V4_CONTRACT_KEYS = RECEIPT_V3_CONTRACT_KEYS
+RECEIPT_CONTRACT_KEYS = {2: RECEIPT_V2_CONTRACT_KEYS, 3: RECEIPT_V3_CONTRACT_KEYS,
+                         4: RECEIPT_V4_CONTRACT_KEYS}
+# citrus.subject_reference version each receipt version carries (strict pairing).
+SUBJECT_REFERENCE_VERSION = {3: 1, 4: 2}
 # citrus.subject_reference v1 (agent-contracts citrus-orange/; the receipt v3
 # schema that embeds it is pinned by digest in the tests): key sets only, the
 # schema's allOf conditionals are the readers' business.
@@ -298,11 +313,181 @@ def source_relative(root: Path, value: Any, declared_root: str) -> str:
     return rel
 
 
-def file_ref(root: Path, relative: str) -> dict:
-    normalized_path(relative)
-    path = root / relative
-    before = path.lstat()
-    require(stat.S_ISREG(before.st_mode), f"not a regular artifact: {relative}")
+def _stat_signature(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    """The identity a verified digest is bound to: device, inode, size, mtime, ctime."""
+
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+class _DigestMemo:
+    """Digests this process already computed, each bound to a stat signature.
+
+    Verify-once within one intake job (the 2026-10-07 "option A" decision: one
+    independent Palette hash of every byte at arrival, stat identity after
+    that). An entry is keyed by (device, inode), so a hard-linked copy shares
+    the staged file's digest, and it is reused only while the file's size,
+    mtime and ctime are the ones recorded when its bytes were read. A ctime
+    cannot be set from user space, so any rewrite, truncation, replacement,
+    permission change or new hard link invalidates the entry and the file is
+    read again in full. Nothing is persisted: a new process starts empty.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: dict[tuple[int, int], tuple[tuple[int, int, int, int, int], str]] = {}
+        self.hits = 0
+        self.misses = 0
+        self.unsettled = 0
+        # Which files were unsettled, how old they were and a few examples,
+        # so a job's status explains its ``unsettled`` count.
+        self._unsettled_files: set[tuple[int, int]] = set()
+        self._unsettled_age_ns: tuple[int, int] | None = None
+        self.unsettled_sample: list[dict[str, Any]] = []
+        # Validated frame maps (``frame_map`` without a row callback), keyed by
+        # (device, inode, kind, previous, crop_offset) under the same rules.
+        self._frame_maps: dict[tuple, tuple[tuple[int, int, int, int, int], dict]] = {}
+        self.frame_map_hits = 0
+        self.frame_map_misses = 0
+        self.frame_map_unsettled = 0
+
+    def _note_unsettled(self, info: os.stat_result, label: str) -> int:
+        """Count an entry that was not kept; return its age in nanoseconds."""
+
+        age = _now_ns() - info.st_ctime_ns
+        self._unsettled_files.add((info.st_dev, info.st_ino))
+        low, high = self._unsettled_age_ns or (age, age)
+        self._unsettled_age_ns = (min(low, age), max(high, age))
+        if len(self.unsettled_sample) < UNSETTLED_SAMPLE_SIZE:
+            self.unsettled_sample.append({"path": label, "age_s": age / 10**9})
+        _log.debug("not memoized, unsettled (ctime %.3f s ago): %s", age / 10**9, label)
+        return age
+
+    def report(self) -> dict[str, Any]:
+        """The counters for a job status; ``hits``/``misses``/``unsettled`` first."""
+
+        with self._lock:
+            ages = self._unsettled_age_ns
+            return {
+                "hits": self.hits,
+                "misses": self.misses,
+                "unsettled": self.unsettled,
+                "unsettled_files": len(self._unsettled_files),
+                "unsettled_age_s": (
+                    None if ages is None else {"min": ages[0] / 10**9, "max": ages[1] / 10**9}
+                ),
+                "unsettled_sample": list(self.unsettled_sample),
+                "frame_maps": {
+                    "hits": self.frame_map_hits,
+                    "misses": self.frame_map_misses,
+                    "unsettled": self.frame_map_unsettled,
+                },
+            }
+
+    def lookup_frame_map(self, info: os.stat_result, key: tuple) -> dict | None:
+        signature = _stat_signature(info)
+        with self._lock:
+            entry = self._frame_maps.get(signature[:2] + key)
+            if entry is not None and entry[0] == signature:
+                self.frame_map_hits += 1
+                return entry[1]
+            self.frame_map_misses += 1
+            return None
+
+    def record_frame_map(
+        self, info: os.stat_result, key: tuple, mapping: dict, label: str
+    ) -> None:
+        if not _settled(info):
+            with self._lock:
+                self.frame_map_unsettled += 1
+                self._note_unsettled(info, label)
+            return
+        signature = _stat_signature(info)
+        with self._lock:
+            self._frame_maps[signature[:2] + key] = (signature, copy.deepcopy(mapping))
+
+    def lookup(self, info: os.stat_result) -> str | None:
+        signature = _stat_signature(info)
+        with self._lock:
+            entry = self._entries.get(signature[:2])
+            if entry is not None and entry[0] == signature:
+                self.hits += 1
+                return entry[1]
+            self.misses += 1
+            return None
+
+    def record(self, info: os.stat_result, sha256: str, label: str = "") -> None:
+        # Filesystem timestamps tick coarsely (milliseconds). A file whose
+        # ctime is still within the settle window of now could be rewritten in
+        # the same tick with an unchanged signature, so its digest is not kept;
+        # a later pass hashes it again and records it once it has settled.
+        if not _settled(info):
+            with self._lock:
+                self.unsettled += 1
+                self._note_unsettled(info, label)
+            return
+        signature = _stat_signature(info)
+        with self._lock:
+            self._entries[signature[:2]] = (signature, sha256)
+
+
+# A file modified in the last few seconds is hashed again on the next pass; a
+# generous window also covers NFS server/client clock offsets.
+DIGEST_MEMO_SETTLE_NS = 5 * 10**9
+# How many unsettled entries a memo describes by path and age in its report.
+UNSETTLED_SAMPLE_SIZE = 16
+
+
+def _now_ns() -> int:
+    return time.time_ns()
+
+
+def _settled(info: os.stat_result) -> bool:
+    return _now_ns() - info.st_ctime_ns >= DIGEST_MEMO_SETTLE_NS
+
+
+_log = logging.getLogger(__name__)
+_digest_memo_state = threading.local()
+
+
+def active_digest_memo() -> _DigestMemo | None:
+    """The memo of the enclosing :func:`digest_memo` block, if any."""
+
+    return getattr(_digest_memo_state, "memo", None)
+
+
+@contextmanager
+def digest_memo() -> Iterator[_DigestMemo]:
+    """Hash each unchanged file once for the block; stat identity afterwards.
+
+    Opt-in and bounded to the block: every :func:`file_ref` outside it reads
+    the file's bytes as before. Threads started inside the block must enter
+    :func:`digest_memo_shared` with this memo to take part in it.
+    """
+
+    previous = active_digest_memo()
+    memo = _DigestMemo()
+    _digest_memo_state.memo = memo
+    try:
+        yield memo
+    finally:
+        _digest_memo_state.memo = previous
+
+
+@contextmanager
+def digest_memo_shared(memo: _DigestMemo | None) -> Iterator[None]:
+    """Join an existing memo from another thread (``None`` joins nothing)."""
+
+    previous = active_digest_memo()
+    _digest_memo_state.memo = memo
+    try:
+        yield
+    finally:
+        _digest_memo_state.memo = previous
+
+
+def _sha256_of_regular_file(path: Path, relative: str, before: os.stat_result) -> tuple[str, os.stat_result]:
+    """Read every byte of ``path``; refuse if the file moved under the read."""
+
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         require(
@@ -313,12 +498,27 @@ def file_ref(root: Path, relative: str) -> dict:
             digest.update(chunk)
         opened = os.fstat(stream.fileno())
     after = path.lstat()
-    signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
     require(
-        signature(before) == signature(opened) == signature(after),
+        _stat_signature(before) == _stat_signature(opened) == _stat_signature(after),
         f"artifact mutated while hashing: {relative}",
     )
-    return {"path": relative, "size_bytes": after.st_size, "sha256": digest.hexdigest()}
+    return digest.hexdigest(), after
+
+
+def file_ref(root: Path, relative: str) -> dict:
+    normalized_path(relative)
+    path = root / relative
+    before = path.lstat()
+    require(stat.S_ISREG(before.st_mode), f"not a regular artifact: {relative}")
+    memo = active_digest_memo()
+    if memo is not None:
+        known = memo.lookup(before)
+        if known is not None:
+            return {"path": relative, "size_bytes": before.st_size, "sha256": known}
+    sha256, after = _sha256_of_regular_file(path, relative, before)
+    if memo is not None:
+        memo.record(after, sha256, relative)
+    return {"path": relative, "size_bytes": after.st_size, "sha256": sha256}
 
 
 # Video and H5 files at least this large take their sha256 from the sealed
@@ -445,7 +645,7 @@ def parent_contexts(manifest: dict, cameras: list[str]) -> dict:
     return contexts
 
 
-# Ported from citrus-recording-transfer 3.2.0 snapshot.py (00787e7c; 3.1.0 was
+# Ported from citrus-recording-transfer 3.3.0 snapshot.py (9f6816e7; 3.2.0 was 00787e7c, 3.1.0 was
 # 456d7fe) so Palette's independent rebuild applies the sealer's exact rules.
 def require_observation_binding_transfer_admission(
         root: Path, manifest: dict, refs: dict[str, dict], *,
@@ -597,8 +797,8 @@ def require_observation_binding_transfer_admission(
         require(set(receipt) == RECEIPT_KEYS and
                 set(contract) == RECEIPT_CONTRACT_KEYS[version],
                 f"receipt v{version} keys are not exact")
-        if version == 3:
-            check_subject_reference(contract["subject_reference"])
+        if version in SUBJECT_REFERENCE_VERSION:
+            check_subject_reference(contract["subject_reference"], receipt_version=version)
         session_uuid = contract.get("citrus_session_uuid")
         require(isinstance(session_uuid, str) and
                 re.fullmatch(r"citsess_[0-9a-f]{64}", session_uuid) is not None and
@@ -615,6 +815,18 @@ def require_observation_binding_transfer_admission(
 
     require(len(versions) == 1, "the head collection mixes receipt versions")
     receipt_version = versions.pop()
+    # 3.3.0, for v3 and v4 heads only (v1 and v2 heads behave exactly as in
+    # 3.2.0 and read no superseded receipt): no revision may carry v3 receipts
+    # while another carries v4, and a v4 head's earlier revisions must be v4
+    # too (the contract defines no upgrade to v4; Orange's
+    # citrus_receipt_v2_upgrade produces v2 only).
+    if receipt_version in SUBJECT_REFERENCE_VERSION:
+        earlier = earlier_revision_receipt_versions(root, refs, chain)
+        require(not {3, 4} <= ({receipt_version} | earlier),
+                "the collection revision chain mixes receipt v3 and v4")
+        require(receipt_version != 4 or earlier <= {4},
+                "a receipt v4 head has an earlier revision with another receipt version "
+                "(the contract defines no upgrade to v4)")
     paths = [row["path"] for row in declared]
     require(len(paths) == len(set(paths)) and not set(paths) & seen_h5,
             "Citrus artifact declared twice in the collection")
@@ -637,18 +849,47 @@ def require_observation_binding_transfer_admission(
             "revisions": [refs[path] for _, path, _ in chain]}
 
 
-def check_subject_reference(reference) -> None:
-    """Structural check of receipt v3 contract.subject_reference (key sets and
-    the two consts). Its semantics (status/reason pairing, subject_type vs
-    count) are the writer's and the readers' contract, not transfer integrity."""
+def check_subject_reference(reference, *, receipt_version: int = 3) -> None:
+    """Structural check of contract.subject_reference (key sets and the two
+    consts): receipt v3 carries citrus.subject_reference v1, receipt v4 carries
+    v2 (same key sets). Its semantics (status/reason pairing, subject_type vs
+    count, a null subject_id for a dish group) are the writer's and the
+    readers' contract, not transfer integrity."""
+    expected = SUBJECT_REFERENCE_VERSION[receipt_version]
     require(type(reference) is dict and set(reference) == SUBJECT_REFERENCE_KEYS and
             reference["schema_id"] == SUBJECT_REFERENCE_SCHEMA and
-            type(reference["schema_version"]) is int and reference["schema_version"] == 1,
-            "receipt v3 subject_reference is not citrus.subject_reference v1")
+            type(reference["schema_version"]) is int and reference["schema_version"] == expected,
+            f"receipt v{receipt_version} subject_reference is not citrus.subject_reference v{expected}")
     for key, keys in SUBJECT_REFERENCE_OBJECT_KEYS.items():
         value = reference[key]
         require(value is None or (type(value) is dict and set(value) == keys),
-                f"receipt v3 subject_reference.{key} keys are not exact")
+                f"receipt v{receipt_version} subject_reference.{key} keys are not exact")
+
+
+def earlier_revision_receipt_versions(root: Path, refs: dict[str, dict],
+                                      chain: list[tuple[int, str, dict]]) -> set[int]:
+    """Receipt schema_versions of every revision before the head, for the
+    3.3.0 v3/v4 mixing rule. Receipts absent from the inventory are skipped:
+    the chain rules (3.1.0) do not require superseded receipts to be delivered."""
+    found: set[int] = set()
+    for _, _, collection in chain[:-1]:
+        for context in collection.get("observation_contexts") or []:
+            receipt_ref = context.get("finalized_receipt") if isinstance(context, dict) else None
+            if not isinstance(receipt_ref, dict):
+                continue
+            relative = normalized_path(receipt_ref.get("relative_path"))
+            if relative not in refs:
+                continue
+            try:
+                receipt = strict_json(root / relative)
+            except TransferSnapshotError:
+                raise
+            except (ValueError, OSError):
+                require(False, f"superseded finalized receipt is not readable JSON: {relative}")
+            require(isinstance(receipt, dict) and type(receipt.get("schema_version")) is int,
+                    f"superseded finalized receipt has no integer schema_version: {relative}")
+            found.add(receipt["schema_version"])
+    return found
 
 
 def observation_binding_revision_chain(
@@ -826,7 +1067,35 @@ def frame_map(
     It does not change the transport serialization/digest or clock claim. A
     callback writer must remain unpublished until the complete map and immutable
     source generation have been revalidated.
+
+    Inside a :func:`digest_memo` block a map without a callback is parsed once
+    per unchanged file and arguments, under the digest memo's stat-identity and
+    settle rules; a callback always streams the rows from the file.
     """
+    memo = active_digest_memo()
+    if on_row is not None or memo is None:
+        return _frame_map_rows(path, kind, previous, crop_offset, on_row)
+    key = (kind, previous, crop_offset)
+    before = path.lstat()
+    known = memo.lookup_frame_map(before, key)
+    if known is not None:
+        return copy.deepcopy(known)
+    mapping = _frame_map_rows(path, kind, previous, crop_offset, None)
+    after = path.lstat()
+    if _stat_signature(before) == _stat_signature(after):
+        memo.record_frame_map(after, key, mapping, str(path))
+    return mapping
+
+
+def _frame_map_rows(
+    path: Path,
+    kind: str,
+    previous: int,
+    crop_offset: int,
+    on_row: Callable[[int, int, int, int], None] | None,
+) -> dict:
+    """Parse and validate every row of ``path`` (see :func:`frame_map`)."""
+
     count = first = last = gaps = 0
     mapping_hash = hashlib.sha256()
     with path.open("r", encoding="utf-8", newline="") as stream:
@@ -1515,13 +1784,22 @@ def verify_transfer_snapshot(root: Path) -> VerifiedTransferSnapshot:
         raise TransferSnapshotError(f"invalid transfer-v2 delivery: {error}") from error
 
 
-# Orange's frame-identity proof grammar, byte-identical to Orange 8b359de
-# docs/schemas/orange_external_recorder_frame_identity_proof_v2.schema.json
+# Orange's frame-identity proof grammar, byte-identical to Orange docs/schemas/
 # (producer: tools/external_recorder_ipc_probe.cpp frame_identity_proof_json).
-FRAME_IDENTITY_PROOF_SCHEMA_FILE = "orange_external_recorder_frame_identity_proof_v2.schema.json"
-FRAME_IDENTITY_PROOF_SCHEMA_SHA256 = "c9c2544526044bc1a934ab90a0dbe3fca24f34230a27ec280e58b6afc2ffed8d"
+# v2: Orange 8b359de. v3: Orange 2ef8840 (agent-contracts #87 frame_identity_v1:
+# legacy_aliases removed; every other field and check unchanged). Older
+# recordings keep their v2 proofs.
 FRAME_IDENTITY_PROOF_SCHEMA_ID = "orange.external_recorder.frame_identity_proof"
-FRAME_IDENTITY_PROOF_VERSION = 2
+FRAME_IDENTITY_PROOF_SCHEMAS = {
+    2: (
+        "orange_external_recorder_frame_identity_proof_v2.schema.json",
+        "c9c2544526044bc1a934ab90a0dbe3fca24f34230a27ec280e58b6afc2ffed8d",
+    ),
+    3: (
+        "orange_external_recorder_frame_identity_proof_v3.schema.json",
+        "269fe0b6c8857928f9bc4d93646a45a9d37bc2fd88d1968b466f0d5ae73b06c8",
+    ),
+}
 # Counters that must all equal the stream's encoded frame count (Orange's
 # "verified" condition plus the packet submission counters).
 _PROOF_EQUAL_COUNTERS = (
@@ -1536,17 +1814,13 @@ _PROOF_EQUAL_COUNTERS = (
 
 
 @lru_cache(maxsize=None)
-def _frame_identity_proof_validator():
+def _frame_identity_proof_validator(version: int):
     from jsonschema import Draft202012Validator
 
-    data = (
-        resource_files("fisheye.shared")
-        .joinpath("contracts")
-        .joinpath(FRAME_IDENTITY_PROOF_SCHEMA_FILE)
-        .read_bytes()
-    )
-    if hashlib.sha256(data).hexdigest() != FRAME_IDENTITY_PROOF_SCHEMA_SHA256:
-        raise TransferSnapshotError("packaged_contract_drift:" + FRAME_IDENTITY_PROOF_SCHEMA_FILE)
+    file_name, digest = FRAME_IDENTITY_PROOF_SCHEMAS[version]
+    data = resource_files("fisheye.shared").joinpath("contracts").joinpath(file_name).read_bytes()
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise TransferSnapshotError("packaged_contract_drift:" + file_name)
     return Draft202012Validator(json.loads(data))
 
 
@@ -1578,7 +1852,7 @@ def _stream_proofs(root: Path, output: dict) -> list[tuple[str, dict]]:
 def _require_frame_identity_proof(
     path: str, proof: Any, *, output_kind: str, frame_count: int
 ) -> None:
-    """Accept only Orange's v2 proof, passed, binding exactly this stream's frames.
+    """Accept only Orange's v2/v3 proof, passed, binding exactly this stream's frames.
 
     The proof covers one recording session and camera stream (all of its
     clips), so ``frame_count`` is the stream's total over the parent's clips.
@@ -1587,13 +1861,15 @@ def _require_frame_identity_proof(
 
     from jsonschema.exceptions import best_match
 
+    version = proof.get("schema_version") if type(proof) is dict else None
     require(
         type(proof) is dict
         and proof.get("schema_id") == FRAME_IDENTITY_PROOF_SCHEMA_ID
-        and proof.get("schema_version") == FRAME_IDENTITY_PROOF_VERSION,
+        and type(version) is int
+        and version in FRAME_IDENTITY_PROOF_SCHEMAS,
         "present frame_identity_proof needs a supported semantic proof validator: " + path,
     )
-    error = best_match(_frame_identity_proof_validator().iter_errors(proof))
+    error = best_match(_frame_identity_proof_validator(version).iter_errors(proof))
     require(error is None, f"frame_identity_proof grammar: {path}: {error and error.message}")
     binding = proof["video_binding"]
     require(

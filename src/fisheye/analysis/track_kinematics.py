@@ -187,6 +187,7 @@ from fisheye.shared.zarr_payload_receipt import (
     verify_payload_validation_receipt,
 )
 from .swim_bout_io import SwimBoutIOError, load_default_swim_bout_tables, load_swim_bout_tables
+from fisheye.shared.heading_convention import wrap_delta_degrees
 
 
 TrackPhysicalAuthority = (
@@ -3249,13 +3250,6 @@ def _ordered_track_arena_ids(
     )
 
 
-def _wrap_heading_delta_degrees(delta_degrees: np.ndarray) -> np.ndarray:
-    """Wrap heading deltas into the signed [-180, 180) range."""
-
-    delta = np.asarray(delta_degrees, dtype=np.float64)
-    return ((delta + 180.0) % 360.0) - 180.0
-
-
 def _compute_heading_turning(
     headings_deg: np.ndarray,
     delta_seconds_full: np.ndarray,
@@ -3274,7 +3268,7 @@ def _compute_heading_turning(
     if headings.size < 2:
         return delta_heading, angular_velocity, angular_speed
 
-    step_delta = _wrap_heading_delta_degrees(headings[1:] - headings[:-1])
+    step_delta = wrap_delta_degrees(headings[1:] - headings[:-1])
     valid = (
         np.isfinite(headings[1:])
         & np.isfinite(headings[:-1])

@@ -36,8 +36,14 @@ def _validators() -> list[tuple[str, Callable[[], object]]]:
 
     checks: list[tuple[str, Callable[[], object]]] = [
         ("transfer envelope", lambda: snapshot.envelope_validator()),
-        ("frame identity proof", lambda: snapshot._frame_identity_proof_validator()),
-        ("citrus subject snapshot", lambda: citrus_subject_snapshot._schema()),
+        *((f"citrus subject snapshot v{version}",
+           lambda version=version: citrus_subject_snapshot._schema(version))
+          for version in citrus_subject_snapshot.SCHEMAS),
+    ]
+    checks += [
+        (f"frame identity proof v{version}",
+         lambda version=version: snapshot._frame_identity_proof_validator(version))
+        for version in snapshot.FRAME_IDENTITY_PROOF_SCHEMAS
     ]
     checks += [
         (f"orange {name}", lambda name=name: ledger._orange_validator(name))

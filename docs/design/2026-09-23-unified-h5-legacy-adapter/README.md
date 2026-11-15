@@ -1,11 +1,13 @@
 # Unified H5 → legacy stimulus-run adapter: field mapping
 
-- **Status:** draft. Specification for an adapter that is not yet built.
-  Drafted by an agent from code and fixtures; the blockers were spot-checked
+- **Status:** **rejected 2026-10-12; do not build.** See [Decision
+  (2026-10-12)](#decision-2026-10-12-no-adapter). The field mapping below stays
+  as a reference crosswalk between the legacy and unified layouts. It was
+  drafted by an agent from code and fixtures; the blockers were spot-checked
   against the code (step-status gate, experiment-setup subject count) but the
   table has not been reviewed row by row.
 - **Owner:** Jeremy Delahanty.
-- **Last reviewed:** 2026-09-23.
+- **Last reviewed:** 2026-10-12 (D1 decision); 2026-09-23 (mapping).
 - **Builds on:** [native unified H5 import](../../unified_h5_native_import.md)
   (PR 169), the registry native-run guard (PR 181), and the
   [recording identity design](../2026-09-23-recording-identity/README.md).
@@ -24,6 +26,28 @@ Real-data witnesses (all read-only):
 Unified witnesses: the `base` and `appearance` fixtures in `tests/fixtures/unified_h5_v1`, decoded with `emit_fixture`.
 
 ---
+
+## Decision (2026-10-12): no adapter
+
+Jeremy decided that new (unified) recordings are **not** converted into the
+legacy stimulus layout. D1's recommended architecture (unified → canonical-v5
+derivative H5 → unchanged `import_stimulus_to_zarr`) will not be built.
+
+- **Why:** an adapter carries legacy semantics forward into new data. That
+  includes the trigger-ID frame alignment, which was one frame late on legacy
+  recordings (see the D12 amendment), and the bare, ambiguous frame-id names
+  that the frame-identity contract (agent-contracts #84) removes. A second
+  file format kept alive for every new recording is also a lasting cost.
+- **Instead:** Palette reads unified recordings natively. Stimulus, event,
+  step and chaser data join to camera frames only through the `/correspondence/*`
+  tables. Examples: the driving-frame and display-candidate columns (PRs #371,
+  #374) and pose observations (PR #375). Legacy readers stay for frozen
+  legacy files only.
+- **What remains useful here:** the main table and the NO-LEGACY-HOME list,
+  as a crosswalk when a native reader needs the unified home of a legacy
+  field. Read D2–D13 as the adapter's design record. They do not bind native
+  readers, except the D12 amendment's frame rules, which apply to every
+  reader.
 
 ## Summary
 
@@ -266,7 +290,8 @@ Totals: 41 EXACT, 8 EXACT-narrow, 7 DERIVED. The collapse is lossy for `target_s
 
 ## Design decisions for the adapter
 
-- **D1. Architecture.** Recommended: **unified (read from the native candidate via `load_unified_stimulus_candidate`) → write a canonical-v5-shaped derivative H5 → run the unchanged `import_stimulus_to_zarr`.** This mirrors `utils/migrate_legacy_goodbatbadbat_stimulus_h5.py`, whose job it replaces. Why:
+- **D1. Architecture. Superseded 2026-10-12: no adapter (see the
+  decision at the top).** Original recommendation, kept for the record: **unified (read from the native candidate via `load_unified_stimulus_candidate`) → write a canonical-v5-shaped derivative H5 → run the unchanged `import_stimulus_to_zarr`.** This mirrors `utils/migrate_legacy_goodbatbadbat_stimulus_h5.py`, whose job it replaces. Why:
   - it reuses the ~11k LOC coordinate, calibration, physical, selector and publication contract verbatim;
   - `source_h5` keeps pointing at a file with legacy paths, so the three re-open consumers keep working (B3);
   - consolidation and verification stay identical.

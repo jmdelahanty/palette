@@ -5,8 +5,11 @@ acquisition frame clock this computes the range of Citrus stimulus states that
 could have been visible while the frame was exposed:
 
 * Exposure time on the pancake0 host clock is ``camera_timestamp_ns - offset``,
-  with the TAI-UTC offset read from Orange's ``timestamp_clock_contract``
-  (agent-contracts orange-palette/camera_exposure_host_clock_v1). The camera
+  with the TAI-UTC offset taken only from the published acquisition frame clock
+  (``camera_tai_minus_utc``), which records whether Orange declared it or
+  Palette inferred it. The run records that authority; a clock with no offset
+  is refused. Orange's ``timestamp_clock_contract`` and PTP summary are read
+  for evidence only (clock-state intervals, lock state). The camera
   timestamp's exposure point is undeclared, so ``exposure_us / 2`` is recorded
   as uncertainty.
 * Citrus records when each state was handed to the display
@@ -42,6 +45,7 @@ import zarr
 
 from fisheye.shared.acquisition_frame_clock import (
     MISSING_TIMESTAMP_SENTINEL,
+    camera_tai_minus_utc,
     load_published_acquisition_frame_clock,
 )
 from fisheye.shared.json_safety import json_attr_safe
@@ -68,7 +72,7 @@ from fisheye.shared.zarr_run_completion import (
 
 PARENT_NAME = "stimulus_display_candidate_runs"
 SCHEMA_ID = "palette.stimulus_display_candidates"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 METHOD = "latest_submitted_within_full_visibility_window_v1"
 DRIVING_METHOD = "citrus_correspondence_source_recording_frame_id_v1"
 NO_STATE = -1
@@ -103,11 +107,12 @@ def orange_exposure_clock(
     *,
     camera_serial: str,
 ) -> dict[str, Any]:
-    """Return the TAI-UTC offset and Orange's classification for one camera.
+    """Orange's clock evidence for one camera: classification and state intervals.
 
     Read from ``recording_session.json`` ``timestamp_clock_contract``; older
     recordings without it fall back to the host PTP evidence in
-    ``ptp_sync_summary.json``. Without either the offset is unknown.
+    ``ptp_sync_summary.json``. Evidence only: the offset used for exposure time
+    comes from the published frame clock, never from here.
     """
 
     contract = (recording_session or {}).get("timestamp_clock_contract")
@@ -143,9 +148,7 @@ def orange_exposure_clock(
         ) or {}
         evidence = {"source": "ptp_sync_summary.host_ptp_management_evidence", "clock_state_intervals": []}
     offset = properties.get("currentUtcOffset")
-    if type(offset) is not int:
-        _fail("No currentUtcOffset in Orange clock evidence; exposure time is unknown.")
-    evidence["current_utc_offset_s"] = offset
+    evidence["orange_reported_current_utc_offset_s"] = offset if type(offset) is int else None
     evidence["current_utc_offset_valid"] = properties.get("currentUtcOffsetValid") is True
     evidence["time_traceable"] = properties.get("timeTraceable") is True
     return evidence
@@ -362,9 +365,12 @@ def build_stimulus_display_candidates(
         _fail(f"Missing {ptp_path}.")
     clock_evidence = orange_exposure_clock(session, ptp, camera_serial=serial)
     ptp_evidence = ptp_camera_evidence(ptp, camera_serial=serial)
+    tai_minus_utc = camera_tai_minus_utc(resolved)
+    if tai_minus_utc["seconds"] is None:
+        _fail("The published frame clock gives no TAI-UTC offset for the camera; exposure time is unknown.")
     exposure_us = (((snapshot or {}).get("camera_runtime") or {}).get(serial) or {}).get("runtime", {}).get("exposure")
 
-    offset_ns = int(clock_evidence["current_utc_offset_s"]) * 1_000_000_000
+    offset_ns = int(tai_minus_utc["seconds"]) * 1_000_000_000
     camera_valid = np.asarray(clock.camera_timestamp_valid, dtype=bool)
     exposure_host = np.where(
         camera_valid, np.asarray(clock.camera_timestamp_ns, dtype=np.int64) - offset_ns, MISSING_TIMESTAMP_SENTINEL
@@ -417,7 +423,10 @@ def build_stimulus_display_candidates(
         "unified_reference_sha256": source.reference_sha256,
         "exposure_clock": {
             **clock_evidence,
-            "exposure_host_rule": "camera_timestamp_ns - current_utc_offset_s * 1e9",
+            "tai_minus_utc_seconds": tai_minus_utc["seconds"],
+            "tai_minus_utc_authority": tai_minus_utc["authority"],
+            "tai_minus_utc_source": "published_acquisition_frame_clock",
+            "exposure_host_rule": "camera_timestamp_ns - tai_minus_utc_seconds * 1e9",
             "exposure_point": "undeclared_by_vendor",
             "exposure_us": exposure_us,
             "exposure_uncertainty_ns": None if exposure_us is None else int(exposure_us) * 500,

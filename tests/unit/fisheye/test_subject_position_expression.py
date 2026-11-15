@@ -646,3 +646,28 @@ def test_profile_ids_are_explicit_and_detection_is_not_an_implicit_default() -> 
     assert DETECTION_BBOX_CENTROID_ESTIMATOR_ID in ESTIMATOR_PROFILE_RECORDS
     assert SUBJECT_BODY_MASK_CENTROID_ESTIMATOR_ID in ESTIMATOR_PROFILE_RECORDS
     assert "default_estimator_id" not in DETECTION_BBOX_CENTROID_PROFILE
+
+
+def test_evaluation_records_float32_quantization_over_valid_rows() -> None:
+    # The box centre x = 4512.123456789 is not representable in float32, so the
+    # cast must lose a measurable amount no larger than half the spacing there.
+    result = evaluate_estimator_profile(
+        DETECTION_BBOX_CENTROID_ESTIMATOR_ID,
+        PointExpressionBindings(
+            bboxes={
+                "bbox_img_xyxy": BoundingBoxSourceBinding(
+                    [
+                        [4510.0, 9.0, 4514.246913578, 11.0],
+                        [1.0, 1.0, 3.0, 3.0],
+                    ],
+                    valid=[True, False],
+                )
+            }
+        ),
+    )
+    record = result.float32_quantization
+    assert record["valid_row_count"] == 1
+    centre = (4510.0 + 4514.246913578) / 2.0
+    expected = abs(float(np.float32(centre)) - centre)
+    assert record["max_abs_error"] == expected
+    assert 0.0 < expected <= 0.5 * float(np.spacing(np.float32(4512.123456789)))

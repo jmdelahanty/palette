@@ -303,17 +303,22 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
         "recording_realtime_products",
         "_migration_076_recording_realtime_products",
     ),
+    (
+        77,
+        "crop_collection_consumer_readiness",
+        "_migration_077_crop_collection_consumer_readiness",
+    ),
 )
 
 
-# Migrations that only add tables, indexes or views, and so leave every existing
+# Migrations that only add tables or indexes, or add or redefine views, and so leave every existing
 # table's meaning unchanged for code that predates them. When one is applied,
 # the registry records that in schema_version.additive. Code whose latest
 # migration is older than the registry's refuses to write unless every newer
 # applied migration is recorded additive (schema_compatibility_problem). A
 # migration not listed here is treated as non-additive: list it only when that
 # holds.
-ADDITIVE_MIGRATIONS = frozenset({76})
+ADDITIVE_MIGRATIONS = frozenset({76, 77})
 LATEST_MIGRATION_VERSION = MIGRATION_METHODS[-1][0]
 
 

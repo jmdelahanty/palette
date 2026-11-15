@@ -10,7 +10,10 @@ from typing import Any, Mapping
 
 import zarr
 
-from fisheye.analysis.chaser_behavior import resolve_configured_chaser_behaviors
+from fisheye.analysis.chaser_behavior import (
+    ChaserBehaviorClass,
+    resolve_configured_chaser_behaviors,
+)
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.type_conversions import normalize_attr
 
@@ -122,6 +125,25 @@ def extract_recording_chaser_metadata(
                     source_path=source_path,
                     reason="duplicate_chaser_index",
                     detail=f"Configured chaser indices are not unique: {indices}",
+                )
+            )
+            continue
+
+        programmed = [
+            behavior.chaser_index
+            for behavior in behaviors
+            if behavior.behavior_class_id == int(ChaserBehaviorClass.PROGRAMMED)
+        ]
+        if programmed:
+            # The registry behavior_class vocabulary is 0-3; adding programmed
+            # needs a registry migration, so these runs are reported, not
+            # written under another class.
+            issues.append(
+                ChaserMetadataIssue(
+                    stimulus_run_id=run_name,
+                    source_path=source_path,
+                    reason="programmed_chaser_unsupported",
+                    detail=f"Programmed chasers (behavior class 4) at indices {programmed}.",
                 )
             )
             continue

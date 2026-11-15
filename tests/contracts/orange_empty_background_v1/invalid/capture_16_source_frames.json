@@ -1,0 +1,185 @@
+{
+  "schema_id": "orange.empty_background_capture",
+  "schema_version": 1,
+  "capture_id": "2026_11_02_15_04_11",
+  "captured_at_utc": "2026-11-02T23:04:11.123Z",
+  "scene_declaration": {
+    "dishes_empty": true,
+    "note": "water, no fish",
+    "stimulus_display": {
+      "source": "operator_declared",
+      "state": "on",
+      "shown": {
+        "kind": "solid_color",
+        "rgba8": [
+          255,
+          0,
+          0,
+          255
+        ]
+      }
+    }
+  },
+  "method": {
+    "name": "median_17",
+    "version": 1,
+    "frame_count": 17
+  },
+  "pixel_declaration": {
+    "encoding": "raw_sensor_mono8",
+    "range": "full",
+    "conversion": "none"
+  },
+  "cameras": [
+    {
+      "camera_serial": "2010095",
+      "capture_status": "captured",
+      "camera_configuration": {
+        "width": 4512,
+        "height": 1792,
+        "offset_x": 0,
+        "offset_y": 1360,
+        "pixel_format": "Mono8",
+        "frame_rate_hz": 250,
+        "exposure_us": 150,
+        "gain": 256,
+        "focus": 3185,
+        "iris": 19
+      },
+      "source_frames": [
+        {
+          "stream_frame_id": 1000,
+          "camera_frame_id": 5000,
+          "camera_timestamp_ns": 1793600000000000000,
+          "timestamp_sys_ns": 1793599963009100000
+        },
+        {
+          "stream_frame_id": 1001,
+          "camera_frame_id": 5001,
+          "camera_timestamp_ns": 1793600000004000000,
+          "timestamp_sys_ns": 1793599963013100000
+        },
+        {
+          "stream_frame_id": 1002,
+          "camera_frame_id": 5002,
+          "camera_timestamp_ns": 1793600000008000000,
+          "timestamp_sys_ns": 1793599963017100000
+        },
+        {
+          "stream_frame_id": 1003,
+          "camera_frame_id": 5003,
+          "camera_timestamp_ns": 1793600000012000000,
+          "timestamp_sys_ns": 1793599963021100000
+        },
+        {
+          "stream_frame_id": 1004,
+          "camera_frame_id": 5004,
+          "camera_timestamp_ns": 1793600000016000000,
+          "timestamp_sys_ns": 1793599963025100000
+        },
+        {
+          "stream_frame_id": 1005,
+          "camera_frame_id": 5005,
+          "camera_timestamp_ns": 1793600000020000000,
+          "timestamp_sys_ns": 1793599963029100000
+        },
+        {
+          "stream_frame_id": 1006,
+          "camera_frame_id": 5006,
+          "camera_timestamp_ns": 1793600000024000000,
+          "timestamp_sys_ns": 1793599963033100000
+        },
+        {
+          "stream_frame_id": 1007,
+          "camera_frame_id": 5007,
+          "camera_timestamp_ns": 1793600000028000000,
+          "timestamp_sys_ns": 1793599963037100000
+        },
+        {
+          "stream_frame_id": 1008,
+          "camera_frame_id": 5008,
+          "camera_timestamp_ns": 1793600000032000000,
+          "timestamp_sys_ns": 1793599963041100000
+        },
+        {
+          "stream_frame_id": 1009,
+          "camera_frame_id": 5009,
+          "camera_timestamp_ns": 1793600000036000000,
+          "timestamp_sys_ns": 1793599963045100000
+        },
+        {
+          "stream_frame_id": 1010,
+          "camera_frame_id": 5010,
+          "camera_timestamp_ns": 1793600000040000000,
+          "timestamp_sys_ns": 1793599963049100000
+        },
+        {
+          "stream_frame_id": 1011,
+          "camera_frame_id": 5011,
+          "camera_timestamp_ns": 1793600000044000000,
+          "timestamp_sys_ns": 1793599963053100000
+        },
+        {
+          "stream_frame_id": 1012,
+          "camera_frame_id": 5012,
+          "camera_timestamp_ns": 1793600000048000000,
+          "timestamp_sys_ns": 1793599963057100000
+        },
+        {
+          "stream_frame_id": 1013,
+          "camera_frame_id": 5013,
+          "camera_timestamp_ns": 1793600000052000000,
+          "timestamp_sys_ns": 1793599963061100000
+        },
+        {
+          "stream_frame_id": 1014,
+          "camera_frame_id": 5014,
+          "camera_timestamp_ns": 1793600000056000000,
+          "timestamp_sys_ns": 1793599963065100000
+        },
+        {
+          "stream_frame_id": 1015,
+          "camera_frame_id": 5015,
+          "camera_timestamp_ns": 1793600000060000000,
+          "timestamp_sys_ns": 1793599963069100000
+        }
+      ],
+      "image": {
+        "relative_path": "Cam2010095_empty_background.png",
+        "size_bytes": 5123456,
+        "sha256": "sha256:abababababababababababababababababababababababababababababababab"
+      },
+      "statistics": {
+        "saturation_value": 255,
+        "pixel_count": 8085504,
+        "saturated_fraction": 0.00041234,
+        "zero_fraction": 0.0,
+        "mean": 231.402,
+        "p01": 40,
+        "p05": 180,
+        "p50": 247,
+        "p95": 251,
+        "p99": 253,
+        "p999": 255
+      },
+      "any_frame_saturated_fraction": 0.0341
+    },
+    {
+      "camera_serial": "2010096",
+      "capture_status": "failed",
+      "camera_configuration": {
+        "width": 4512,
+        "height": 1792,
+        "offset_x": 0,
+        "offset_y": 1360,
+        "pixel_format": "Mono8",
+        "frame_rate_hz": 250,
+        "exposure_us": 150,
+        "gain": 256,
+        "focus": 3185,
+        "iris": 19
+      },
+      "failure_reason": "burst timeout after 2000 ms (9 of 17 frames)"
+    }
+  ]
+}

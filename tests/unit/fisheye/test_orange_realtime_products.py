@@ -174,7 +174,7 @@ def _variants(line: dict) -> list[dict]:
 def test_the_compiled_line_validator_agrees_with_the_reference(tmp_path, product):
     pytest.importorskip("jsonschema_rs")
     rp._line_validator.cache_clear()
-    name = rp.LINE_SCHEMA[product]
+    name = rp.LINE_SCHEMAS[(product, 2)]
     is_valid, which = rp._line_validator(name)
     assert which == "jsonschema-rs"
     reference = rp._validator(name)

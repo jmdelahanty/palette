@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import h5py
 import pytest
 
+from fisheye.shared.unified_h5.geometry import NAMESPACE, NAMESPACE_RECORD
+
 from fisheye.shared.recording_geometry import (
     CitrusRegistrationStatus,
     GeometryLoadPolicy,
@@ -45,10 +47,11 @@ def _rim_entry(
     source_sha: str = "sha256:" + "a" * 64,
     source_path: str = "/orange/immutable/observation.json",
     gate_radius: float = 205.0,
+    rim_version: int = 2,
 ) -> dict[str, object]:
     return {
         "artifact_schema_id": "orange.calibration.dish_top_rim_observation",
-        "artifact_schema_version": 2,
+        "artifact_schema_version": rim_version,
         "artifact_id": f"dishrim-{camera}",
         "camera_serial": camera,
         "arena_id": arena,
@@ -104,7 +107,13 @@ def _write_folder_bundle(
     *,
     include_pointer: bool = True,
     gate_radius: float = 205.0,
+    contract_version: int = 1,
+    assets_version: int | None = None,
+    rim_version: int | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
+    # Contract v2 (Orange bb6c4f5) binds assets v2 and rim observation v3.
+    assets_version = contract_version if assets_version is None else assets_version
+    rim_version = contract_version + 1 if rim_version is None else rim_version
     root.mkdir(parents=True, exist_ok=True)
     assets = root / "recording_geometry_assets"
     observation_rel = (
@@ -116,10 +125,10 @@ def _write_folder_bundle(
     observation_path.write_bytes(observation_bytes)
     observation_sha = _sha(observation_bytes)
 
-    entry = _rim_entry(source_sha=observation_sha, gate_radius=gate_radius)
+    entry = _rim_entry(source_sha=observation_sha, gate_radius=gate_radius, rim_version=rim_version)
     manifest = {
         "schema_id": "orange.recording.geometry_assets",
-        "schema_version": 1,
+        "schema_version": assets_version,
         "status": "complete",
         "materialized_file_count": 1,
         "files": [
@@ -138,7 +147,7 @@ def _write_folder_bundle(
     registration_id = "dailyreg-1"
     contract = {
         "schema_id": "orange.recording.geometry_contract",
-        "schema_version": 1,
+        "schema_version": contract_version,
         "status": "resolved",
         "selection": {
             "rig_id": "omnifin0",
@@ -158,7 +167,7 @@ def _write_folder_bundle(
         },
         "materialized_assets": {
             "schema_id": "orange.recording.geometry_assets",
-            "schema_version": 1,
+            "schema_version": assets_version,
             "status": "complete",
             "relative_path": "recording_geometry_assets/manifest.json",
             "sha256": _sha(manifest_bytes),
@@ -512,10 +521,23 @@ def test_folder_loader_rejects_native_frame_dimension_mismatch(tmp_path: Path) -
     assert "dimensions disagree" in result.issues[0].message
 
 
-def _write_h5(path: Path, *, runtime_registration_id: str = "dailyreg-1") -> None:
+def _write_h5(
+    path: Path,
+    *,
+    runtime_registration_id: str = "dailyreg-1",
+    contract_version: int = 1,
+    scope_version: int = 1,
+    source_version: int | None = None,
+    unified: bool = False,
+    citrus_daily: dict[str, object] | None | object = None,
+) -> None:
+    if citrus_daily is None:
+        citrus_daily = _citrus_daily()
+    elif citrus_daily is _ABSENT:
+        citrus_daily = None
     contract = {
         "schema_id": "orange.recording.geometry_contract",
-        "schema_version": 1,
+        "schema_version": contract_version,
         "status": "resolved",
     }
     contract_bytes = _json_bytes(contract, newline=True)
@@ -542,9 +564,12 @@ def _write_h5(path: Path, *, runtime_registration_id: str = "dailyreg-1") -> Non
     entry = _rim_entry()
     scope = {
         "schema_id": "citrus.session.orange_recording_geometry_contract_scope",
-        "schema_version": 1,
+        "schema_version": scope_version,
         "scope_status": "resolved",
-        "source_contract": {"sha256": _sha(contract_bytes)},
+        "source_contract": {
+            "sha256": _sha(contract_bytes),
+            "schema_version": contract_version if source_version is None else source_version,
+        },
         "target": {
             "rig_id": "omnifin0",
             "canvas_name": "shadow",
@@ -566,7 +591,6 @@ def _write_h5(path: Path, *, runtime_registration_id: str = "dailyreg-1") -> Non
                         "valid_until_utc": "2026-07-23T04:00:00Z",
                     },
                     "recording_snapshot_entry": entry,
-                    "selected_daily_registration_applied_by_citrus": True,
                 },
             }
         },
@@ -578,14 +602,21 @@ def _write_h5(path: Path, *, runtime_registration_id: str = "dailyreg-1") -> Non
         recording.attrs["capture_status"] = "embedded_verified"
         recording.attrs["checksum_verified"] = 1
         recording.attrs["schema_id"] = "orange.recording.geometry_contract"
-        recording.attrs["schema_version"] = 1
+        recording.attrs["schema_version"] = contract_version
         contract_dataset = recording.create_dataset("contract_json", data=contract_bytes)
         contract_dataset.attrs["checksum_sha256"] = _sha(contract_bytes)
         scope_dataset = recording.create_dataset("h5_scope_json", data=scope_bytes)
         scope_dataset.attrs["checksum_sha256"] = _sha(scope_bytes)
         scope_dataset.attrs["source_contract_sha256"] = _sha(contract_bytes)
 
-        runtime_group = h5.create_group("runtime_geometry_contract")
+        if unified:
+            # Unified H5: the runtime contract lives at its namespace binding.
+            namespace = _json_bytes(NAMESPACE_RECORD)
+            dataset = h5.create_dataset(NAMESPACE, data=namespace)
+            dataset.attrs["checksum_sha256"] = _sha(namespace)
+        runtime_group = h5.create_group(
+            "geometry/runtime" if unified else "runtime_geometry_contract"
+        )
         runtime_dataset = runtime_group.create_dataset(
             "daily_registration_json",
             data=runtime_bytes,
@@ -593,6 +624,38 @@ def _write_h5(path: Path, *, runtime_registration_id: str = "dailyreg-1") -> Non
         runtime_dataset.attrs["checksum_sha256"] = _sha(runtime_bytes)
         runtime_dataset.attrs["load_status"] = "loaded"
         runtime_dataset.attrs["source_path"] = "/citrus/immutable/registration.json"
+        if citrus_daily is not None:
+            runtime_contract = _json_bytes(
+                {
+                    "schema_id": "citrus.session.runtime_geometry_contract",
+                    "schema_version": 1,
+                    "daily_registration": citrus_daily,
+                }
+            )
+            dataset = runtime_group.create_dataset("contract_json", data=runtime_contract)
+            dataset.attrs["checksum_sha256"] = _sha(runtime_contract)
+
+
+def _citrus_daily(**changes: object) -> dict[str, object]:
+    """Citrus's runtime daily_registration block for the selected registration."""
+
+    daily: dict[str, object] = {
+        "mode": "selected_daily_registration",
+        "status": "selected_valid",
+        "applied": True,
+        "registration_id": "dailyreg-1",
+        "registration_checksum_valid": True,
+        "target": {"arena_id": "arena_1", "camera_id": "2010093"},
+    }
+    for key, value in changes.items():
+        if value is _ABSENT:
+            del daily[key]
+        else:
+            daily[key] = value
+    return daily
+
+
+_ABSENT = object()
 
 
 def test_h5_loader_hashes_exact_payload_and_reconciles_runtime(tmp_path: Path) -> None:
@@ -608,6 +671,69 @@ def test_h5_loader_hashes_exact_payload_and_reconciles_runtime(tmp_path: Path) -
     assert mask.selected_daily_registration_applied_by_citrus is True
     assert mask.source_contract_sha256 == result.source_contract_sha256
     assert mask.h5_scope_sha256 == result.h5_scope_sha256
+
+
+@pytest.mark.parametrize(
+    ("changes", "status", "applied"),
+    [
+        ({"status": "selected_invalid", "applied": False}, CitrusRegistrationStatus.INVALID, False),
+        ({"applied": False}, CitrusRegistrationStatus.INVALID, False),
+        ({"status": "selected_invalid"}, CitrusRegistrationStatus.INVALID, True),
+        ({"applied": _ABSENT}, CitrusRegistrationStatus.INVALID, None),
+        ({"status": "available_not_selected", "applied": False}, CitrusRegistrationStatus.MISSING, False),
+        ({"status": "not_performed", "applied": False}, CitrusRegistrationStatus.MISSING, False),
+        ({"registration_id": _ABSENT}, CitrusRegistrationStatus.MISSING, True),
+        ({"registration_checksum_valid": _ABSENT}, CitrusRegistrationStatus.MISSING, True),
+        ({"registration_id": "dailyreg-other"}, CitrusRegistrationStatus.REGISTRATION_ID_MISMATCH, True),
+        ({"target": {"arena_id": "arena_2", "camera_id": "2010093"}}, CitrusRegistrationStatus.CAMERA_ARENA_TARGET_MISSING, True),
+        ({"target": {"arena_id": "arena_1", "camera_id": "2010094"}}, CitrusRegistrationStatus.CAMERA_ARENA_TARGET_MISSING, True),
+        ({"registration_checksum_valid": False}, CitrusRegistrationStatus.CHECKSUM_MISMATCH, True),
+    ],
+)
+def test_h5_loader_takes_applied_only_from_citrus_runtime_contract(
+    tmp_path: Path,
+    changes: dict[str, object],
+    status: CitrusRegistrationStatus,
+    applied: bool | None,
+) -> None:
+    # Citrus declares selection and application in /geometry/runtime
+    # contract_json.daily_registration; every term must hold, none is inferred.
+    path = tmp_path / "experiment.h5"
+    _write_h5(path, unified=True, citrus_daily=_citrus_daily(**changes))
+
+    result = load_registered_dish_masks_from_citrus_h5(path)
+
+    (mask,) = result.masks.values()
+    assert mask.citrus_registration_status is status
+    assert mask.selected_daily_registration_applied_by_citrus is applied
+    assert result.issues[0].code == status.value
+    with pytest.raises(RecordingGeometryError, match="did not exactly match"):
+        load_registered_dish_masks_from_citrus_h5(path, policy=GeometryLoadPolicy.REQUIRED)
+
+
+def test_h5_loader_without_runtime_contract_is_not_applied(tmp_path: Path) -> None:
+    path = tmp_path / "experiment.h5"
+    _write_h5(path, citrus_daily=_ABSENT)
+
+    (mask,) = load_registered_dish_masks_from_citrus_h5(path).masks.values()
+
+    assert mask.citrus_registration_status is CitrusRegistrationStatus.MISSING
+    assert mask.selected_daily_registration_applied_by_citrus is None
+
+
+def test_h5_loader_refuses_unpinned_runtime_contract(tmp_path: Path) -> None:
+    path = tmp_path / "experiment.h5"
+    _write_h5(path)
+    with h5py.File(path, "a") as h5:
+        group = h5["runtime_geometry_contract"]
+        payload = _json_bytes({"schema_id": "citrus.session.runtime_geometry_contract", "schema_version": 2, "daily_registration": _citrus_daily()})
+        del group["contract_json"]
+        group.create_dataset("contract_json", data=payload).attrs["checksum_sha256"] = _sha(payload)
+
+    result = load_registered_dish_masks_from_citrus_h5(path)
+
+    assert result.mask_geometry_status is MaskGeometryStatus.INVALID
+    assert "runtime geometry contract_json must be" in result.issues[0].message
 
 
 def test_h5_loader_reports_registration_identity_mismatch(tmp_path: Path) -> None:
@@ -653,3 +779,152 @@ def test_h5_loader_classifies_unreferenced_geometry_as_legacy(tmp_path: Path) ->
 
     assert result.mask_geometry_status is MaskGeometryStatus.LEGACY_MISSING
     assert result.issues[0].code == "legacy_missing_recording_bound_mask"
+
+
+def test_h5_loader_resolves_runtime_contract_through_namespace(tmp_path: Path) -> None:
+    legacy, unified = tmp_path / "legacy.h5", tmp_path / "unified.h5"
+    _write_h5(legacy)
+    _write_h5(unified, unified=True)
+
+    old, new = (load_registered_dish_masks_from_citrus_h5(p) for p in (legacy, unified))
+
+    assert new.mask_geometry_status is MaskGeometryStatus.VALID
+    assert new.issues == ()
+    (a,), (b,) = old.masks.values(), new.masks.values()
+    assert b.citrus_registration_status is CitrusRegistrationStatus.EXACT_MATCH_APPLIED
+    assert (a.physical_inner_rim, a.valid_detection_gate) == (b.physical_inner_rim, b.valid_detection_gate)
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        ("other_binding", "not the pinned record"),
+        ("checksum", "checksum mismatch"),
+        ("literal_too", "both a geometry source-namespace record and a literal"),
+        ("unbound", "lacks /geometry/runtime"),
+    ],
+)
+def test_h5_loader_refuses_ambiguous_runtime_namespace(
+    tmp_path: Path, damage: str, message: str
+) -> None:
+    path = tmp_path / "unified.h5"
+    _write_h5(path, unified=True)
+    with h5py.File(path, "a") as h5:
+        if damage == "other_binding":
+            record = json.loads(json.dumps(NAMESPACE_RECORD))
+            record["bindings"]["/runtime_geometry_contract"] = "/geometry/elsewhere"
+            del h5[NAMESPACE]
+            payload = _json_bytes(record)
+            h5.create_dataset(NAMESPACE, data=payload).attrs["checksum_sha256"] = _sha(payload)
+        elif damage == "checksum":
+            h5[NAMESPACE].attrs["checksum_sha256"] = "sha256:" + "0" * 64
+        elif damage == "literal_too":
+            h5.copy("geometry/runtime", "runtime_geometry_contract")
+        else:
+            h5.move("geometry/runtime", "geometry/runtime_moved")
+
+    result = load_registered_dish_masks_from_citrus_h5(path)
+
+    assert result.mask_geometry_status is MaskGeometryStatus.INVALID
+    assert result.masks == {}
+    assert message in result.issues[0].message
+
+
+@pytest.mark.parametrize(
+    ("scope_version", "contract_version"),
+    [(1, 1), (2, 1), (2, 2)],
+)
+def test_h5_loader_reads_scope_v2_like_v1(
+    tmp_path: Path, scope_version: int, contract_version: int
+) -> None:
+    # Citrus #35: scope v2 changes only version fields, and may reference a v2
+    # geometry contract.
+    path = tmp_path / "experiment.h5"
+    _write_h5(path, scope_version=scope_version, contract_version=contract_version)
+
+    result = load_registered_dish_masks_from_citrus_h5(path)
+
+    assert result.mask_geometry_status is MaskGeometryStatus.VALID
+    assert result.issues == ()
+    assert len(result.masks) == 1
+
+
+@pytest.mark.parametrize(
+    ("scope_version", "contract_version", "source_version", "message"),
+    [
+        (1, 2, 2, "scope version 1 cannot reference geometry contract version 2"),
+        (1, 1, None, "cannot reference"),
+        (2, 2, 1, "another version than /recording_geometry_contract"),
+        (2, 1, 2, "another version than /recording_geometry_contract"),
+        (3, 1, 1, "version 1 or 2"),
+    ],
+)
+def test_h5_loader_refuses_mismatched_scope_versions(
+    tmp_path: Path,
+    scope_version: int,
+    contract_version: int,
+    source_version: int | None,
+    message: str,
+) -> None:
+    path = tmp_path / "experiment.h5"
+    _write_h5(
+        path,
+        scope_version=scope_version,
+        contract_version=contract_version,
+        source_version=source_version,
+    )
+    if source_version is None:
+        _drop_scope_source_version(path)
+
+    result = load_registered_dish_masks_from_citrus_h5(path)
+
+    assert result.mask_geometry_status is MaskGeometryStatus.INVALID
+    assert result.masks == {}
+    assert message in result.issues[0].message
+
+
+def _drop_scope_source_version(path: Path) -> None:
+    with h5py.File(path, "a") as h5:
+        group = h5["recording_geometry_contract"]
+        scope = json.loads(bytes(group["h5_scope_json"][()]))
+        del scope["source_contract"]["schema_version"]
+        attrs = dict(group["h5_scope_json"].attrs)
+        del group["h5_scope_json"]
+        scope_bytes = _json_bytes(scope)
+        dataset = group.create_dataset("h5_scope_json", data=scope_bytes)
+        for key, value in attrs.items():
+            dataset.attrs[key] = value
+        dataset.attrs["checksum_sha256"] = _sha(scope_bytes)
+
+
+def test_folder_loader_reads_a_v2_geometry_contract_like_v1(tmp_path: Path) -> None:
+    # frame_identity_v1 (agent-contracts #87): contract v2 / assets v2 / rim v3
+    # change only versions and frame-reference names Palette does not read.
+    _write_folder_bundle(tmp_path / "v1")
+    _write_folder_bundle(tmp_path / "v2", contract_version=2)
+    old = load_registered_dish_masks_from_recording_folder(tmp_path / "v1")
+    new = load_registered_dish_masks_from_recording_folder(tmp_path / "v2")
+    assert new.mask_geometry_status is MaskGeometryStatus.VALID
+    (a,), (b,) = old.masks.values(), new.masks.values()
+    assert (a.physical_inner_rim, a.valid_detection_gate) == (b.physical_inner_rim, b.valid_detection_gate)
+
+
+@pytest.mark.parametrize(
+    ("contract_version", "assets_version", "rim_version", "message"),
+    [
+        (2, 2, 2, "must embed dish rim observation version 3"),
+        (1, 1, 3, "must embed dish rim observation version 2"),
+        (2, 1, 3, "asset manifest must be"),
+        (3, 3, 4, "version 1 or 2"),
+    ],
+)
+def test_folder_loader_refuses_mismatched_geometry_versions(
+    tmp_path: Path, contract_version: int, assets_version: int, rim_version: int, message: str
+) -> None:
+    _write_folder_bundle(
+        tmp_path, contract_version=contract_version, assets_version=assets_version, rim_version=rim_version
+    )
+    result = load_registered_dish_masks_from_recording_folder(tmp_path)
+    assert result.mask_geometry_status is MaskGeometryStatus.INVALID
+    assert result.masks == {}
+    assert message in result.issues[0].message
