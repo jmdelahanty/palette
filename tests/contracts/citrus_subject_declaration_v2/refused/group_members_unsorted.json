@@ -1,0 +1,53 @@
+{
+  "schema_id": "citrus.subject_declaration",
+  "schema_version": 2,
+  "dish_id": "19498_2",
+  "fish_id": null,
+  "subject_count": 10,
+  "subject_type": "dish_group",
+  "member_fish_ids": [
+    "6f1e2d3c-0000-4000-8000-000000000010",
+    "6f1e2d3c-0000-4000-8000-000000000009",
+    "6f1e2d3c-0000-4000-8000-000000000008",
+    "6f1e2d3c-0000-4000-8000-000000000007",
+    "6f1e2d3c-0000-4000-8000-000000000006",
+    "6f1e2d3c-0000-4000-8000-000000000005",
+    "6f1e2d3c-0000-4000-8000-000000000004",
+    "6f1e2d3c-0000-4000-8000-000000000003",
+    "6f1e2d3c-0000-4000-8000-000000000002",
+    "6f1e2d3c-0000-4000-8000-000000000001"
+  ],
+  "unit_id": null,
+  "declared_at_utc": "2026-11-18T15:02:30Z",
+  "source": "orchard_run_plan",
+  "run_plan": {
+    "kind": "orchard_run_plan",
+    "repo": "jmdelahanty/orchard",
+    "commit": "7e73b57000000000000000000000000000000000",
+    "path": "run_plans/omnifin0-dot-contrast-corners.yaml",
+    "file_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "tree_dirty": false,
+    "plan_id": "omnifin0-dot-contrast-corners",
+    "plan_revision": 1,
+    "plan_session_id": "S1",
+    "plan_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "plan_hash_rule": "orchard_run_plan_v1_plan_sha256",
+    "sign_off": {
+      "entry_id": "sign_off-S1",
+      "entry_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "by": "jeremy",
+      "at_utc": "2026-11-18T14:55:00Z",
+      "record_path": "run_records/omnifin0-dot-contrast-corners.yaml",
+      "record_commit": "1111111111111111111111111111111111111111"
+    },
+    "generator": {
+      "repo": "jmdelahanty/orchard",
+      "commit": "7e73b57000000000000000000000000000000000",
+      "tool": "tools/declare.py"
+    },
+    "plan_copy_relative_path": "run_plan/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.yaml",
+    "plan_json_copy_relative_path": "run_plan/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json",
+    "sign_off_copy_relative_path": "run_plan/sign_off/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.json"
+  },
+  "overridden_run_plan": null
+}

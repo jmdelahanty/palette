@@ -1,0 +1,10 @@
+{
+  "schema_id": "citrus.subject_declaration",
+  "schema_version": 1,
+  "dish_id": "19234_2",
+  "fish_id": null,
+  "subject_count": 1,
+  "subject_type": "individual",
+  "declared_at_utc": "2026-10-09T21:20:29Z",
+  "source": "citrus_operator_declaration"
+}
