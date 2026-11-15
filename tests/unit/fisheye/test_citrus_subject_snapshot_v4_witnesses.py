@@ -89,7 +89,11 @@ def _import(tmp_path: Path, name: str) -> mod.RecordingAnalysisPlan:
 
 
 def test_vendored_witnesses_are_the_published_bytes():
-    assert f"`{SCHEMAS[4][1][:8]}…`" in README
+    # The vendored README names the schema digest the witnesses were sealed and
+    # checked under. agent-contracts #125 changed only the members description
+    # text and R4 (pin now 469e50a7), and regenerated no witness.
+    assert "`b2f3f710…`" in README
+    assert SCHEMAS[4][1].startswith("469e50a7")
     assert len(DIGESTS) == len(ADMITTED) + len(REFUSED) == 9
     for name, (h5, receipt, acceptance) in DIGESTS.items():
         stem = name.removesuffix(".h5")
