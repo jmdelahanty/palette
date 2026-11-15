@@ -1,0 +1,11 @@
+{
+  "blank_with_members": "schema",
+  "dirty_plan_tree": "schema",
+  "group_members_fewer_than_count": "invariant",
+  "group_members_unsorted": "invariant",
+  "group_with_unit": "schema",
+  "individual_without_fish": "schema",
+  "plan_group_without_members": "invariant",
+  "plan_source_without_plan": "schema",
+  "v1_document": "schema"
+}
