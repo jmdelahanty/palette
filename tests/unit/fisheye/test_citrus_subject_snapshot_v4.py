@@ -1,4 +1,4 @@
-"""Citrus subject identity v4 (agent-contracts PR 103, final d329774): the contract's own fixtures."""
+"""Citrus subject identity v4 (agent-contracts PR 103, final d329774; members per #125, c72c496): the contract's own fixtures."""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ from fisheye.shared.unified_h5.citrus_subject_snapshot import (
     check_usage_link_recording_ref,
 )
 
-# Copied byte-for-byte from agent-contracts d329774 citrus-palette/fixtures/subject_v4/.
+# Copied byte-for-byte from agent-contracts citrus-palette/fixtures/subject_v4/ at d329774;
+# dish_group_with_member, members_fewer_than_count and expected.json at c72c496 (#125).
 FIXTURES = Path(__file__).resolve().parents[2] / "contracts" / "citrus_subject_v4"
 ACCEPTED = sorted((FIXTURES / "accepted").glob("*.json"))
 REFUSED_KIND = json.loads((FIXTURES / "refused" / "expected.json").read_text())
@@ -61,7 +62,7 @@ def project_attrs(doc: dict) -> dict:
 
 def test_fixture_sets_match_the_contract():
     assert len(ACCEPTED) == 10
-    assert len(REFUSED) == 26
+    assert len(REFUSED) == 27
     assert sorted(p.stem for p in REFUSED) == sorted(REFUSED_KIND)
 
 
@@ -71,7 +72,7 @@ def test_accepted_fixtures_are_admitted(path):
     admitted = admit_subject_snapshot(doc, project_attrs(doc))
     assert admitted["citrus_snapshot_status"] == "admitted"
     assert admitted["citrus_snapshot_schema_version"] == 4
-    assert admitted["citrus_snapshot_schema_sha256"].startswith("b2f3f710")
+    assert admitted["citrus_snapshot_schema_sha256"].startswith("469e50a7")
 
 
 @pytest.mark.parametrize("path", REFUSED, ids=lambda p: p.stem)
@@ -186,3 +187,24 @@ def test_usage_link_names_the_bound_context_or_the_unbound_session():
         check_usage_link_recording_ref(unbound, observation_context_id=None, session_uuid=None)
     no_dish = _load(FIXTURES / "accepted" / "no_dish.json")
     check_usage_link_recording_ref(no_dish, observation_context_id=None, session_uuid=None)
+
+
+@pytest.mark.parametrize(
+    "fixture, code",
+    [
+        ("members_fewer_than_count", "R4_members_fewer_than_subject_count"),
+        ("members_exceed_count", "R4_members_exceed_subject_count"),
+    ],
+)
+def test_member_count_refusals_name_their_rule(fixture, code):
+    """agent-contracts #125: a non-empty member list names exactly subject_count fish."""
+
+    doc = _load(FIXTURES / "refused" / f"{fixture}.json")
+    with pytest.raises(UnifiedH5ContractError, match=code):
+        admit_subject_snapshot(doc, project_attrs(doc))
+
+
+def test_an_empty_member_list_is_still_admitted():
+    doc = _load(FIXTURES / "accepted" / "dish_group.json")
+    assert doc["members"] == [] and doc["subject"]["subject_count"] > 1
+    assert admit_subject_snapshot(doc, project_attrs(doc))["citrus_snapshot_status"] == "admitted"

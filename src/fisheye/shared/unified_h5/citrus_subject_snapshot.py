@@ -56,9 +56,10 @@ SCHEMAS = {
     3: ("citrus_zebrobot_snapshot_v3.schema.json",
         "ff362fe03245819660f449b60b00a78cf7004d0db97073d41005179c588f068c"),
     # agent-contracts PR 103 (0b468c7), amended by #109 and #112 (merge d329774);
-    # attr types stated by #114 (5d9b172, contract md sha256 5912d082...).
+    # attr types stated by #114 (5d9b172); members amended by #125 (merge c72c496,
+    # contract md sha256 cdff7138...): description text and R4 only.
     4: ("citrus_zebrobot_snapshot_v4.schema.json",
-        "b2f3f71067d116498df795c0de507ac72d42cc37ead9255e7a43acc83e2b5a31"),
+        "469e50a77f270891c417073860eac506d38b5c62bdee0354580dd77ce19377ee"),
 }
 # The v3 pin under its pre-v4 names (callers and witness tests use them).
 SCHEMA_FILE, SCHEMA_SHA256 = SCHEMAS[CONTRACT_VERSION]
@@ -161,8 +162,12 @@ def v4_invariant_errors(snapshot: Mapping[str, Any]) -> list[str]:
         ids = [member["mzb_fish_id"] for member in members]
         if len(ids) != len(set(ids)):
             errors.append("R4_duplicate_member")
+        # Amended by agent-contracts #125: an empty list means the members were
+        # not declared; a non-empty list names exactly subject_count fish.
         if len(ids) > subject["subject_count"]:
             errors.append("R4_members_exceed_subject_count")
+        elif ids and len(ids) != subject["subject_count"]:
+            errors.append("R4_members_fewer_than_subject_count")
     if snapshot["dish"] is not None and snapshot["dish"]["dish_id"] != snapshot["dish_id"]:
         errors.append("R5_dish_id_differs")
     link = snapshot["usage_link_request"]

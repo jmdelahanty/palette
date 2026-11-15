@@ -33256,7 +33256,7 @@
       "enclosing_symbol": "fisheye.analysis_workflows.materializers.arena_geometry_fit_review:_write_json_array",
       "file": "src/fisheye/analysis_workflows/materializers/arena_geometry_fit_review.py",
       "filters_expression": null,
-      "line": 398,
+      "line": 749,
       "parent_path_pattern": "<group>",
       "path_pattern": "<group>/<artifact.zarr_path>",
       "receiver_expression": "group",
@@ -33264,7 +33264,7 @@
       "shape_expression": "shape(np.frombuffer(payload, dtype=np.uint8))",
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-4017359ab7261108",
+      "site_id": "writer-5ba44063140e7094",
       "status": "current",
       "status_basis": "packaged Palette module without a maintenance marker",
       "surface_class": "production",
@@ -70383,7 +70383,7 @@
     "parsed_writer_candidate_module_count": 411,
     "reader_required_array_declaration_count": 117,
     "resolved_writer_leaf_name_count": 636,
-    "scanned_python_module_count": 1796,
+    "scanned_python_module_count": 1797,
     "schema_occurrences_by_contract_mapping": {
       "candidate": 56,
       "exact": 20,
@@ -70419,7 +70419,7 @@
     "writer_wrapper_call_site_count": 998
   },
   "wrapper_analysis": {
-    "function_definition_count": 10673,
+    "function_definition_count": 10681,
     "writer_function_count": 247,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",
