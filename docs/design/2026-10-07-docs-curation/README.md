@@ -2,7 +2,7 @@
 
 - **Status:** proposal for review. Nothing has moved yet.
 - **Owner:** Jeremy Delahanty.
-- **Snapshot:** Palette `main` at `d7797af1` (2026-10-07).
+- **Snapshot:** Palette `main` at `b04ec0d4` (refreshed 2026-11-14; first made at `d7797af1`, 2026-10-07). See [Refresh 2026-11-14](#refresh-2026-11-14).
 - **Builds on:** the shared docs contract in agent-contracts PR #62 (`docs-contract/`), which is not merged yet. Frontmatter waits for it.
 - **Manifest:** [`manifest.csv`](manifest.csv). One row per doc, sorted needs_decision → merge → archive → keep. GitHub renders it as a searchable table.
 
@@ -17,13 +17,14 @@ Palette's docs are mostly old, confusing or stale. The plan is to trim them and 
 
 ## How the manifest was made
 
-- **Scope:** five read-only agents read all 608 markdown files outside `docs/archive/`. That is 387 top-level `docs/` files, 144 in `docs/diagnostics/`, and 77 elsewhere: root files, `docs/design/`, `docs/operator_guide/`, `agents_todo/`, `src/fisheye/docs/`, and READMEs next to code.
+- **Scope:** every tracked `*.md` file outside `docs/archive/`. At `d7797af1` five read-only agents read all 608; the 2026-11-14 refresh brought it to 639 at `b04ec0d4`. That is 390 top-level `docs/` files, 147 in `docs/diagnostics/`, and 102 elsewhere: root files, `docs/design/`, `docs/operator_guide/`, `agents_todo/`, `src/fisheye/docs/`, and READMEs next to code and test fixtures.
 - **Decision:** for each doc they proposed `keep`, `merge` (with a target), `archive` or `needs_decision`, with a one-line reason.
 - **Spot checks:** for keeps, they grepped 1-3 concrete claims (module, function, flag, array name) against the code. The `checked` column records each result.
 - **Inbound references:** these were computed mechanically before triage.
   - `load_bearing_refs` lists files in `AGENTS.md`, `src/`, `scripts/`, `.github/` or `tests/` that mention the doc.
   - `refs_need_update = yes` marks an archive or merge row that something still references.
   - README rows were recounted by full path, because bare `README.md` matches were false positives.
+  - The 2026-11-14 refresh recomputed this column for every row with one fixed rule: `git grep -l -F <file name>` (full path for READMEs) over `AGENTS.md`, `src/`, `scripts/`, `.github/`, `tests/` and the non-Markdown files in `docs/`, excluding `*.md` and `docs/archive/`. `README.md` and `AGENTS.md` themselves are entry points and get no refs. `lines` and `last_changed` (last commit date on `main`) were recomputed the same way.
 - **Validation of the merged output:**
   - every doc appears exactly once;
   - every non-`NEW:` merge target exists;
@@ -35,12 +36,13 @@ The agents judged docs; they did not rewrite them. A `keep` means "still true an
 
 | Proposal | Docs | Lines |
 |---|---:|---:|
-| archive | 279 | 84,025 |
-| merge | 102 | 27,267 |
-| keep | 195 | 80,402 |
-| needs_decision | 32 | 17,492 |
+| archive | 281 | 84,283 |
+| merge | 102 | 27,309 |
+| keep | 226 | 85,166 |
+| needs_decision | 30 | 16,168 |
+| **total** | **639** | **212,926** |
 
-Approving archive and merge as proposed leaves about 195-227 docs outside the archive, down from 608. The curated core sits on top of these: about 10-20 pages that link into the keeps rather than replace them. Frontmatter would go on the core first. Keeps would be adopted gradually and shown as "not yet adopted" in the meantime.
+Approving archive and merge as proposed leaves about 226-256 docs outside the archive, down from 639. The curated core sits on top of these: about 10-20 pages that link into the keeps rather than replace them. Frontmatter would go on the core first. Keeps would be adopted gradually and shown as "not yet adopted" in the meantime.
 
 **Biggest merge owners:**
 
@@ -56,12 +58,11 @@ Approving archive and merge as proposed leaves about 195-227 docs outside the ar
 
 19 merge rows target a new core page (`NEW:<topic>`). Nine of those target `data_model_store_layout`.
 
-## Decisions for you (32)
+## Decisions for you (30)
 
 The exact question for each is in the manifest's `reason` column (filter `proposal = needs_decision`). They group into five kinds:
 
 - **Is this plan still live?**
-  - `chaser_analytics_roadmap_2026-08-10` (A0-A7)
   - `chaser_exact_full_gap_closure_implementation_checklist_2026-08-30` (324 unchecked)
   - `composable_chaser_analytics_implementation_checklist_2026-08-20`
   - `derived_analytics_storage_contract_audit_and_checklist_2026-08-03`
@@ -78,20 +79,20 @@ The exact question for each is in the manifest's `reason` column (filter `propos
   - `track_validity_timeline_design`
   - `keypoint_multi_skeleton_todo`
   - `multicamera_3d_analysis_todo`
-  - `native_tensorrt_inference_todo`: the TensorRT *export* path is load-bearing for realtime and stays either way. The question is only the native runtime.
+  - `native_tensorrt_inference_todo`: the TensorRT *export* path is load-bearing for realtime and stays either way. Orange now builds and runs the rig engines (realtime-products intake design), so the question is whether Palette needs its own runtime at all.
   - `eye_angle_legacy_vergence_gaze_todo`
   - `workload_aware_analysis_scheduling`
-  - `brief_chaser_schedule_importer`
 - **Superseded or still governing?**
   - `behavior_event_analysis_design_decision`
   - `composable_stimulus_analysis_and_plot_recipes_design`
   - `stable_identity_incremental_materialization_decision` (vs row-scoped staleness)
   - `detection_storage_production_closure_checklist` (canonical v1, vs v3 in `detection_publication_contract`)
-  - `chaser_stimulus_camera_temporal_projection_audit_2026-08-20` (its camera-projection policy may still govern)
+  - `chaser_stimulus_camera_temporal_projection_audit_2026-08-20`: unified v2 recordings now align through `stimulus_display_candidates.py`, so it governs only legacy recordings. Keep it as the legacy policy, or archive?
 - **Adopted policy or aspiration?**
   - `error_budget_policy_2026-08-11`
   - `raw_video_storage_tiering_proposal`
-  - `workflow_provenance_prior_art` (background reference or archive)
+- **New design awaiting approval:**
+  - `docs/design/2026-11-08-subject-identity-correction/`: approve the effective-fish correction record and `resolve_recording_fish` resolver? If approved, reconcile or retire `subject_metadata_identity_corrections.md`.
 - **Code-coupled choices:**
   - `web_labeling_implementation_status`: `web_handoff_files.py` prints its path into launch bundles. Keep and refresh it, or retarget the code to the runbook?
   - `web_labeling_admin_correction_review_design`: implemented; update and keep, or archive?
@@ -100,12 +101,13 @@ The exact question for each is in the manifest's `reason` column (filter `propos
   - `detect_decode_backend_benchmark_todo`: live performance item, or move to the performance queue?
   - `deferred_keypoint_publication_validation_optimization_2026-08-29`: tracked nowhere else.
 
-## References that must change with the archive commit (8)
+## References that must change with the archive commit (9)
 
 | Doc | Proposal | Referenced by |
 |---|---|---|
-| `agents_todo/registry_query_since_filter.md` | archive | `tests/unit/fisheye/test_registry_query_cli.py` |
+| `docs/crimson_stimulus_step_read_contract.md` | merge → NEW:external_contracts | `src/fisheye/shared/contracts/citrus_palette_stimulus_angle_convention_v1.json` |
 | `docs/diagnostics/goodcopbadcop_behavior_synthesis_handoff_2026-07-17.md` | archive | two `analyze_goodcopbadcop_*` docstrings |
+| `docs/diagnostics/merged_pose_detect_recovery_full_2026_09_14.md` | archive | `src/fisheye/utils/register_recovered_training_archives.py` |
 | `docs/diagnostics/store_measurements_selectors_and_training_membership_2026-09-03.md` | archive | `scripts/check_training_membership.py`, `scripts/sweep_run_selectors.py` |
 | `docs/diagnostics/subject_mask_profile_design_2026-06-18.md` | archive | `src/fisheye/shared/subject_mask_profile.py` |
 | `docs/diagnostics/training_data_and_model_provenance_review_2026-09-01.md` | archive | `scripts/check_training_membership.py` |
@@ -168,6 +170,30 @@ These came up across batches and should be fixed while the core is built.
 ## After your review
 
 1. Edit `manifest.csv` directly, or tell an agent which rows change and what each `needs_decision` row resolves to.
-2. **Archive commit:** `git mv` each approved archive row into `docs/archive/`, fix the 8 references above and the AGENTS.md `sandbox_zarr_fallback` link in the same commit, and run the link and census checks. One commit, reversible with `git revert`.
+2. **Archive commit:** `git mv` each approved archive row into `docs/archive/`, fix the 9 references above and the AGENTS.md `sandbox_zarr_fallback` link in the same commit, and run the link and census checks. One commit, reversible with `git revert`.
 3. **Merge commits:** one per owner doc, so each merge can be reviewed against what it absorbs.
 4. **Core pages:** written after the agent-contracts docs contract merges, with frontmatter from that schema.
+
+## Refresh 2026-11-14
+
+Refreshed against `main` at `b04ec0d4` after about 110 merged PRs. No docs were moved.
+
+- **Inventory:** 639 docs, up from 608. 31 added, none removed.
+  - 18 new design, contract, diagnostic and operator docs: 15 `keep`, 2 `archive`, 1 `needs_decision`. The archives are `pose_deployment_sidecar_handoff_2026-09-23` (superseded by `pose_model_deployment_contract.md`) and `acquisition_frame_clock_backfill_2026-10-08` (dated store record). The decision is `2026-11-08-subject-identity-correction`.
+  - 13 new `tests/fixtures/*/README.md` provenance files: all `keep`.
+- **Changed docs:** all 38 docs edited on `main` since `d7797af1` were re-read against their diffs and current `src/`. No verdict changed. Reasons and spot checks were refreshed. One confidence dropped: `tests/canaries/parent_intake/README.md`, high to medium.
+- **Status-dependent rows:** the 32 `needs_decision` rows and 35 rows whose reason cites draft or proposed status were checked against merged work. 11 changed:
+  - 3 `needs_decision` became `keep`:
+    - `chaser_analytics_roadmap_2026-08-10`: PR #270 made it the live roadmap.
+    - `brief_chaser_schedule_importer`: #270 names the importer as open work item 1. The brief still needs a refresh, because it says to start from `sun`.
+    - `workflow_provenance_prior_art`: the merged workflow-runner design builds on it.
+  - `cluster_job_dashboard_direction` stays `archive`, now at high confidence, because `palette-flow status` replaced it.
+  - 7 rows have sharper reasons or questions:
+    - `row-scoped-staleness`: step 1 has partly landed in #291.
+    - `chaser_stimulus_camera_temporal_projection_audit`, `native_tensorrt_inference_todo`, `multicamera_3d_analysis_todo`, `web_labeling_admin_correction_review_design`, `keypoint_multi_skeleton_todo` and `error_budget_policy` (the `check_import_profile` claim was wrong).
+- **References:** now computed with the fixed rule above. The old `registry_query_since_filter` hit was a test function name, not a doc reference, so that row was dropped from the table. Two rows were added: `crimson_stimulus_step_read_contract` and `merged_pose_detect_recovery_full_2026_09_14`.
+- **Still stale on main:**
+  - `AGENTS.md` still links `docs/sandbox_zarr_fallback.md`, which is archived.
+  - `README.md`'s CI badge still says `sun`.
+  - The status headers of several newly kept designs lag their merged code: workflow-runner, both intake memos, eye-angle per-axis channels and canonical-subject-fields.
+  - The work queue's `MODEL-POSE-DEPLOY-001` row predates the merge of #390.
