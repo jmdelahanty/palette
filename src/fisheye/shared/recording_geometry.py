@@ -35,20 +35,34 @@ RIM_OBSERVATION_SCHEMA_ID = "orange.calibration.dish_top_rim_observation"
 # binds. v2 (Orange bb6c4f5, agent-contracts #87 frame_identity_v1) changes only
 # version constants: the rim observation it embeds is v3 (renamed frame
 # references, which Palette does not read). Older recordings stay v1.
+# v3 (agent-contracts #133, f9e1058) admits rim observation v4 beside v3. A v4
+# snapshot entry carries the observation's explicit ``acceptance`` (basis
+# ``operator_review`` or ``quality_gate``); a v3 entry must not carry one.
 GEOMETRY_CONTRACT_VERSIONS = {
-    1: {"assets": 1, "rim_observation": 2},
-    2: {"assets": 2, "rim_observation": 3},
+    1: {"assets": 1, "rim_observation": frozenset({2})},
+    2: {"assets": 2, "rim_observation": frozenset({3})},
+    3: {"assets": 2, "rim_observation": frozenset({3, 4})},
 }
 RECORDING_GEOMETRY_CONTRACT_SCHEMA_VERSION = 1  # the first version; kept for callers
 RECORDING_GEOMETRY_ASSETS_SCHEMA_VERSION = 1
 RIM_OBSERVATION_SCHEMA_VERSION = 2
-RIM_OBSERVATION_SCHEMA_VERSIONS = frozenset(
-    versions["rim_observation"] for versions in GEOMETRY_CONTRACT_VERSIONS.values()
+RIM_OBSERVATION_SCHEMA_VERSIONS = frozenset().union(
+    *(versions["rim_observation"] for versions in GEOMETRY_CONTRACT_VERSIONS.values())
 )
+RIM_ACCEPTANCE_OPERATOR_REVIEW = "operator_review"
+RIM_ACCEPTANCE_QUALITY_GATE = "quality_gate"
+# Gate-accepted fits are refused until Palette recomputes the gate itself
+# (palette#377 follow-up); Orange does not write them before that lands.
+ADMITTED_RIM_ACCEPTANCE_BASES = frozenset({RIM_ACCEPTANCE_OPERATOR_REVIEW})
 H5_SCOPE_SCHEMA_ID = "citrus.session.orange_recording_geometry_contract_scope"
 # Scope version -> the source contract versions it may reference. v2 (Citrus
 # #35) changes only version fields: it may reference a v2 geometry contract.
-H5_SCOPE_SOURCE_CONTRACT_VERSIONS = {1: frozenset({1}), 2: frozenset({1, 2})}
+# v3 (Citrus geometry-contract-v3) likewise only widens the source enum.
+H5_SCOPE_SOURCE_CONTRACT_VERSIONS = {
+    1: frozenset({1}),
+    2: frozenset({1, 2}),
+    3: frozenset({1, 2, 3}),
+}
 H5_SCOPE_SCHEMA_VERSION = 1  # the first version; kept for callers
 DAILY_REGISTRATION_SCHEMA_ID = "citrus.calibration.daily_registration"
 DAILY_REGISTRATION_SCHEMA_VERSION = 1
@@ -147,6 +161,7 @@ class RegisteredDishMask:
     producer_contract_linkage_status: str = "producer_native"
     recovery_receipt_sha256: str | None = None
     independent_fit_required_before_operational_use: bool = False
+    producer_acceptance_basis: str = "operator_review"
 
 
 @dataclass(frozen=True)
@@ -310,18 +325,18 @@ def _require_geometry_contract(contract: Mapping[str, Any], *, label: str) -> in
             f"{label} must be {RECORDING_GEOMETRY_CONTRACT_SCHEMA_ID!r} version "
             f"{' or '.join(str(v) for v in sorted(GEOMETRY_CONTRACT_VERSIONS))}."
         )
-    rim_version = GEOMETRY_CONTRACT_VERSIONS[version]["rim_observation"]
+    rim_versions = GEOMETRY_CONTRACT_VERSIONS[version]["rim_observation"]
     pending: list[Any] = [contract]
     while pending:
         node = pending.pop()
         if isinstance(node, Mapping):
             if (
                 node.get("artifact_schema_id") == RIM_OBSERVATION_SCHEMA_ID
-                and node.get("artifact_schema_version") != rim_version
+                and node.get("artifact_schema_version") not in rim_versions
             ):
                 raise RecordingGeometryError(
                     f"{label} version {version} must embed dish rim observation "
-                    f"version {rim_version}."
+                    f"version {' or '.join(str(v) for v in sorted(rim_versions))}."
                 )
             pending.extend(node.values())
         elif isinstance(node, (list, tuple)):
@@ -423,14 +438,67 @@ def _validate_mask_entry(
     ):
         raise RecordingGeometryError("accepted_mask dimensions disagree with the camera.")
 
-    review = entry.get("operator_review")
-    accepted = bool(isinstance(review, Mapping) and review.get("accepted") is True)
-    if not accepted:
-        raise RecordingGeometryError("Rim observation lacks operator acceptance.")
+    basis = _rim_acceptance_basis(entry)
     quality = entry.get("quality")
     flags_value = quality.get("quality_flags", []) if isinstance(quality, Mapping) else []
     flags = tuple(str(value) for value in flags_value) if isinstance(flags_value, Sequence) and not isinstance(flags_value, (str, bytes)) else ()
-    return physical, gate, width, height, accepted, flags
+    return physical, gate, width, height, basis, flags
+
+
+_OPERATOR_FLAG_FIELDS = ("operator_confirmed", "accepted_by_operator")
+
+
+def _operator_flags(entry: Mapping[str, Any]) -> list[Any]:
+    values = []
+    for name in ("accepted_inner_rim_boundary", "accepted_mask", "quality"):
+        node = entry.get(name)
+        if isinstance(node, Mapping):
+            values.extend(node[field] for field in _OPERATOR_FLAG_FIELDS if field in node)
+    return values
+
+
+def _rim_acceptance_basis(entry: Mapping[str, Any]) -> str:
+    """Return how the rim fit was accepted, refusing ambiguous acceptance.
+
+    A v2/v3 entry has no ``acceptance`` and needs ``operator_review.accepted``.
+    A v4 entry declares ``acceptance.basis``.  An ``operator_review`` basis
+    still needs ``operator_review.accepted``; a ``quality_gate`` basis must
+    carry no ``operator_review`` and no true operator flag, so a gate decision
+    can never read as a human review.
+    """
+
+    version = entry.get("artifact_schema_version")
+    acceptance = entry.get("acceptance")
+    review = entry.get("operator_review")
+    operator_accepted = isinstance(review, Mapping) and review.get("accepted") is True
+    if version != 4:
+        if acceptance is not None:
+            raise RecordingGeometryError(
+                f"Rim observation version {version} must not carry acceptance."
+            )
+        if not operator_accepted:
+            raise RecordingGeometryError("Rim observation lacks operator acceptance.")
+        return RIM_ACCEPTANCE_OPERATOR_REVIEW
+    acceptance = _required_mapping(acceptance, label="rim observation acceptance")
+    basis = acceptance.get("basis")
+    if basis == RIM_ACCEPTANCE_OPERATOR_REVIEW:
+        if not operator_accepted:
+            raise RecordingGeometryError(
+                "Rim observation acceptance basis operator_review lacks operator acceptance."
+            )
+    elif basis == RIM_ACCEPTANCE_QUALITY_GATE:
+        if review is not None or any(value is not False for value in _operator_flags(entry)):
+            raise RecordingGeometryError(
+                "Gate-accepted rim observation carries operator review or operator flags."
+            )
+    else:
+        raise RecordingGeometryError(f"Rim observation acceptance basis {basis!r} is unknown.")
+    if basis not in ADMITTED_RIM_ACCEPTANCE_BASES:
+        raise RecordingGeometryError(
+            f"Rim observation acceptance basis {basis!r} is not admitted yet "
+            "(Palette has not recomputed the gate)."
+        )
+    return basis
 
 
 def _verify_snapshot_dimensions(
@@ -673,7 +741,7 @@ def _mask_from_entry(
     source_kind: str,
     source_location: str,
 ) -> RegisteredDishMask:
-    physical, gate, width, height, operator_accepted, flags = _validate_mask_entry(
+    physical, gate, width, height, acceptance_basis, flags = _validate_mask_entry(
         entry,
         camera_serial=key.camera_serial,
         arena_id=key.arena_id,
@@ -710,11 +778,12 @@ def _mask_from_entry(
         materialized_asset_status=asset_status,
         citrus_registration_status=citrus_status,
         source_valid_until_utc=valid_until_utc,
-        producer_operator_accepted=operator_accepted,
+        producer_operator_accepted=acceptance_basis == RIM_ACCEPTANCE_OPERATOR_REVIEW,
         producer_quality_flags=flags,
         selected_daily_registration_applied_by_citrus=applied_by_citrus,
         source_kind=source_kind,
         source_location=source_location,
+        producer_acceptance_basis=acceptance_basis,
     )
 
 
