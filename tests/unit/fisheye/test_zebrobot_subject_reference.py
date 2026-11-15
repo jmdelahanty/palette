@@ -473,6 +473,7 @@ def test_v2_app_config_default_that_agrees_records_no_disagreement(tmp_path):
         "config_not_loaded",
         "no_start_snapshot",
         "operator_confirmed",    # Orange 3b9a754+ seals subject_confirmation.json
+        "local_control_declared",  # a remote start's declaration is a claim too
     ],
 )
 def test_dish_disagreement_still_refuses_unless_default_is_proven(tmp_path, case):
@@ -489,13 +490,9 @@ def test_dish_disagreement_still_refuses_unless_default_is_proven(tmp_path, case
     if case != "no_start_snapshot":
         _with_start_snapshot(plan, snapshot_reference, configured=configured)
     if case == "operator_confirmed":
-        manifest_path = plan.recording_dir / "recording_manifest.json"
-        manifest = json.loads(manifest_path.read_text())
-        manifest["source_transfer"]["source_to_parent_files"].append({
-            "relative_path": "raw/acquisition/subject_confirmation.json",
-            "source": {"path": "subject_confirmation.json", "sha256": "b" * 64, "size_bytes": 1},
-        })
-        manifest_path.write_text(json.dumps(manifest))
+        _seal_confirmation(plan, CONFIRMED_V1)
+    elif case == "local_control_declared":
+        _seal_confirmation(plan, REMOTE_V2)
     if case == "config_not_loaded":
         manifest = json.loads((plan.recording_dir / "recording_manifest.json").read_text())
         item = manifest["source_transfer"]["source_to_parent_files"][0]
@@ -514,4 +511,103 @@ def test_a_start_snapshot_that_differs_from_the_seal_refuses(tmp_path):
     importer, plan = _h5_dish_recording(tmp_path, _v2())
     _with_start_snapshot(plan, _v2(), configured=DEFAULT_ONLY, tamper=True)
     with pytest.raises(ValueError, match="differs from the sealed inventory"):
+        importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+
+
+# Shapes of Orange's orange.recording_subject_confirmation: v1 as sealed in
+# 2026_10_17_12_06_15, v2 (Orange 8d8ef2d) for a remote local_control start.
+_CONFIRMED_CAMERAS = {"CAM-1": {"dish_id": "19220_1", "subject_count": 1}}
+CONFIRMED_V1 = {
+    "cameras": _CONFIRMED_CAMERAS,
+    "config": {"cameras": _CONFIRMED_CAMERAS, "default": {"dish_id": "19234_3", "subject_count": 1},
+               "schema_version": 1},
+    "confirmed_at_utc": "2026-10-17T16:06:12Z",
+    "confirmed_by": "gui_operator",
+    "schema_id": "orange.recording_subject_confirmation",
+    "schema_version": 1,
+}
+PANEL_V2 = {**CONFIRMED_V1, "schema_version": 2, "declaration": None,
+            "requester": {"transport": "gui_panel", "user": "operator"}}
+REMOTE_V2 = {
+    **CONFIRMED_V1,
+    "schema_version": 2,
+    "confirmed_by": "local_control",
+    "declaration": {"schema_id": "orange.recording_start_declaration", "schema_version": 1,
+                    "declared_by": "someone@hhmi.org", "recording_intent": "recording_only",
+                    "subject_references": {"CAM-1": {"dish_id": "19220_1", "subject_count": 1}}},
+    "requester": {"transport": "local_control_socket",
+                  "peer": {"uid": 1000, "gid": 1000, "pid": 4242, "user": "rigaccount"},
+                  "request_id": "r-1", "operation_id": "op-1", "command_source": "cli",
+                  "received_at_utc": "2026-11-14T19:59:20Z"},
+}
+
+
+def _seal_confirmation(plan, confirmation, *, tamper=False):
+    """Seal a subject_confirmation.json into the parent's transfer mapping."""
+
+    relative = "raw/acquisition/subject_confirmation.json"
+    path = plan.recording_dir / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = json.dumps(confirmation).encode()
+    path.write_bytes(data + b" " if tamper else data)
+    manifest_path = plan.recording_dir / "recording_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest.setdefault("source_transfer", {}).setdefault("source_to_parent_files", []).append({
+        "relative_path": relative,
+        "source": {"path": "subject_confirmation.json",
+                   "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)},
+    })
+    manifest_path.write_text(json.dumps(manifest))
+    return hashlib.sha256(data).hexdigest()
+
+
+def _agreeing_recording(tmp_path):
+    importer, plan = _recording(tmp_path, _v2())
+    root = zarr.open_group(str(plan.zarr_path), mode="r+")
+    publish_subject_metadata(root, {"dish_uuid": UUID, "subject_count": 1},
+                             source_artifact={"kind": "test_h5"})
+    return importer, plan
+
+
+@pytest.mark.parametrize(
+    "confirmation, expected",
+    [
+        (CONFIRMED_V1, {"orange_reference_origin": "operator_confirmed",
+                        "orange_confirmed_by": "gui_operator"}),
+        (PANEL_V2, {"orange_reference_origin": "operator_confirmed",
+                    "orange_confirmed_by": "gui_operator"}),
+        (REMOTE_V2, {"orange_reference_origin": "local_control_declared",
+                     "orange_confirmed_by": "local_control",
+                     "orange_declared_by": "someone@hhmi.org",
+                     "orange_requester_user": "rigaccount"}),
+    ],
+)
+def test_subject_confirmation_origin_names_who_confirmed(tmp_path, confirmation, expected):
+    importer, plan = _agreeing_recording(tmp_path)
+    digest = _seal_confirmation(plan, confirmation)
+    result = importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+    assert result["cross_checked"] == "dish_uuid" and "dish_disagreement" not in result
+    origin = zarr.open_group(str(plan.zarr_path), mode="r").attrs["orange_subject_reference_origin"]
+    assert origin == {**expected, "orange_subject_confirmation_sha256": digest}
+
+
+@pytest.mark.parametrize(
+    "mutate, match",
+    [
+        ("tamper", "differs from the sealed inventory"),
+        ({"schema_id": "orange.other"}, "is not orange.recording_subject_confirmation"),
+        ({"schema_version": 3}, "unsupported schema_version"),
+        ({"confirmed_by": "local_control"}, "unsupported schema_version"),  # v1 is panel-only
+        ({"schema_version": 2, "confirmed_by": "robot"}, "unsupported schema_version"),
+        ({**REMOTE_V2, "declaration": None}, "needs declaration.declared_by"),
+        ({**REMOTE_V2, "requester": {"transport": "gui_panel", "user": "x"}}, "needs declaration"),
+    ],
+)
+def test_an_unreadable_subject_confirmation_refuses(tmp_path, mutate, match):
+    importer, plan = _agreeing_recording(tmp_path)
+    if mutate == "tamper":
+        _seal_confirmation(plan, CONFIRMED_V1, tamper=True)
+    else:
+        _seal_confirmation(plan, {**CONFIRMED_V1, **mutate})
+    with pytest.raises(ValueError, match=match):
         importer.import_zebrobot_subject_reference(plan, fetch=_fetch())

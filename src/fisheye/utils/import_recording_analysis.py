@@ -815,6 +815,68 @@ ORANGE_REFERENCE_FROM_APP_CONFIG_DEFAULT = "app_config_default"
 _DEFAULT_PLACEHOLDER_REFERENCE_VERSIONS = frozenset({2})
 # Written by Orange GUI recordings from 3b9a754 on, with the per-camera panel.
 ORANGE_SUBJECT_CONFIRMATION = "subject_confirmation.json"
+ORANGE_SUBJECT_CONFIRMATION_SCHEMA_ID = "orange.recording_subject_confirmation"
+# confirmed_by -> origin label. "gui_operator": a person pressed Confirm in the
+# Subject panel (always, for schema v1). "local_control" (v2, Orange 8d8ef2d+):
+# a remote start whose request carried its own per-camera declaration.
+_CONFIRMATION_ORIGINS = {"gui_operator": "operator_confirmed",
+                         "local_control": "local_control_declared"}
+
+
+def _sealed_json(recording_dir: Path, item: Mapping[str, Any], *, name: str) -> tuple[Any, str]:
+    path = Path(recording_dir) / item["relative_path"]
+    data = path.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != item["sha256"] or len(data) != item["size_bytes"]:
+        raise ValueError(f"{name} differs from the sealed inventory: {path}")
+    return json.loads(data), digest
+
+
+def _subject_confirmation_origin(recording_dir: Path, item: Mapping[str, Any]) -> dict[str, Any]:
+    """Origin of a sealed ``subject_confirmation.json``: who confirmed, and how.
+
+    Either way each camera's reference is a per-camera claim, so the caller's
+    strict cross-check is unchanged; only the recorded label differs.
+    """
+
+    confirmation, digest = _sealed_json(recording_dir, item, name=ORANGE_SUBJECT_CONFIRMATION)
+    if not isinstance(confirmation, Mapping) or (
+        confirmation.get("schema_id") != ORANGE_SUBJECT_CONFIRMATION_SCHEMA_ID
+    ):
+        raise ValueError(f"{ORANGE_SUBJECT_CONFIRMATION} is not {ORANGE_SUBJECT_CONFIRMATION_SCHEMA_ID}")
+    version = confirmation.get("schema_version")
+    confirmed_by = confirmation.get("confirmed_by")
+    allowed = {1: {"gui_operator"}, 2: set(_CONFIRMATION_ORIGINS)}.get(version)
+    if allowed is None or confirmed_by not in allowed:
+        raise ValueError(
+            f"{ORANGE_SUBJECT_CONFIRMATION}: unsupported schema_version {version!r} "
+            f"or confirmed_by {confirmed_by!r}"
+        )
+    origin = {
+        "orange_reference_origin": _CONFIRMATION_ORIGINS[confirmed_by],
+        "orange_confirmed_by": confirmed_by,
+        "orange_subject_confirmation_sha256": digest,
+    }
+    if confirmed_by == "local_control":
+        declaration = confirmation.get("declaration")
+        requester = confirmation.get("requester")
+        requester = requester if isinstance(requester, Mapping) else {}
+        peer = requester.get("peer")
+        if not (
+            isinstance(declaration, Mapping)
+            and isinstance(declaration.get("declared_by"), str)
+            and requester.get("transport") == "local_control_socket"
+            and isinstance(peer, Mapping)
+            and isinstance(peer.get("user"), str)
+        ):
+            raise ValueError(
+                f"{ORANGE_SUBJECT_CONFIRMATION}: a local_control confirmation needs "
+                "declaration.declared_by and requester.peer.user"
+            )
+        # declared_by is the requester's claim; peer.user is the OS account that sent it.
+        origin["orange_declared_by"] = declaration["declared_by"]
+        origin["orange_requester_user"] = peer["user"]
+    return origin
 
 
 def _orange_reference_origin(
@@ -830,9 +892,9 @@ def _orange_reference_origin(
     (digest re-checked against the sealed inventory): the loaded app_config has
     no entry for this camera, its default names the reference's ``dish_id``,
     and the start snapshot's own reference for the camera equals the manifest's.
-    A sealed ``subject_confirmation.json`` means the operator confirmed each
-    camera's dish, so nothing is a placeholder. Anything else keeps the strict
-    cross-check.
+    A sealed ``subject_confirmation.json`` means each camera's dish was
+    confirmed in the panel or declared by a remote start, so nothing is a
+    placeholder. Anything else keeps the strict cross-check.
     """
 
     from fisheye.shared.acquisition_realtime_products import sealed_parent_files
@@ -843,18 +905,14 @@ def _orange_reference_origin(
     camera = str(manifest.get("camera_id") or "")
     sealed = sealed_parent_files(manifest) or {}
     if ORANGE_SUBJECT_CONFIRMATION in sealed:
-        # Orange 3b9a754+: the operator confirmed every camera's dish at start
-        # (a blank camera row deliberately follows the default), so it is an
-        # observation that must agree.
-        return {"orange_reference_origin": "operator_confirmed"}
+        # Orange 3b9a754+: every camera's dish was confirmed or declared at
+        # start (a blank camera row deliberately follows the default), so it
+        # is an observation that must agree.
+        return _subject_confirmation_origin(recording_dir, sealed[ORANGE_SUBJECT_CONFIRMATION])
     item = sealed.get("recording_snapshot_start.json")
     if item is None:
         return unproven
-    path = Path(recording_dir) / item["relative_path"]
-    data = path.read_bytes()
-    if hashlib.sha256(data).hexdigest() != item["sha256"] or len(data) != item["size_bytes"]:
-        raise ValueError(f"recording_snapshot_start.json differs from the sealed inventory: {path}")
-    snapshot = json.loads(data)
+    snapshot, _ = _sealed_json(recording_dir, item, name="recording_snapshot_start.json")
     session = snapshot.get("session") if isinstance(snapshot.get("session"), Mapping) else {}
     declared = (session.get("subject_references") or {}).get(camera)
     if declared is not None and declared != reference:
