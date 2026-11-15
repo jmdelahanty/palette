@@ -1,0 +1,127 @@
+{
+ "camera_serial": "2010093",
+ "checks": {
+  "change_from_anchor": {
+   "anchor": {
+    "acceptance_basis": "operator_review",
+    "artifact_id": "dishrim_2026-11-04T01_00_16Z_2010093",
+    "center_px": {
+     "x": 2245.810546875,
+     "y": 2198.994140625
+    },
+    "created_utc": "2026-11-04T01:00:16Z",
+    "observation_sha256": "sha256:ae2f3f3867078df4d08ecd3832bf361db5ece7d018f13d9acaf4a7e183b81c26",
+    "radius_px": 2165.671875
+   },
+   "center_shift_mm": 0.0002258343586566157,
+   "center_shift_px": 0.012065191571310132,
+   "max_center_shift_mm": 2.526908772102699,
+   "max_center_shift_px": 135.0,
+   "max_radius_change_mm": 0.6551244964710701,
+   "max_radius_change_px": 35.0,
+   "passed": true,
+   "px_per_mm": 53.42495997101763,
+   "radius_change_mm": 0.1286266756910576,
+   "radius_change_px": 6.871874999999818
+  },
+  "edge_support": {
+   "fraction": 0.95,
+   "min_fraction": 0.4,
+   "min_step_dn": 12.0,
+   "passed": true,
+   "point_count": 720,
+   "search_px": 6.0
+  },
+  "first_hough_pass": {
+   "hough_pass_index": 1,
+   "passed": true,
+   "required_pass_index": 1
+  },
+  "radius_in_physical_range": {
+   "accept_high_mm": 40.800000000000004,
+   "accept_high_px": 2182.768670502868,
+   "accept_low_mm": 39.199999999999996,
+   "accept_low_px": 2091.346962617183,
+   "expected_high_px": 2139.9692848067334,
+   "expected_low_px": 2134.0275128746766,
+   "passed": true,
+   "px_per_mm_high": 53.49923212016833,
+   "px_per_mm_low": 53.35068782186692,
+   "radius_mm": 40.40807894233561,
+   "radius_px": 2158.8,
+   "tolerance_fraction": 0.02,
+   "z_high_mm": 10.93,
+   "z_low_mm": 8.82947486871718
+  }
+ },
+ "declared_by": "delahantyj",
+ "drift": {
+  "anchor": {
+   "acceptance_basis": "operator_review",
+   "artifact_id": "dishrim_2026-11-04T01_00_16Z_2010093",
+   "created_utc": "2026-11-04T01:00:16Z",
+   "observation_sha256": "sha256:ae2f3f3867078df4d08ecd3832bf361db5ece7d018f13d9acaf4a7e183b81c26"
+  },
+  "chain_depth": 1,
+  "rule": "compare_to_last_operator_reviewed_fit"
+ },
+ "evaluated_at_utc": "2026-11-15T17:00:00Z",
+ "failures": [],
+ "fit": {
+  "center_px": {
+   "x": 2245.8,
+   "y": 2199.0
+  },
+  "image_height_px": 4512,
+  "image_width_px": 4512,
+  "radius_px": 2158.8
+ },
+ "gate_id": "orange_dish_rim_auto_accept_v1",
+ "gate_version": 1,
+ "inputs": {
+  "dish": {
+   "inner_diameter_mm": 80.0,
+   "inner_diameter_source": "hardware_library tank.fish_imaging.palm1/palm2 inner_diameter (e024fcb): declared by the dish design, not calipered",
+   "wall_height_mm": 2.8,
+   "wall_height_source": "hardware_library tank.fish_imaging.palm1/palm2 wall_height: calipered by the rig admin 2026-11-14",
+   "water_refractive_index": 1.333
+  },
+  "fish_plane_scale": {
+   "e_mm": 1.5,
+   "k_px": 40360.772210471114,
+   "p_floor_mm": 8.13,
+   "path": "/home/jeremy/orange_data/calibrations/commissioning/omnifin0_20261113T230405Z_wet_commissioning_holder_check_fish_plane_scale_/steps/08_fish_plane_scale/fish_plane_scale.json",
+   "s_floor_px_per_mm": 53.407201731165216,
+   "sha256": "sha256:47a9f05038cb015fc17a27e33c1a0280f15e1348154f7664f16e819871833b10"
+  },
+  "rig_config": {
+   "path": "/etc/pancakebatter/rigs/omnifin0.yml",
+   "rig_geometry_revision": 16,
+   "rig_id": "omnifin0",
+   "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+   "status": "pinned"
+  }
+ },
+ "orange_build": {
+  "available": true,
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "commit_short": "aaaaaaa",
+  "dirty_tracked": false
+ },
+ "outcome": "accepted",
+ "requester": {
+  "command_source": "orange_local_control_client",
+  "operation_id": "op1",
+  "peer": {
+   "gid": 1000,
+   "pid": 4242,
+   "uid": 1000,
+   "user": "jeremy"
+  },
+  "received_at_utc": "2026-11-15T16:59:58Z",
+  "request_id": "r1",
+  "transport": "local_control_socket"
+ },
+ "schema_id": "orange.calibration.dish_rim_gate_evaluation",
+ "schema_version": 1
+}

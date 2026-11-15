@@ -25,6 +25,7 @@ from typing import Any, Mapping, Sequence
 import h5py
 import numpy as np
 
+from fisheye.shared.dish_rim_gate import DishRimGateError, verify_gate_accepted_fit
 from fisheye.shared.unified_h5.geometry import NAMESPACE, NAMESPACE_BINDINGS, NAMESPACE_RECORD
 
 
@@ -51,9 +52,9 @@ RIM_OBSERVATION_SCHEMA_VERSIONS = frozenset().union(
 )
 RIM_ACCEPTANCE_OPERATOR_REVIEW = "operator_review"
 RIM_ACCEPTANCE_QUALITY_GATE = "quality_gate"
-# Gate-accepted fits are refused until Palette recomputes the gate itself
-# (palette#377 follow-up); Orange does not write them before that lands.
-ADMITTED_RIM_ACCEPTANCE_BASES = frozenset({RIM_ACCEPTANCE_OPERATOR_REVIEW})
+# A gate-accepted fit is admitted only when Palette's own recompute of the
+# gate's evaluation (``dish_rim_gate``) accepts exactly the observation's rim.
+ADMITTED_RIM_ACCEPTANCE_BASES = frozenset({RIM_ACCEPTANCE_OPERATOR_REVIEW, RIM_ACCEPTANCE_QUALITY_GATE})
 H5_SCOPE_SCHEMA_ID = "citrus.session.orange_recording_geometry_contract_scope"
 # Scope version -> the source contract versions it may reference. v2 (Citrus
 # #35) changes only version fields: it may reference a v2 geometry contract.
@@ -439,6 +440,19 @@ def _validate_mask_entry(
         raise RecordingGeometryError("accepted_mask dimensions disagree with the camera.")
 
     basis = _rim_acceptance_basis(entry)
+    if basis == RIM_ACCEPTANCE_QUALITY_GATE:
+        try:
+            verify_gate_accepted_fit(
+                _required_mapping(entry.get("acceptance"), label="rim observation acceptance").get("gate"),
+                camera_serial=camera_serial,
+                fit_center_x_px=physical.center_x_native_px,
+                fit_center_y_px=physical.center_y_native_px,
+                fit_radius_px=physical.radius_px,
+                image_width_px=width,
+                image_height_px=height,
+            )
+        except DishRimGateError as exc:
+            raise RecordingGeometryError(f"Gate-accepted rim observation refused: {exc}") from exc
     quality = entry.get("quality")
     flags_value = quality.get("quality_flags", []) if isinstance(quality, Mapping) else []
     flags = tuple(str(value) for value in flags_value) if isinstance(flags_value, Sequence) and not isinstance(flags_value, (str, bytes)) else ()
@@ -494,10 +508,7 @@ def _rim_acceptance_basis(entry: Mapping[str, Any]) -> str:
     else:
         raise RecordingGeometryError(f"Rim observation acceptance basis {basis!r} is unknown.")
     if basis not in ADMITTED_RIM_ACCEPTANCE_BASES:
-        raise RecordingGeometryError(
-            f"Rim observation acceptance basis {basis!r} is not admitted yet "
-            "(Palette has not recomputed the gate)."
-        )
+        raise RecordingGeometryError(f"Rim observation acceptance basis {basis!r} is not admitted.")
     return basis
 
 
