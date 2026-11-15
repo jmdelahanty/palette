@@ -1,0 +1,133 @@
+{
+  "schema_id": "citrus_palette.stimulus_angle_convention.semantic_policy_pairing",
+  "schema_version": 1,
+  "revision": 4,
+  "status": "draft",
+  "decided": "Jeremy, 2026-11-13: chaser, loom and moving-dot z_eff is computed per arena at START from the rig's measured dish media stack; new identity versions semantic v5 + trial_index v4; no v4-to-v5 relabel",
+  "producer": "Citrus PR #114 MERGED as be2cd47 (JohnsonLabJanelia/citrus main be2cd4759843567251427aed15f5e5e4b9a73df4, merge tree identical to head 168027d): v5 recipe 32bfe59, fixture commit b2630f5, z_eff H5 contract 97eb09c, omnifin0 tank-design values 168027d; the fixture and the trial index v4 schema are byte-identical on main",
+  "supersedes": "semantic_policy_pairing_v3.json (revision 3). Revisions 2 and 3 are unchanged and stay pinned by whatever already pins them.",
+  "hash_rule": "protocol_semantic_hash = 'sha256:' + hex(sha256(canonical_json_bytes)) over the exact recorded bytes; a consumer never re-canonicalises or regenerates them",
+  "envelope": {
+    "schema_id": "citrus.protocol.semantic",
+    "schema_version": 1,
+    "stimulus_angle_convention": "atan2_negative_y_x_degrees"
+  },
+  "pairings": [
+    {
+      "stimulus_angle_convention": "canvas_y_down_clockwise_legacy",
+      "semantic_normalization_policies": [
+        "citrus.protocol.semantic.v1"
+      ],
+      "trial_index": "schema_version 1 or 2 (citrus.protocol.trial_index.v1 / .v2)",
+      "protocol_file": "unversioned (legacy version 1)"
+    },
+    {
+      "stimulus_angle_convention": "atan2_negative_y_x_degrees",
+      "semantic_normalization_policies": [
+        "citrus.protocol.semantic.v2",
+        "citrus.protocol.semantic.v3",
+        "citrus.protocol.semantic.v4"
+      ],
+      "trial_index": "schema_version 3 (citrus.protocol.trial_index.v3)",
+      "protocol_file": "citrus.stimulus_protocol schema_version 2"
+    },
+    {
+      "stimulus_angle_convention": "atan2_negative_y_x_degrees",
+      "semantic_normalization_policies": [
+        "citrus.protocol.semantic.v5"
+      ],
+      "trial_index": "schema_version 4 (citrus.protocol.trial_index.v4)",
+      "protocol_file": "citrus.stimulus_protocol schema_version 2"
+    }
+  ],
+  "mixing": "the trial index version is fixed by the semantic policy: v2, v3 and v4 pair only with trial_index v3, and v5 only with trial_index v4. Any other combination is corruption and is refused. semantic v3, v4 or v5 under the legacy convention is refused, and so is an unknown policy (for example citrus.protocol.semantic.v6).",
+  "semantic_v5": {
+    "changes_from_v4": "normalization_policy is citrus.protocol.semantic.v5. On every chaser step (stimulus_mode_id 12) the hashed parameters object loses z_eff and gains z_eff_source. Everything else in the envelope and identity is hashed exactly as in v4, including identity.stimulus_render_rate_hz (an integer, always present, 120 or 240). Loom and moving-dot steps hash the same bytes as in v4, because they never hashed z_eff. Only the envelope policy changes, so every protocol's hash changes, including protocols without a chaser.",
+    "removed": [
+      {
+        "path": "identity.steps[].parameters.z_eff",
+        "rule": "absent on every chaser step; not null, not present. A v5 identity carrying it is refused."
+      }
+    ],
+    "newly_hashed": [
+      {
+        "path": "identity.steps[].parameters.z_eff_source",
+        "rule": "required on every chaser step; exactly the string \"arena_media_stack\"; a sibling of target_radius, ordered by the unchanged canonicaliser"
+      }
+    ],
+    "kept_from_v3": "target_radius, chase-phase target_reference and loom under an appearance_drive stay required on chaser steps exactly as in v3/v4",
+    "z_eff_rule": "Citrus computes z_eff per arena at START from the rig file's measured media stack and uses that one value for chaser, loom and moving-dot visual angles. A protocol step that authors z_eff_mm > 0 is refused at load. The per-arena value is a recording fact, not a protocol fact: it is never in the semantic identity or the trial index, and it is recorded in the H5 (h5_z_eff below).",
+    "why": "the rendered dot size of a chaser, loom or moving-dot stimulus depends on z_eff. Under v3/v4 a chaser step carried an authored z_eff (14.942 in several protocols, defaulting to 10.4), which was wrong for the rig. v5 renders a different stimulus from the same protocol file, so one hash must never name both.",
+    "trial_index": {
+      "schema_id": "citrus.protocol.trial_index",
+      "schema_version": 4,
+      "normalization_policy": "citrus.protocol.trial_index.v4",
+      "changes_from_v3": "schema_version 3 -> 4 and normalization_policy .v3 -> .v4. On chaser steps features.target.z_eff_mm is removed and features.target.z_eff_source = \"arena_media_stack\" is added. There are no other new keys. The bytes also differ in the embedded protocol_semantic_hash, and the execution-index hash changes because it embeds the trial-index hash.",
+      "schema": "Citrus src/schemas/protocol_trial_index_v4.schema.json at Citrus PR #114 head 32bfe59, sha256 1923a8de87ea59db672294f11d2c242c170973aff5c27c7e069644caff73bae1 (a copy of v3 with $id, title, description and the two version consts changed; neither constrains target.z_eff_*)"
+    },
+    "seeds": "per_session_v1 chaser seeds are sha256('citrus.chaser_schedule.seed.v1' | session_uuid | semantic_hash | step_index | occurrence), so they change with the semantic hash. session_uuid is included, so no two sessions ever shared a seed. fixed_v1 seeds are unchanged."
+  },
+  "relabel_pooling_rule": {
+    "rule_v4_to_v5": "none. A v4 (or earlier) recording never joins a v5 protocol_semantic_hash group, by any byte rule or crosswalk.",
+    "why": "the chaser, loom and moving-dot stimuli were rendered at a different z_eff, so the shown stimulus differs even when the protocol file is otherwise identical",
+    "earlier_rules": "the revision-2 (v2 to v3) and revision-3 (v3 to v4) rules are unchanged and end at v4",
+    "byte_observation": "for a protocol with no chaser step the v5 bytes are the v4 bytes with only the normalization_policy label changed, so a label swap reproduces the v5 hash (fixture: phototaxis_gray035_1h_then_60x10s_seed1, solid_gray016_1h, synthetic_empty, at 120 and 240). It never does for a chaser protocol. A byte rule cannot tell a protocol whose loom or moving-dot steps render at the arena z_eff apart from one with no z_eff-dependent step, so this observation is not a pooling rule; rule_v4_to_v5 stays none.",
+    "non_chaser_pooling": "not now (Jeremy, 2026-11-14, relayed via data-export): rule_v4_to_v5 stays none for every protocol, including those without a chaser. Any future pooling rule must be mode-based, because loom and moving-dot steps render differently under the arena z_eff, and must be decided separately."
+  },
+  "h5_z_eff": {
+    "status": "attribute contract final at Citrus PR #114 commit 97eb09c (names and fixed strings checked against src/calibration/media_stack_z_eff.cpp there); unchanged at 168027d, which only sets the tank-design values. It superseded the 21-attr draft when the 2026-11-14 geometry review split the dish-floor height into holder top (rig.yml rev 15) minus seat-to-floor depth. TODO: confirm against the v5 validation H5 (Citrus 97eb09c or later)",
+    "paths": {
+      "unified": "/geometry/calibration/z_eff",
+      "citrus_source_namespace": "/calibration_snapshot/z_eff (resolves to the unified path through the existing namespace binding /calibration_snapshot -> /geometry/calibration)"
+    },
+    "shape": "a group with attributes only: no datasets, no child groups. One per arena H5. A sibling of the existing calibration children (camera groups, tank, arena_geometry).",
+    "required_when": "every v5 recording; absent from v2-v4 recordings",
+    "attributes": {
+      "formula_id": "utf8; fixed value \"citrus.z_eff.hung_dish_paraxial.v1\" (kept through the 2026-11-14 geometry correction, Jeremy: no recording used it, the formula is unchanged, the new inputs are recorded with their sources)",
+      "z_eff_mm": "float64; positive; (double)(float)((floor - base) + eye + (n_w/n_a)*base); equals float64(float32 arena_config_json.calculated_z_eff_mm), bit for bit",
+      "geometric_eye_to_image_mm": "float64",
+      "water_under_dish_mm": "float64; dish_floor_above_image_plane_mm - dish_base_thickness_mm (one float64 subtraction)",
+      "holder_top_above_image_plane_mm": "float64",
+      "holder_top_above_image_plane_mm_source": "utf8; fixed value \"rig_file:media_stack.support.holder_top_above_film_mm\" (pancakebatter rig.yml rev 15 key)",
+      "seat_to_floor_top_mm": "float64",
+      "seat_to_floor_top_mm_source": "utf8; fixed value \"tank_design_file:dimensions.seat_to_floor_top_mm\"",
+      "dish_floor_above_image_plane_mm": "float64; DERIVED: holder_top_above_image_plane_mm - seat_to_floor_top_mm, bit for bit (one IEEE float64 subtraction of the two recorded doubles)",
+      "dish_floor_above_image_plane_mm_source": "utf8; fixed value \"derived:holder_top_above_image_plane_mm-seat_to_floor_top_mm\"",
+      "rig_id": "utf8; equals /metadata/rig/pancakebatter_rig_file rig_id",
+      "rig_file_path": "utf8",
+      "rig_file_sha256": "utf8; 'sha256:' + 64 lowercase hex over the whole file bytes; equals /metadata/rig/pancakebatter_rig_file rig_file_sha256",
+      "rig_geometry_revision": "int32 (H5T_NATIVE_INT), OPTIONAL: present only when the rig file has one (absent, never null); when present equals the rig pin group's revision",
+      "tank_design_id": "utf8",
+      "tank_design_file_path": "utf8",
+      "tank_design_file_sha256": "utf8; 'sha256:' + 64 lowercase hex over the whole file bytes",
+      "dish_base_thickness_mm": "float64",
+      "refractive_index_acrylic": "float64",
+      "refractive_index_acrylic_source": "utf8; fixed value \"tank_design_file:materials.tank_refractive_index\"",
+      "refractive_index_water": "float64",
+      "refractive_index_water_source": "utf8; fixed value \"tank_design_file:materials.water_refractive_index\"",
+      "eye_height_above_floor_mm": "float64",
+      "eye_height_above_floor_mm_source": "utf8; fixed value \"tank_design_biological_assumption\"",
+      "arena_id": "utf8; equals the recording's arena_config config_name"
+    },
+    "attribute_types": "every attribute is scalar; numbers are H5T_NATIVE_DOUBLE (float64) except rig_geometry_revision (H5T_NATIVE_INT, int32); strings are variable-length C_S1 with cset UTF-8",
+    "closed": "yes: exactly these 25 attributes (rig_geometry_revision optional, so 24 or 25 present); no datasets, no child groups",
+    "z_eff_source_in_h5": "no. z_eff_source exists only in the protocol identity and the trial index, never in the H5",
+    "equalities": [
+      "one float32 z is set per arena at START; z_eff_mm == float64(z), so each of the following, read from arena_config_json as float64, is bit-identical to z_eff_mm: calculated_z_eff_mm, dish_config.optics.z_eff_current_mm (the value the renderer uses), dish_config.optics.z_eff_larvae_mm, and the chaser rows' z_eff_mm",
+      "dish_config.optics.z_eff_adult_mm and dish_config.biological.adult_eye_height_mm are deleted from arena_config_json in v5-build files (Citrus PR #114 head 32bfe59); older H5s and canvas files still carry them. They are never part of any equality, and a consumer ignores them; their presence is not a refusal condition.",
+      "arena_id == the recording's arena config_name (/metadata/session arena_id)",
+      "rig_id and rig_file_sha256 == /metadata/rig/pancakebatter_rig_file rig_id and rig_file_sha256; rig_geometry_revision, when present, == that pin's revision. A mismatch means the rig file changed between START and logger open, a real fault; the recording is refused"
+    ],
+    "admission": "expected to ride unified H5 admission revision 7 with no catalog change (the group is uncataloged like tank and arena_geometry); Palette gates its checks on semantic policy v5. To be confirmed with the v5 validation H5.",
+    "attribute_naming": "a source attr is the measured value's full name, unit included, + \"_source\": holder_top_above_image_plane_mm_source, seat_to_floor_top_mm_source, dish_floor_above_image_plane_mm_source, eye_height_above_floor_mm_source, refractive_index_acrylic_source, refractive_index_water_source (Jeremy 2026-11-13; Citrus PR #114 head 32bfe59)",
+    "start_refusals": "Citrus START refuses with rig_media_stack_holder_top_missing until the rig file carries media_stack.support.holder_top_above_film_mm (rev 15), and with tank_design_seat_to_floor_top_missing until the tank design carries dimensions.seat_to_floor_top_mm; the deprecated dish_floor_above_film_mm is never read",
+    "omnifin0_values": "informational, not pinned (Jeremy, 2026-11-14; Citrus 168027d): holder top 8.13 mm, seat_to_floor_top_mm 0 on both dishes (floor flush with the winglet seat), so dish_floor_above_image_plane_mm 8.13 in every arena; palm1 base 6.0 mm, palm2 base 3.0 mm; eye 1.4 mm assumed; z_eff_mm about 8.898 (palm1) and 9.214 (palm2). Exact float values come from the recording."
+  },
+  "fixture": {
+    "path": "fixtures/semantic_hash_v5_cases.json",
+    "source": "Citrus protocol_identity_dump: v4_120/v4_240 from abf1da6 (tool built at 0a9b6fd, identical tree) on the abf1da6 protocol files, which set z_eff_mm; v5_120/v5_240 from Citrus PR #114 head 32bfe59",
+    "status": "delivered byte for byte from Citrus PR #114 commit b2630f5 (adds only docs/protocol_semantic_v5/semantic_hash_v5_cases.json on top of 32bfe59); sha256 4dbcdcfbb717daacb1286704a8bdea86da7501b7cf81e2d4f7a4ae3353bd9f79, 2,072,243 bytes",
+    "cases": "8: batman_composable, batman, goodbatbadbat, demo_chaser_then_phototaxis_seed1 (chaser, authored 14.942); good_cop_bad_cop_demo (chaser, authored 0.0); phototaxis_gray035_1h_then_60x10s_seed1, solid_gray016_1h (no chaser); synthetic_empty",
+    "excluded": "none of the 8 cases is affected. protocols/chaser-cave.json was never a case; Citrus's file notes that the dump tool aborted on it. It was deleted from the repository at d45118d with 9 other protocols that had no semantic identity, and since 6e30855 Citrus START refuses any protocol without a semantic identity or trial index (protocol_semantic_identity_invalid)"
+  }
+}
