@@ -1120,6 +1120,16 @@ def project_unified_subject_metadata(
                              "source_profile": UNIFIED_H5_PROFILE},
         )
         return None
+    member_fish_ids = _snapshot_member_fish_ids(snapshot, snapshot_admission)
+    if member_fish_ids:
+        # The members are snapshot-only (no attr carries them). Publish them
+        # with the subject so intake can refuse one fish in two arenas and
+        # consumers can key a group's recordings on its fish.
+        attributes = {**attributes, "member_fish_ids": member_fish_ids}
+        snapshot_admission = {
+            **snapshot_admission,
+            "member_fish_ids_source": f"{CITRUS_SNAPSHOT_PATH}#members",
+        }
     subject_metadata = normalize_subject_metadata(attributes)
     if not subject_metadata:
         return None
@@ -1136,6 +1146,24 @@ def project_unified_subject_metadata(
     return _publish_subject_and_setup(
         root, subject_metadata, source_artifact=source, translator="h5_attributes"
     )
+
+
+def _snapshot_member_fish_ids(
+    snapshot: Any, snapshot_admission: Mapping[str, Any]
+) -> list[str]:
+    """Sorted member fish ids of an admitted snapshot v4 dish group, else ``[]``.
+
+    Admission has already checked the list (schema, no repeat, and a non-empty
+    list naming exactly ``subject_count`` fish), so nothing is re-judged here.
+    """
+
+    if (
+        snapshot_admission.get("citrus_snapshot_status") != "admitted"
+        or snapshot_admission.get("citrus_snapshot_schema_version") != 4
+        or not isinstance(snapshot, Mapping)
+    ):
+        return []
+    return sorted(str(member["mzb_fish_id"]) for member in snapshot.get("members") or [])
 
 
 def _sealed_recording_refs(source_reader: Any) -> dict[str, Optional[str]]:

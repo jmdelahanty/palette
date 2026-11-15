@@ -196,3 +196,51 @@ def test_a_picked_fish_carries_its_sealed_unit_and_new_reasons_pass_through():
     for reason in ("operator_declined_pick", "no_registered_fish", "fish_list_unavailable"):
         declined = sf.from_h5_attributes(dict(CITRUS_V3, fish_reference_reason=reason))
         assert declined["fish_reference"] == {"status": "not_collected", "reason": reason}
+
+
+def test_group_members_are_published_sorted_and_never_as_subject_ids() -> None:
+    fields = sf.from_h5_attributes(
+        {"subject_type": "dish_group", "subject_count": "3", "dish_id": "19220_1",
+         "member_fish_ids": ["c", "a", "b"]}
+    )
+    assert fields["member_fish_ids"] == ["a", "b", "c"]
+    assert "subject_ids" not in fields and "unresolved" not in fields
+
+
+def test_a_group_without_declared_members_publishes_no_member_field() -> None:
+    fields = sf.from_h5_attributes({"subject_type": "dish_group", "subject_count": "3"})
+    assert "member_fish_ids" not in fields and "unresolved" not in fields
+    assert "member_fish_ids" not in sf.from_h5_attributes(
+        {"subject_type": "dish_group", "subject_count": "3", "member_fish_ids": []}
+    )
+
+
+@pytest.mark.parametrize(
+    "attrs, reason",
+    [
+        ({"subject_type": "dish_group", "subject_count": "2", "member_fish_ids": ["a", "a"]},
+         "empty, non-text or repeated fish id"),
+        ({"subject_type": "dish_group", "subject_count": "2", "member_fish_ids": ["a", ""]},
+         "empty, non-text or repeated fish id"),
+        ({"subject_type": "dish_group", "subject_count": "2", "member_fish_ids": "a,b"},
+         "not a list of fish ids"),
+        ({"subject_type": "individual", "subject_count": "1", "member_fish_ids": ["a"]},
+         "members declared for a subject that is not a dish_group"),
+    ],
+)
+def test_untranslatable_members_are_left_out_with_a_reason(attrs, reason) -> None:
+    fields = sf.from_h5_attributes(attrs)
+    assert "member_fish_ids" not in fields
+    assert fields["unresolved"]["member_fish_ids"] == reason
+
+
+def test_registry_provenance_columns_do_not_change_when_members_are_published() -> None:
+    """The registry reads named subject fields; ``member_fish_ids`` adds no column
+    and is never taken for the recording's single fish."""
+
+    from fisheye.registry.db import _extract_provenance
+
+    group = {"subject_kind": "dish_group", "subject_count": 5, "dish_id": "dish_1"}
+    with_members = {**group, "member_fish_ids": ["fish_a", "fish_b", "fish_c", "fish_d", "fish_e"]}
+    assert _extract_provenance(with_members) == _extract_provenance(group)
+    assert _extract_provenance(with_members)["fish_id"] is None
