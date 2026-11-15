@@ -693,6 +693,8 @@ def _citrus_daily(**changes: object) -> dict[str, object]:
         "registration_id": "dailyreg-1",
         "registration_checksum_valid": True,
         "target": {"arena_id": "arena_1", "camera_id": "2010093"},
+        "translation_matches_runtime": True,
+        "canonical_geometry_preserved": True,
     }
     for key, value in changes.items():
         if value is _ABSENT:
@@ -735,6 +737,12 @@ def test_h5_loader_hashes_exact_payload_and_reconciles_runtime(tmp_path: Path) -
         ({"target": {"arena_id": "arena_2", "camera_id": "2010093"}}, CitrusRegistrationStatus.CAMERA_ARENA_TARGET_MISSING, True),
         ({"target": {"arena_id": "arena_1", "camera_id": "2010094"}}, CitrusRegistrationStatus.CAMERA_ARENA_TARGET_MISSING, True),
         ({"registration_checksum_valid": False}, CitrusRegistrationStatus.CHECKSUM_MISMATCH, True),
+        # The runtime arena geometry must be the base plus exactly the sealed
+        # translation, with nothing else changed (Citrus's own measurement).
+        ({"translation_matches_runtime": False}, CitrusRegistrationStatus.INVALID, True),
+        ({"canonical_geometry_preserved": False}, CitrusRegistrationStatus.INVALID, True),
+        ({"translation_matches_runtime": _ABSENT}, CitrusRegistrationStatus.MISSING, True),
+        ({"canonical_geometry_preserved": _ABSENT}, CitrusRegistrationStatus.MISSING, True),
     ],
 )
 def test_h5_loader_takes_applied_only_from_citrus_runtime_contract(
@@ -756,6 +764,18 @@ def test_h5_loader_takes_applied_only_from_citrus_runtime_contract(
     assert result.issues[0].code == status.value
     with pytest.raises(RecordingGeometryError, match="did not exactly match"):
         load_registered_dish_masks_from_citrus_h5(path, policy=GeometryLoadPolicy.REQUIRED)
+
+
+@pytest.mark.parametrize("override", ["translation_overlay_applied", "commissioned_base_geometry"])
+def test_h5_loader_does_not_read_override_status(tmp_path: Path, override: str) -> None:
+    # Citrus's override_status restates applied (session_logger.cpp b01eddb);
+    # the exact match rests on the terms Citrus measured, not on this label.
+    path = tmp_path / "experiment.h5"
+    _write_h5(path, unified=True, citrus_daily=_citrus_daily(override_status=override))
+
+    (mask,) = load_registered_dish_masks_from_citrus_h5(path).masks.values()
+
+    assert mask.citrus_registration_status is CitrusRegistrationStatus.EXACT_MATCH_APPLIED
 
 
 def test_h5_loader_without_runtime_contract_is_not_applied(tmp_path: Path) -> None:

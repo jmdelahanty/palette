@@ -1069,6 +1069,14 @@ def _citrus_applied_status(
     Every term is required; none is inferred from the others. registration_id and
     registration_checksum_valid are schema-optional (always written since Citrus
     9b839ab), so their absence is non-exact, not a violation.
+
+    A daily registration is a translation of the commissioned base geometry, so
+    "applied" also needs Citrus's own measurement that the runtime arena
+    geometry is the base plus exactly the sealed translation
+    (``translation_matches_runtime``) and that nothing else changed
+    (``canonical_geometry_preserved``; Citrus session_logger.cpp b01eddb).
+    Either one false is non-exact (invalid); absent is missing.
+    ``override_status`` only restates ``applied`` and is not read.
     """
 
     if daily is None:
@@ -1092,6 +1100,11 @@ def _citrus_applied_status(
         return CitrusRegistrationStatus.CAMERA_ARENA_TARGET_MISSING, applied
     if daily.get("registration_checksum_valid") is not True:
         return CitrusRegistrationStatus.CHECKSUM_MISMATCH, applied
+    geometry_terms = ("translation_matches_runtime", "canonical_geometry_preserved")
+    if any(term not in daily for term in geometry_terms):
+        return CitrusRegistrationStatus.MISSING, applied
+    if any(daily.get(term) is not True for term in geometry_terms):
+        return CitrusRegistrationStatus.INVALID, applied
     return CitrusRegistrationStatus.EXACT_MATCH_APPLIED, applied
 
 
