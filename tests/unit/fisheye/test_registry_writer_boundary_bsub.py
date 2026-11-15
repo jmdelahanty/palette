@@ -26,12 +26,9 @@ def _run_citrus(
             str(CITRUS_SCRIPT),
             "--session-dir",
             str(tmp_path / "missing-session"),
-            "--registry",
-            str(tmp_path / "registry.sqlite"),
             "--log-dir",
             str(tmp_path / "citrus-logs"),
-            "--run-id",
-            "writer-boundary",
+            *(() if "--run-id" in options else ("--run-id", "writer-boundary")),
             "--dry-run",
             *options,
         ],
@@ -42,59 +39,35 @@ def _run_citrus(
     )
 
 
-def test_citrus_register_requires_designated_writer_host(tmp_path: Path) -> None:
-    result = _run_citrus(tmp_path)
+@pytest.mark.parametrize(
+    "flags", [["--register"], ["--registry", "/r.sqlite"], ["--writer-host", "writer01"]]
+)
+def test_citrus_job_mode_registration_is_retired(tmp_path: Path, flags) -> None:
+    result = _run_citrus(tmp_path, *flags)
 
     assert result.returncode == 2
-    assert "--register requires --writer-host" in result.stderr
+    assert "job-mode registration is retired" in result.stderr
+    assert not (tmp_path / "citrus-logs").exists()
 
 
-def test_citrus_register_pins_host_and_exports_shadow_configuration(
-    tmp_path: Path,
-) -> None:
+def test_citrus_job_never_touches_the_registry(tmp_path: Path) -> None:
     env = {
+        "PALETTE_REGISTRY_WRITER_HOST": "writer01",
         "PALETTE_REGISTRY_WRITER_LOCK_PATH": str(tmp_path / "writer.lock"),
         "PALETTE_REGISTRY_SHADOW_TEMP_ROOT": str(tmp_path / "shadows"),
         "PALETTE_REGISTRY_SHADOW_BACKUP_DIR": str(tmp_path / "backups"),
+        "PALETTE_REGISTRY": str(tmp_path / "registry.sqlite"),
     }
-    result = _run_citrus(tmp_path, "--writer-host", "writer01", env_overrides=env)
-
-    assert result.returncode == 0, result.stderr
-    assert "hname==writer01" in result.stdout
-    assert "span\\[hosts=1\\]" in result.stdout
-    job_script = next(
-        (tmp_path / "citrus-logs").glob("**/run_citrus_session_import.sh")
-    )
-    subprocess.run(["bash", "-n", str(job_script)], check=True)
-    job = job_script.read_text(encoding="utf-8")
-    assert "export PALETTE_REGISTRY_WRITER_HOST=writer01" in job
-    assert (
-        f"export PALETTE_REGISTRY_WRITER_LOCK_PATH={env['PALETTE_REGISTRY_WRITER_LOCK_PATH']}"
-        in job
-    )
-    assert (
-        f"export PALETTE_REGISTRY_SHADOW_TEMP_ROOT={env['PALETTE_REGISTRY_SHADOW_TEMP_ROOT']}"
-        in job
-    )
-    assert (
-        f"export PALETTE_REGISTRY_SHADOW_BACKUP_DIR={env['PALETTE_REGISTRY_SHADOW_BACKUP_DIR']}"
-        in job
-    )
-    assert "REGISTER=1" in job
-
-
-def test_citrus_no_register_dry_run_does_not_need_writer_host(tmp_path: Path) -> None:
-    result = _run_citrus(tmp_path, "--no-register")
-
-    assert result.returncode == 0, result.stderr
-    assert "hname==" not in result.stdout
-    job_script = next(
-        (tmp_path / "citrus-logs").glob("**/run_citrus_session_import.sh")
-    )
-    subprocess.run(["bash", "-n", str(job_script)], check=True)
-    job = job_script.read_text(encoding="utf-8")
-    assert "REGISTER=0" in job
-    assert 'if [[ "${REGISTER}" == "1" ]]' in job
+    for options in ([], ["--no-register"]):
+        result = _run_citrus(tmp_path, "--run-id", f"run{len(options)}", *options, env_overrides=env)
+        assert result.returncode == 0, result.stderr
+        assert "hname==" not in result.stdout
+        assert "registration=writer_host_only" in result.stdout
+    for job_script in (tmp_path / "citrus-logs").glob("**/run_citrus_session_import.sh"):
+        subprocess.run(["bash", "-n", str(job_script)], check=True)
+        job = job_script.read_text(encoding="utf-8")
+        assert "--register" not in job and "--registry" not in job
+        assert "PALETTE_REGISTRY" not in job and "REGISTER" not in job
 
 
 def test_projection_refresh_dry_run_renders_without_submission(tmp_path: Path) -> None:
@@ -176,13 +149,13 @@ def test_projection_refresh_apply_fails_closed(tmp_path: Path) -> None:
 def test_citrus_launcher_refuses_operator_context_flags(tmp_path: Path, flag: str) -> None:
     # Recording context comes only from the producer's transfer snapshot.
     extra = [flag] if flag == "--recording-only" else [flag, "free"]
-    result = _run_citrus(tmp_path, "--writer-host", "host", *extra)
+    result = _run_citrus(tmp_path, *extra)
     assert result.returncode == 2
     assert f"Unknown arg: {flag}" in result.stderr
 
 
 def test_citrus_launcher_job_runs_transfer_v2_only(tmp_path: Path) -> None:
-    result = _run_citrus(tmp_path, "--writer-host", "host")
+    result = _run_citrus(tmp_path)
     assert result.returncode == 0, result.stderr
     job = next((tmp_path / "citrus-logs").glob("**/run_citrus_session_import.sh")).read_text()
     assert "--recording-type" not in job and "--behavior-mode" not in job

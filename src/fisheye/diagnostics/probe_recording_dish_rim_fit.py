@@ -28,6 +28,7 @@ from typing import Any, Mapping, Sequence
 import cv2
 import numpy as np
 
+from fisheye.shared.orange_frame_identity import keyframe_video_frame_indices
 from fisheye.shared.pynvvc_exact_seek import (
     decode_one_frame_from_preceding_keyframe,
 )
@@ -203,7 +204,7 @@ def load_declared_keyframes(
     declared_fps = float(payload.get("fps", 0.0))
     if not math.isclose(declared_fps, float(expected_fps), rel_tol=0.0, abs_tol=1e-9):
         raise ValueError("keyframe summary fps disagrees with source summary")
-    raw = payload.get("keyframe_frames")
+    raw = keyframe_video_frame_indices(payload, label="keyframe summary")
     if not isinstance(raw, list) or not raw:
         raise ValueError("keyframe summary has no keyframe_frames")
     if any(isinstance(value, bool) or not isinstance(value, int) for value in raw):

@@ -1686,6 +1686,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Filter datasets by available downsample modality required for training.",
     )
     parser.add_argument("--path-contains", type=str)
+    parser.add_argument(
+        "--include-missing",
+        action="store_true",
+        help="Include datasets whose Zarr no longer exists (status 'missing'); hidden by default.",
+    )
     parser.add_argument("--limit", type=int)
     parser.add_argument("--json", action="store_true", help="Emit JSON output.")
     parser.add_argument("--output-file-list", type=Path, help="Write matched zarr paths to file.")
@@ -2047,6 +2052,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             arena_id=args.arena_id,
             model_input=args.model_input,
             path_contains=args.path_contains,
+            exclude_status=None if args.include_missing else "missing",
             # Apply row limit after lineage/stage filtering.
             limit=(
                 None

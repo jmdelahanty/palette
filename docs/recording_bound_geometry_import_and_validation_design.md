@@ -256,12 +256,29 @@ but a path is not portable mask identity. Offline identity is determined by:
 - exact camera and arena binding;
 - exact content checksums.
 
-Orange already records
-`selected_daily_registration_applied_by_citrus` after applying its literal path
-and checksum rules. Palette should retain that producer conclusion rather than
-attempting to reinterpret equivalent relocated paths. Palette still verifies
-the embedded contract, H5 scope, runtime JSON checksum, registration identity,
-and exact camera/arena/rim-observation identity.
+Correction (2026-10-14): this section originally said Orange records
+`selected_daily_registration_applied_by_citrus`. Neither Orange nor Citrus writes
+that field. The H5 scope's camera entry is a verbatim copy of Orange's, and the
+scope declares Orange's contract `metadata_only_not_applied_by_citrus`. Citrus
+declares the selection and application in its own runtime geometry contract,
+`citrus.session.runtime_geometry_contract` v1, at
+`contract_json.daily_registration`.
+
+Palette retains that producer conclusion rather than reinterpreting equivalent
+relocated paths. A mask is `exact_match_applied` only when every one of these
+terms holds; none is inferred from the others:
+
+- `status == "selected_valid"` and `applied` is true;
+- `registration_id` equals the Orange camera entry's;
+- `target` equals the scope camera and arena;
+- `registration_checksum_valid` is true.
+
+`registration_id` and `registration_checksum_valid` are schema-optional, so
+their absence is non-exact, not a violation. `selected_invalid` is never read
+as valid. Palette still verifies the embedded contract, H5 scope, runtime JSON
+checksum, registration identity, and exact camera/arena/rim-observation identity.
+The reported `selected_daily_registration_applied_by_citrus` value is Citrus's
+runtime `applied`.
 
 ## Normalized identity and status model
 

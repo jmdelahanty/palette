@@ -83,6 +83,7 @@ from fisheye.shared.coordinate_identity import (
     stamp_and_bind_row_identity_contract,
     stamp_track_sample_time_lineage,
 )
+from fisheye.shared.acquisition_frame_clock import require_nominal_frame_timing
 from fisheye.shared.pixel_frame_authority import (
     PixelFrameAuthorityError,
     load_persisted_acquisition_camera_authority,
@@ -186,6 +187,7 @@ from fisheye.shared.zarr_payload_receipt import (
     verify_payload_validation_receipt,
 )
 from .swim_bout_io import SwimBoutIOError, load_default_swim_bout_tables, load_swim_bout_tables
+from fisheye.shared.heading_convention import wrap_delta_degrees
 
 
 TrackPhysicalAuthority = (
@@ -3248,13 +3250,6 @@ def _ordered_track_arena_ids(
     )
 
 
-def _wrap_heading_delta_degrees(delta_degrees: np.ndarray) -> np.ndarray:
-    """Wrap heading deltas into the signed [-180, 180) range."""
-
-    delta = np.asarray(delta_degrees, dtype=np.float64)
-    return ((delta + 180.0) % 360.0) - 180.0
-
-
 def _compute_heading_turning(
     headings_deg: np.ndarray,
     delta_seconds_full: np.ndarray,
@@ -3273,7 +3268,7 @@ def _compute_heading_turning(
     if headings.size < 2:
         return delta_heading, angular_velocity, angular_speed
 
-    step_delta = _wrap_heading_delta_degrees(headings[1:] - headings[:-1])
+    step_delta = wrap_delta_degrees(headings[1:] - headings[:-1])
     valid = (
         np.isfinite(headings[1:])
         & np.isfinite(headings[:-1])
@@ -13602,6 +13597,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         render_online = render_offline = True
 
     fps = resolve_fps(root, explicit_fps=args.fps)
+    # time_seconds is frame / fps; refuse when the camera clock disagrees.
+    require_nominal_frame_timing(root, nominal_fps=fps)
 
     if render_online:
         # Online track kinematics prefers the sealed refined surface and otherwise

@@ -106,6 +106,7 @@ export function queueRows(payload) {
           canStart: start.ready === true && Boolean(start.endpoint),
           startEndpoint: start.ready === true ? start.endpoint || "" : "",
           notReadyReason: start.ready === true ? "" : start.operator_action || start.not_ready_reason || "",
+          openFlags: Number(task.open_flag_count) || 0,
         });
       }
     }

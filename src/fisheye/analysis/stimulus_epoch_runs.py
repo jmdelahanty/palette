@@ -18,6 +18,10 @@ from fisheye.analysis.chaser_profiles import (
     load_chaser_protocol_profile,
     resolve_profile_windows,
 )
+from fisheye.shared.citrus_camera_frame_id import (
+    CITRUS_CAMERA_FRAME_ID_RULE,
+    parent_frame_index_from_citrus_camera_frame_id,
+)
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.run_lineage_fingerprint import (
@@ -184,9 +188,11 @@ def _event_frames_from_stimulus(root: zarr.Group, stimulus_group: zarr.Group) ->
         name = str(event_name).strip()
         if not name:
             continue
-        frame = int(np.asarray(frame_value).item())
-        if frame >= 0:
-            event_frames.setdefault(name, frame)
+        # An event logged before Citrus knew any camera frame maps to frame 0.
+        frame = parent_frame_index_from_citrus_camera_frame_id(
+            np.asarray(frame_value).item()
+        )
+        event_frames.setdefault(name, 0 if frame is None else frame)
     return event_frames
 
 
@@ -432,6 +438,7 @@ def write_stimulus_epoch_run(
                 "events_path": f"{result.stimulus_path}/events",
                 "event_name_fields": ["event_name", "event_type_name", "name", "event_type_id"],
                 "frame_fields": ["camera_frame_id", "camera_frame_num", "triggering_camera_frame_id"],
+                "frame_index_rule": CITRUS_CAMERA_FRAME_ID_RULE,
             },
             "epoch_policy": method,
             "epoch_policy_version": result.window_policy_version,

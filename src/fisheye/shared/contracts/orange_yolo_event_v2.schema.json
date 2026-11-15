@@ -1,0 +1,605 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orange.yolo_event.v2",
+  "title": "Orange detector event log line (orange.yolo_event, version 2)",
+  "description": "One JSON object per line of Cam<serial>_yolo_events.jsonl (2026-10-09). The first line is a session_header carrying the session-constant blocks: recording_id, camera, the detector model identity (engine sha256 computed over the bytes that ran, weights/onnx sha256 from the engine manifest), the spatial-mask policy and the Citrus live-IPC queue. A spatial_mask_policy line is written whenever the policy generation changes. Every other line is a yolo_result frame line carrying frame identity (frame.recording_frame_id is the join key), timestamps, the detector status, the detections (source-frame pixels, rounded to 0.001 px; confidences to 1e-4) and the per-frame spatial-mask result naming its policy_generation. event_sequence numbers frame lines only, from 1, so frame line i pairs with crop ledger row i. Header and policy lines carry no event_sequence.",
+  "type": "object",
+  "required": [
+    "schema_id",
+    "schema_version",
+    "event_kind"
+  ],
+  "oneOf": [
+    {
+      "title": "session_header",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "schema_version",
+        "event_kind",
+        "recording_id",
+        "camera_serial",
+        "camera_id",
+        "worker",
+        "frame_identity_key",
+        "source_frame",
+        "yolo",
+        "spatial_mask",
+        "citrus_live_ipc",
+        "line_format"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "orange.yolo_event"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "event_kind": {
+          "const": "session_header"
+        },
+        "recording_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "camera_serial": {
+          "type": "string",
+          "minLength": 1
+        },
+        "camera_id": {
+          "type": "integer"
+        },
+        "worker": {
+          "type": "string"
+        },
+        "frame_identity_key": {
+          "const": "frame.recording_frame_id"
+        },
+        "source_frame": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "width_px",
+            "height_px"
+          ],
+          "properties": {
+            "width_px": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "height_px": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "line_format": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "coordinate_decimals",
+            "confidence_decimals",
+            "latency_decimals"
+          ],
+          "properties": {
+            "coordinate_decimals": {
+              "const": 3
+            },
+            "confidence_decimals": {
+              "const": 4
+            },
+            "latency_decimals": {
+              "const": 3
+            }
+          }
+        },
+        "yolo": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "worker",
+            "model_id",
+            "engine_path",
+            "engine_sha256",
+            "engine_bytes",
+            "weights_sha256",
+            "onnx_sha256",
+            "engine_manifest_run_id",
+            "gpu_id",
+            "coordinate_space",
+            "detection_source",
+            "synthetic_runtime_detection"
+          ],
+          "properties": {
+            "worker": {
+              "const": "YoloWorker"
+            },
+            "model_id": {
+              "type": "string"
+            },
+            "engine_path": {
+              "type": "string"
+            },
+            "engine_sha256": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{64})?$"
+            },
+            "engine_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "weights_sha256": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{64})?$"
+            },
+            "onnx_sha256": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{64})?$"
+            },
+            "engine_manifest_run_id": {
+              "type": "string"
+            },
+            "gpu_id": {
+              "type": "integer"
+            },
+            "coordinate_space": {
+              "const": "source_frame_pixels"
+            },
+            "detection_source": {
+              "enum": [
+                "model",
+                "synthetic_center_box"
+              ]
+            },
+            "synthetic_runtime_detection": {
+              "type": "boolean"
+            }
+          }
+        },
+        "spatial_mask": {
+          "type": "object",
+          "description": "The orange.analytics.spatial_mask_runtime policy as the worker holds it (open: its own schema), plus policy_generation. Frame lines name the generation they were evaluated under.",
+          "required": [
+            "schema_id",
+            "schema_version",
+            "mode",
+            "policy_generation"
+          ],
+          "properties": {
+            "schema_id": {
+              "const": "orange.analytics.spatial_mask_runtime"
+            },
+            "schema_version": {
+              "const": 1
+            },
+            "mode": {
+              "enum": [
+                "off",
+                "audit",
+                "gate_only",
+                "gate_and_input_mask"
+              ]
+            },
+            "policy_generation": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "citrus_live_ipc": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "queue_name",
+            "enabled"
+          ],
+          "properties": {
+            "queue_name": {
+              "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "spatial_mask_policy",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "schema_version",
+        "event_kind",
+        "camera_serial",
+        "frame",
+        "spatial_mask"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "orange.yolo_event"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "event_kind": {
+          "const": "spatial_mask_policy"
+        },
+        "camera_serial": {
+          "type": "string"
+        },
+        "frame": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "recording_frame_id"
+          ],
+          "properties": {
+            "recording_frame_id": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "spatial_mask": {
+          "type": "object",
+          "description": "The orange.analytics.spatial_mask_runtime policy as the worker holds it (open: its own schema), plus policy_generation. Frame lines name the generation they were evaluated under.",
+          "required": [
+            "schema_id",
+            "schema_version",
+            "mode",
+            "policy_generation"
+          ],
+          "properties": {
+            "schema_id": {
+              "const": "orange.analytics.spatial_mask_runtime"
+            },
+            "schema_version": {
+              "const": 1
+            },
+            "mode": {
+              "enum": [
+                "off",
+                "audit",
+                "gate_only",
+                "gate_and_input_mask"
+              ]
+            },
+            "policy_generation": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "yolo_result",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "schema_version",
+        "event_sequence",
+        "event_kind",
+        "camera_serial",
+        "frame",
+        "timestamps",
+        "yolo",
+        "spatial_mask",
+        "detections",
+        "citrus_live_ipc"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "orange.yolo_event"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "event_sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "event_kind": {
+          "const": "yolo_result"
+        },
+        "camera_serial": {
+          "type": "string"
+        },
+        "frame": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "local_frame_id",
+            "camera_frame_id",
+            "recording_frame_id",
+            "ipc_frame_id",
+            "record_active"
+          ],
+          "properties": {
+            "local_frame_id": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "camera_frame_id": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "recording_frame_id": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "ipc_frame_id": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "record_active": {
+              "type": "boolean"
+            }
+          }
+        },
+        "timestamps": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "camera_timestamp",
+            "timestamp_sys_ns",
+            "event_epoch_us",
+            "event_monotonic_us"
+          ],
+          "properties": {
+            "camera_timestamp": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "timestamp_sys_ns": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "event_epoch_us": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "event_monotonic_us": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "yolo": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "detection_count",
+            "detection_source",
+            "synthetic_runtime_detection",
+            "production_detection_valid"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "detections",
+                "zero_detections",
+                "timeout",
+                "failed"
+              ]
+            },
+            "detection_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "detection_source": {
+              "enum": [
+                "model",
+                "synthetic_center_box"
+              ]
+            },
+            "synthetic_runtime_detection": {
+              "type": "boolean"
+            },
+            "production_detection_valid": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            }
+          }
+        },
+        "spatial_mask": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "policy_generation",
+            "result",
+            "outside_detections"
+          ],
+          "properties": {
+            "policy_generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "raw_detection_count",
+                "inside_detection_count",
+                "outside_detection_count",
+                "downstream_detection_count"
+              ],
+              "properties": {
+                "raw_detection_count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "inside_detection_count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "outside_detection_count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "downstream_detection_count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "outside_detections": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "raw_index",
+                  "box",
+                  "centroid_px",
+                  "signed_boundary_distance_px",
+                  "decision",
+                  "rejected_reason"
+                ],
+                "properties": {
+                  "raw_index": {
+                    "type": "integer"
+                  },
+                  "box": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "x_px",
+                      "y_px",
+                      "width_px",
+                      "height_px",
+                      "label",
+                      "confidence"
+                    ],
+                    "properties": {
+                      "x_px": {
+                        "type": "number"
+                      },
+                      "y_px": {
+                        "type": "number"
+                      },
+                      "width_px": {
+                        "type": "number"
+                      },
+                      "height_px": {
+                        "type": "number"
+                      },
+                      "label": {
+                        "type": "integer"
+                      },
+                      "confidence": {
+                        "type": "number"
+                      }
+                    }
+                  },
+                  "centroid_px": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "x",
+                      "y"
+                    ],
+                    "properties": {
+                      "x": {
+                        "type": "number"
+                      },
+                      "y": {
+                        "type": "number"
+                      }
+                    }
+                  },
+                  "signed_boundary_distance_px": {
+                    "type": "number"
+                  },
+                  "decision": {
+                    "enum": [
+                      "rejected",
+                      "would_reject"
+                    ]
+                  },
+                  "rejected_reason": {
+                    "const": "outside_valid_detection_region"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "detections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "index",
+              "x_px",
+              "y_px",
+              "width_px",
+              "height_px",
+              "label",
+              "confidence"
+            ],
+            "properties": {
+              "index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "x_px": {
+                "type": "number"
+              },
+              "y_px": {
+                "type": "number"
+              },
+              "width_px": {
+                "type": "number"
+              },
+              "height_px": {
+                "type": "number"
+              },
+              "label": {
+                "type": "integer"
+              },
+              "confidence": {
+                "type": "number"
+              },
+              "keypoints": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                },
+                "description": "present only when the engine emitted keypoints (flat x,y,conf triples); absent for detect-only engines"
+              }
+            }
+          }
+        },
+        "citrus_live_ipc": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "requested",
+            "request_status"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "requested": {
+              "type": "boolean"
+            },
+            "request_status": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -31,6 +31,9 @@ RERUN_HELP = (
     'Use "Re-run all jobs"; evidence from partial/older attempts is not reused.'
 )
 ATTESTATION_SCHEMA = "palette-ci-required-attestation-v1"
+GATE_RUNNING_STATUSES = frozenset(
+    {"queued", "in_progress", "waiting", "pending", "requested"}
+)
 
 
 class GateError(ValueError):
@@ -147,9 +150,14 @@ def validate_jobs(jobs: list[dict], context: Context) -> None:
         ):
             raise GateError(f"Job identity mismatch: {name}. {RERUN_HELP}")
         # The currently executing gate cannot be its own successful prerequisite.
+        # The jobs API can still report the running gate as queued; accept any
+        # non-terminal state, but never a completed (e.g. earlier) gate record.
         if name == "ci-required":
-            if job.get("status") != "in_progress" or job.get("conclusion") is not None:
-                raise GateError("Unexpected terminal gate state")
+            status, conclusion = job.get("status"), job.get("conclusion")
+            if status not in GATE_RUNNING_STATUSES or conclusion is not None:
+                raise GateError(
+                    f"Unexpected terminal gate state ({status}/{conclusion})"
+                )
             continue
         if name not in expected:
             raise GateError(f"Unexpected job: {name}; update the reviewed CI contract")

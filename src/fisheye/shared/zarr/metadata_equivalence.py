@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +95,33 @@ def _normalize_declaration(value: object, *, path: str) -> dict[str, Any]:
         raise ZarrMetadataEquivalenceError(str(exc)) from exc
 
 
+def _subtree_metadata_files(subtree: Path) -> list[Path]:
+    """Every regular ``zarr.json`` below ``subtree``; refuse any symlink.
+
+    One ``os.scandir`` walk. ``DirEntry`` answers the symlink, directory and
+    file questions from the directory listing itself (no per-file ``lstat``
+    on filesystems that report entry types, such as NFS and local disks).
+    No path can escape: every symlink is refused and nothing is resolved.
+    """
+
+    found: list[Path] = []
+    pending = [subtree]
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                path = directory / entry.name
+                if entry.is_symlink():
+                    raise ZarrMetadataEquivalenceError(
+                        f"Selected Zarr subtree contains a symlink: {path}"
+                    )
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
+                elif entry.name == "zarr.json" and entry.is_file(follow_symlinks=False):
+                    found.append(path)
+    return found
+
+
 def validate_direct_consolidated_subtree(
     archive_path: str | Path,
     *,
@@ -142,20 +170,7 @@ def validate_direct_consolidated_subtree(
         )
 
     direct_raw: dict[str, dict[str, Any]] = {}
-    for candidate in subtree.rglob("*"):
-        if candidate.is_symlink():
-            raise ZarrMetadataEquivalenceError(
-                f"Selected Zarr subtree contains a symlink: {candidate}"
-            )
-    for metadata_path in sorted(subtree.rglob("zarr.json")):
-        if not metadata_path.is_file():
-            continue
-        try:
-            metadata_path.resolve().relative_to(subtree.resolve())
-        except ValueError as exc:
-            raise ZarrMetadataEquivalenceError(
-                f"Zarr metadata path escapes the selected subtree: {metadata_path}"
-            ) from exc
+    for metadata_path in sorted(_subtree_metadata_files(subtree)):
         node_path = metadata_path.parent.relative_to(archive).as_posix()
         direct_raw[node_path] = _read_json_object(
             metadata_path,

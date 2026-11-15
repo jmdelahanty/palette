@@ -75,6 +75,7 @@ from fisheye.shared.selected_calibration import (
     require_verified_selected_camera_source_evidence,
 )
 from fisheye.shared.proof_verification import load_verified_value
+from fisheye.shared.heading_convention import left_axis
 
 PHYSICAL_FRAME_CALIBRATION_SCHEMA_ID = "palette.physical_frame_calibration"
 FISH_ANATOMICAL_BODY_FRAME_SCHEMA_ID = "palette.fish_anatomical_body_frame"
@@ -3478,7 +3479,7 @@ def _derive_body_geometry_from_exact_source(
             continue
         forward = direction / norm
         left = (
-            np.asarray([forward[1], -forward[0]], dtype=np.float64)
+            np.asarray(left_axis(forward[0], forward[1]), dtype=np.float64)
             if positive_y == "down"
             else np.asarray([-forward[1], forward[0]], dtype=np.float64)
         )

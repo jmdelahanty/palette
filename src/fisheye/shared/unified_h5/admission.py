@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .appearance import validate_appearance_witness
+from .citrus_subject_snapshot import SNAPSHOT_PATH as SUBJECT_SNAPSHOT_PATH
+from .citrus_subject_snapshot import check_receipt_subject_reference
 from .common import PROFILE, canonical_json, digest, require
 from .correspondence import (
     BINDING,
@@ -19,9 +21,14 @@ from .integrity import (
     validate_external_receipt,
     validate_internal_integrity,
 )
+from .phototaxis import validate_phototaxis_states
+from .pose import COMPONENT as POSE_COMPONENT
+from .pose import require_pose_version_for_binding
 from .protocol import validate_protocol
 from .rows import validate_table_relations
 from .schema import APPEARANCE, read_json
+from .video_overlay import STATES as VIDEO_OVERLAY_STATES
+from .video_overlay import validate_video_overlay_states
 
 TABLE_COMPONENTS = {
     "frames": "/frames/stimulus",
@@ -29,6 +36,8 @@ TABLE_COMPONENTS = {
     "visual_appearance": APPEARANCE,
     "independent_motion_grid": "/components/independent_motion_grid/states",
     "moving_grating": "/components/moving_grating/states",
+    "phototaxis": "/components/phototaxis/states",
+    "video_tracking_overlay": VIDEO_OVERLAY_STATES,
     "bounding_boxes": "/observations/bounding_boxes",
     "events": "/events/records",
     "runtime_trials": "/trials/trial_index",
@@ -54,7 +63,17 @@ class UnifiedH5Admission:
     protocol_semantic_sha256: str
     protocol_execution_sha256: str
     node_kinds: dict[str, str]
+    # The admitted catalog binding, and the stimulus angle convention it fixes
+    # (``canvas_y_down_clockwise_legacy`` or ``atan2_negative_y_x_degrees``).
+    # Readers of stimulus angles use this, never the file's date or attributes.
+    catalog: str
+    stimulus_angle_convention: str
     selector_eligible: bool = False
+    # Producer defects read under a recorded rule (phototaxis states), and
+    # reactive step-first rows whose freshness the file cannot show. Present
+    # in the claims only when non-empty, so earlier admissions are unchanged.
+    producer_defects: dict = field(default_factory=dict)
+    unverified_phototaxis_step_starts: int = 0
 
     def manifest_claims(self):
         return {
@@ -72,7 +91,15 @@ class UnifiedH5Admission:
             "camera_serial": self.camera_serial,
             "protocol_semantic_sha256": self.protocol_semantic_sha256,
             "protocol_execution_sha256": self.protocol_execution_sha256,
+            "catalog": self.catalog,
+            "stimulus_angle_convention": self.stimulus_angle_convention,
             "selector_eligible": False,
+            **({"producer_defects": self.producer_defects} if self.producer_defects else {}),
+            **(
+                {"unverified_phototaxis_step_starts": self.unverified_phototaxis_step_starts}
+                if self.unverified_phototaxis_step_starts
+                else {}
+            ),
         }
 
 
@@ -89,6 +116,8 @@ def _accounting(h5, integrity, correspondence):
         geometry=1,
         recording_association=1,
     )
+    if integrity.pose_rows is not None:
+        counts[POSE_COMPONENT] = integrity.pose_rows
     for name, count in counts.items():
         value = outcomes.get(name)
         require(
@@ -116,14 +145,32 @@ def validate_artifact(
         h5, source_h5=source_h5, receipt=finalization_receipt
     )
     integrity = validate_internal_integrity(h5)
-    validate_capacity_preflight(h5)
+    binding = validate_capacity_preflight(h5)
     validate_table_relations(h5, integrity.table_descriptors)
     correspondence = validate_component_correspondence(h5)
-    snapshot, execution = validate_protocol(h5)
+    snapshot, execution = validate_protocol(
+        h5, binding["stimulus_angle_convention"], binding["admits_heading_split"]
+    )
+    phototaxis = {}
+    validate_phototaxis_states(
+        h5, snapshot, execution, camera_serial=correspondence.camera_serial, report=phototaxis
+    )
     geometry = validate_geometry(
         h5, read_json(h5, BINDING, canonical=True), integrity.table_descriptors
     )
+    # Revision 7: pose v3 under video_overlay_v1, and the overlay states only
+    # under a binding that admits them (after geometry: they read its
+    # homography and arena origin).
+    require_pose_version_for_binding(h5, binding)
+    outcomes = {value["component_id"]: value for value in integrity.component_outcomes}
+    overlay = validate_video_overlay_states(
+        h5, binding, camera_serial=correspondence.camera_serial, outcomes=outcomes
+    )
     validate_recording_identity(h5, finalization_receipt, geometry, snapshot)
+    check_receipt_subject_reference(
+        read_json(h5, SUBJECT_SNAPSHOT_PATH) if SUBJECT_SNAPSHOT_PATH in h5 else None,
+        finalization_receipt,
+    )
     authored = read_json(h5, "/protocol/authored/protocol_trial_index_json")
     declared = any(
         chaser.get("appearance") is not None
@@ -152,4 +199,11 @@ def validate_artifact(
         protocol_semantic_sha256=snapshot.semantic_hash,
         protocol_execution_sha256=execution.execution_hash,
         node_kinds=dict(integrity.nodes),
+        catalog=binding["catalog"],
+        stimulus_angle_convention=binding["stimulus_angle_convention"],
+        producer_defects={
+            **phototaxis.get("producer_defects", {}),
+            **overlay.get("producer_defects", {}),
+        },
+        unverified_phototaxis_step_starts=phototaxis.get("unverified_step_start_rows", 0),
     )

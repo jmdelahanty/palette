@@ -1,0 +1,187 @@
+{
+  "description": "Reference cases for heading_convention_v1 in y-down source-camera pixels. origin = eye midpoint; forward = origin - swim_bladder; angle = degrees(atan2(-forward_y, forward_x)) in [-180, 180] (both ends the same heading; compare with wrap_delta); left_axis = (forward_y, -forward_x); valid only if dot(eye_left - eye_right, left_axis) > 0.",
+  "cases": [
+    {
+      "name": "heading image right",
+      "swim_bladder": [
+        10,
+        10
+      ],
+      "eye_left": [
+        20,
+        5
+      ],
+      "eye_right": [
+        20,
+        15
+      ],
+      "expect_angle_deg": 0.0,
+      "expect_left_axis": [
+        0.0,
+        -1.0
+      ],
+      "expect_origin": [
+        20.0,
+        10.0
+      ]
+    },
+    {
+      "name": "heading image down (+y)",
+      "swim_bladder": [
+        10,
+        0
+      ],
+      "eye_left": [
+        15,
+        10
+      ],
+      "eye_right": [
+        5,
+        10
+      ],
+      "expect_angle_deg": -90.0,
+      "expect_left_axis": [
+        1.0,
+        0.0
+      ],
+      "expect_origin": [
+        10.0,
+        10.0
+      ]
+    },
+    {
+      "name": "heading image left",
+      "swim_bladder": [
+        20,
+        10
+      ],
+      "eye_left": [
+        10,
+        15
+      ],
+      "eye_right": [
+        10,
+        5
+      ],
+      "expect_angle_deg": -180.0,
+      "expect_left_axis": [
+        0.0,
+        1.0
+      ],
+      "expect_origin": [
+        10.0,
+        10.0
+      ],
+      "note": "IEEE atan2(-0.0, -10) = -180; +180 is the same heading and also passes under wrap_delta"
+    },
+    {
+      "name": "heading image up (-y)",
+      "swim_bladder": [
+        10,
+        20
+      ],
+      "eye_left": [
+        5,
+        10
+      ],
+      "eye_right": [
+        15,
+        10
+      ],
+      "expect_angle_deg": 90.0,
+      "expect_left_axis": [
+        -1.0,
+        0.0
+      ],
+      "expect_origin": [
+        10.0,
+        10.0
+      ]
+    },
+    {
+      "name": "heading up-right diagonal",
+      "swim_bladder": [
+        5,
+        15
+      ],
+      "eye_left": [
+        7,
+        7
+      ],
+      "eye_right": [
+        13,
+        13
+      ],
+      "expect_angle_deg": 45.0,
+      "expect_left_axis": [
+        -0.7071067811865476,
+        -0.7071067811865476
+      ],
+      "expect_origin": [
+        10.0,
+        10.0
+      ]
+    },
+    {
+      "name": "eyes swapped is left_right_unresolved, never corrected",
+      "swim_bladder": [
+        10,
+        10
+      ],
+      "eye_left": [
+        20,
+        15
+      ],
+      "eye_right": [
+        20,
+        5
+      ],
+      "expect_reason": "left_right_unresolved"
+    },
+    {
+      "name": "eyes collinear with forward is unresolved",
+      "swim_bladder": [
+        10,
+        10
+      ],
+      "eye_left": [
+        25,
+        10
+      ],
+      "eye_right": [
+        15,
+        10
+      ],
+      "expect_reason": "left_right_unresolved"
+    },
+    {
+      "name": "missing bladder has no fallback",
+      "swim_bladder": null,
+      "eye_left": [
+        20,
+        5
+      ],
+      "eye_right": [
+        20,
+        15
+      ],
+      "expect_reason": "missing_source_anchor"
+    },
+    {
+      "name": "bladder at eye midpoint is degenerate",
+      "swim_bladder": [
+        20,
+        10
+      ],
+      "eye_left": [
+        20,
+        5
+      ],
+      "eye_right": [
+        20,
+        15
+      ],
+      "expect_reason": "degenerate_forward_axis"
+    }
+  ]
+}

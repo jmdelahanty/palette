@@ -50,9 +50,9 @@ def _codes(row: dict) -> set[str]:
 
 
 def test_migration_074_is_registered_and_adds_nullable_columns(tmp_path: Path) -> None:
-    assert MIGRATION_METHODS[-1] == (
+    assert (
         74, "recording_producer_context", "_migration_074_recording_producer_context"
-    )
+    ) in MIGRATION_METHODS
     registry = registry_from_empty_template(tmp_path / "registry.sqlite")
     columns = {
         row["name"]: row

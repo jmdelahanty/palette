@@ -101,13 +101,13 @@
       const target = document.getElementById("operator-support");
       if (!target) return;
       const supportText = operatorSupportText(failure, fallbackError);
-      const personalQueueHref = escapeSupportText(sessionReturnHref("dataset-queue", "/my-datasets"));
+      const personalQueueHref = escapeSupportText(sessionReturnHref("queue", "/queue"));
       const personalWorkHref = escapeSupportText(sessionReturnHref("work-dashboard", "/my-work"));
       target.className = "operator-support active";
       target.innerHTML =
         "<details>" +
         "<summary>What to send the operator</summary>" +
-        "<p>Stop and send these details to the operator. Return to <a href=\"" + personalQueueHref + "\">your personalized dataset queue</a> or <a href=\"" + personalWorkHref + "\">your personalized work dashboard</a> before reopening stale or superseded work.</p>" +
+        "<p>Stop and send these details to the operator. Return to <a href=\"" + personalQueueHref + "\">your queue</a> or <a href=\"" + personalWorkHref + "\">your personalized work dashboard</a> before reopening stale or superseded work.</p>" +
         "<pre>" + escapeSupportText(supportText) + "</pre>" +
         "<button type=\"button\" onclick=\"copySessionSupport(this)\">Copy support details</button>" +
         "</details>";

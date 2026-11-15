@@ -1,11 +1,13 @@
 # Unified H5 → legacy stimulus-run adapter: field mapping
 
-- **Status:** draft. Specification for an adapter that is not yet built.
-  Drafted by an agent from code and fixtures; the blockers were spot-checked
+- **Status:** **rejected 2026-10-12; do not build.** See [Decision
+  (2026-10-12)](#decision-2026-10-12-no-adapter). The field mapping below stays
+  as a reference crosswalk between the legacy and unified layouts. It was
+  drafted by an agent from code and fixtures; the blockers were spot-checked
   against the code (step-status gate, experiment-setup subject count) but the
   table has not been reviewed row by row.
 - **Owner:** Jeremy Delahanty.
-- **Last reviewed:** 2026-09-23.
+- **Last reviewed:** 2026-10-12 (D1 decision); 2026-09-23 (mapping).
 - **Builds on:** [native unified H5 import](../../unified_h5_native_import.md)
   (PR 169), the registry native-run guard (PR 181), and the
   [recording identity design](../2026-09-23-recording-identity/README.md).
@@ -24,6 +26,28 @@ Real-data witnesses (all read-only):
 Unified witnesses: the `base` and `appearance` fixtures in `tests/fixtures/unified_h5_v1`, decoded with `emit_fixture`.
 
 ---
+
+## Decision (2026-10-12): no adapter
+
+Jeremy decided that new (unified) recordings are **not** converted into the
+legacy stimulus layout. D1's recommended architecture (unified → canonical-v5
+derivative H5 → unchanged `import_stimulus_to_zarr`) will not be built.
+
+- **Why:** an adapter carries legacy semantics forward into new data. That
+  includes the trigger-ID frame alignment, which was one frame late on legacy
+  recordings (see the D12 amendment), and the bare, ambiguous frame-id names
+  that the frame-identity contract (agent-contracts #84) removes. A second
+  file format kept alive for every new recording is also a lasting cost.
+- **Instead:** Palette reads unified recordings natively. Stimulus, event,
+  step and chaser data join to camera frames only through the `/correspondence/*`
+  tables. Examples: the driving-frame and display-candidate columns (PRs #371,
+  #374) and pose observations (PR #375). Legacy readers stay for frozen
+  legacy files only.
+- **What remains useful here:** the main table and the NO-LEGACY-HOME list,
+  as a crosswalk when a native reader needs the unified home of a legacy
+  field. Read D2–D13 as the adapter's design record. They do not bind native
+  readers, except the D12 amendment's frame rules, which apply to every
+  reader.
 
 ## Summary
 
@@ -266,7 +290,8 @@ Totals: 41 EXACT, 8 EXACT-narrow, 7 DERIVED. The collapse is lossy for `target_s
 
 ## Design decisions for the adapter
 
-- **D1. Architecture.** Recommended: **unified (read from the native candidate via `load_unified_stimulus_candidate`) → write a canonical-v5-shaped derivative H5 → run the unchanged `import_stimulus_to_zarr`.** This mirrors `utils/migrate_legacy_goodbatbadbat_stimulus_h5.py`, whose job it replaces. Why:
+- **D1. Architecture. Superseded 2026-10-12: no adapter (see the
+  decision at the top).** Original recommendation, kept for the record: **unified (read from the native candidate via `load_unified_stimulus_candidate`) → write a canonical-v5-shaped derivative H5 → run the unchanged `import_stimulus_to_zarr`.** This mirrors `utils/migrate_legacy_goodbatbadbat_stimulus_h5.py`, whose job it replaces. Why:
   - it reuses the ~11k LOC coordinate, calibration, physical, selector and publication contract verbatim;
   - `source_h5` keeps pointing at a file with legacy paths, so the three re-open consumers keep working (B3);
   - consolidation and verification stay identical.
@@ -331,6 +356,29 @@ Totals: 41 EXACT, 8 EXACT-narrow, 7 DERIVED. The collapse is lossy for `target_s
   and then as a versioned alignment method stamped on each run, with cohort
   analyses refusing to mix versions silently. The code cost of a switch is
   small (about 5 consumers read these fields); the cost is comparability.
+- **D12 amendment (2026-10-11): do not reproduce the legacy alignment.**
+  Measured on every legacy recording with bounding-box payloads (212 of 212,
+  100% of payloads), Citrus's camera frame id (`triggering_camera_frame_id`,
+  events `camera_frame_id`, `payload_frame_id`) is Orange's 1-based
+  `recording_frame_id`. The legacy aligner (`camera_to_metadata_index`,
+  `chaser_distance_runs._load_frame_alignment`) indexes it as a 0-based frame,
+  so it pairs every stimulus state with the camera frame after the one that
+  drove it. The adapter must therefore not copy that alignment "bit-for-bit".
+  It uses `/correspondence/frames/sources` (`source_acquisition_frame_index =
+  recording_frame_id - 1`), which the canonical coordinate path already uses.
+  Cross-cohort comparability with legacy-aligned results is not worth
+  inheriting a known one-frame error. New recordings are the priority; legacy
+  re-alignment is optional. Legacy event and step frames read through
+  `fisheye.shared.citrus_camera_frame_id`. **Unified recordings must not use
+  that rule (measured 2026-10-12).** There the trigger columns are Citrus's IPC
+  frame counter, documented as "not authoritative Orange acquisition
+  correspondence". On the twelve 2026-10-09 snow sessions it runs ahead of
+  `recording_frame_id` by a constant per session (117,216, 599,708 and
+  1,221,206 frames). The adapter maps event and step frames through
+  `/correspondence/frames/sources` by `stimulus_frame_num`, never by trigger
+  id. Display time (when a state was
+  handed to the projector) is a separate column from this causal mapping; see
+  Citrus `/timing/display_submissions/frame_submissions`.
 - **D13. Capacity: one dataset per table, streamed (decided 2026-09-23).**
   Citrus has removed the whole-table 64 MiB / 2,000,000-row limits (commits
   78f835f and df2747b on `agent/unified-h5-streamed-correspondence-20260923`,

@@ -129,8 +129,13 @@ class ApplyEffectsWorker:
         backoff_seconds: tuple[float, ...] = RETRY_BACKOFF_SECONDS,
         lock_timeout_seconds: float = 30.0,
         idle_poll_seconds: float = IDLE_POLL_SECONDS,
+        assignee_user: str | None = None,
     ) -> None:
         self.store = store
+        # A fixed-user server drains only Applies on its user's recordings, so
+        # several per-user servers can share one store without contending for
+        # (or refreshing the wrong server's sessions after) each other's work.
+        self.assignee_user = str(assignee_user) if assignee_user else None
         self.refresh_registry = refresh_registry
         self.on_complete = on_complete
         self.notify = notify
@@ -191,6 +196,10 @@ class ApplyEffectsWorker:
                 run_key = ("task", str(receipt["task_id"]))
             if run_key in blocked_runs:
                 continue
+            if self.assignee_user is not None:
+                assignment = self.store.get_assignment(str(receipt.get("recording_id") or ""))
+                if (assignment or {}).get("assignee_user") != self.assignee_user:
+                    continue
             last = latest_effects_attempt(self.store, task_id=str(receipt["task_id"]), apply_id=str(receipt["apply_id"]))
             if last.get("status") == "refused":
                 blocked_runs.add(run_key)
@@ -250,6 +259,10 @@ class ApplyEffectsWorker:
                 timeout_seconds=self.lock_timeout_seconds,
             ):
                 owed = [row for row in pending_mask_run_effects(self.store, runtime) if row["apply_id"] == apply_id]
+                if not owed:
+                    # Another worker (or the inline retry) finished it while this one waited.
+                    self._record_attempt(receipt, status="already_complete", attempt=attempt, completed_at_utc=_utc(time.time()))
+                    return True
                 if owed:
                     require_mask_apply_ownership(self.store, runtime, apply_id)
                     run_apply_effects_locked(
@@ -405,6 +418,7 @@ def start_worker_for_state(state, *, refresh_registry: Callable[..., bool]) -> A
     worker = ApplyEffectsWorker(
         state.store,
         refresh_registry=refresh_registry,
+        assignee_user=state.config.fixed_user,
         on_complete=lambda zarr_path, run: refresh_live_runtimes(state.subject_mask_sessions, zarr_path, run),
         notify=lambda receipt, after: notify_admins_of_failure(
             state.store, state.config.admin_users, receipt, after,

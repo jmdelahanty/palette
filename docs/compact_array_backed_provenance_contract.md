@@ -4,7 +4,7 @@
 version: 1
 status: active
 implementation: implemented
-last_verified: 2026-08-20
+last_verified: 2026-11-12
 decision_date: 2026-08-20
 scope: provider-aware selection-trajectory-occupancy-contrast chain
 -->

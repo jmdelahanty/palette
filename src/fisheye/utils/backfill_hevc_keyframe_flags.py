@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.recording_manifest_seal import require_unsealed_recording_manifest
 
 try:
     from fisheye.diagnostics.video.container import check_hevc_keyframe_flags
@@ -229,6 +230,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.apply:
             payload["hevc_keyframe_flags"] = scan_payload if scan_payload else None
             try:
+                require_unsealed_recording_manifest(
+                    manifest_path, tool="fisheye.utils.backfill_hevc_keyframe_flags"
+                )
                 manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             except Exception as exc:
                 print(f"ERROR {manifest_path}: failed to write JSON ({exc})")

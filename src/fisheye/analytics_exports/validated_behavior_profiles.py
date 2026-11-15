@@ -18,12 +18,17 @@ from .validated_behavior_contracts import (
     ValidatedBehaviorTableSpec,
 )
 from .validated_behavior_core_behavior_adapters import (
+    build_core_behavior_bout_frame_clock_row_extractors,
     build_core_behavior_bout_row_extractors,
     build_core_behavior_row_extractors,
 )
 from .validated_behavior_bout_kinematics_contracts import (
     BOUT_KINEMATICS_EXPORT_PROFILE_ID,
     BOUT_KINEMATICS_EXPORT_TABLE_SPECS,
+)
+from .validated_behavior_frame_clock_contracts import (
+    FRAME_CLOCK_EXPORT_PROFILE_ID,
+    FRAME_CLOCK_EXPORT_TABLE_SPECS,
 )
 from .validated_behavior_core_behavior_contracts import (
     CORE_BEHAVIOR_EXPORT_PROFILE_ID,
@@ -130,6 +135,13 @@ INSTALLED_VALIDATED_BEHAVIOR_PROFILES: Mapping[str, ValidatedBehaviorExportProfi
                 profile_id=BOUT_KINEMATICS_EXPORT_PROFILE_ID,
                 table_specs=BOUT_KINEMATICS_EXPORT_TABLE_SPECS,
                 row_extractor_factory=build_core_behavior_bout_row_extractors,
+            ),
+            FRAME_CLOCK_EXPORT_PROFILE_ID: ValidatedBehaviorExportProfile(
+                profile_id=FRAME_CLOCK_EXPORT_PROFILE_ID,
+                table_specs=FRAME_CLOCK_EXPORT_TABLE_SPECS,
+                row_extractor_factory=(
+                    build_core_behavior_bout_frame_clock_row_extractors
+                ),
             ),
             CORE_CHASER_EXPORT_PROFILE_ID: ValidatedBehaviorExportProfile(
                 profile_id=CORE_CHASER_EXPORT_PROFILE_ID,

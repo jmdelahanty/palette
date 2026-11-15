@@ -3,7 +3,7 @@
 version: 4
 status: active
 implementation: implemented
-last_verified: 2026-08-06
+last_verified: 2026-10-28
 -->
 
 Purpose: define the current contract for exporting one merged detection-training

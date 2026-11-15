@@ -24,6 +24,8 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from fisheye.shared.orange_frame_identity import keyframe_video_frame_indices
+
 
 MODULE_NAME = "fisheye.utils.plan_orange_style_clips"
 DEFAULT_TARGET_DURATION_MINUTES = 30.0
@@ -181,7 +183,8 @@ def load_keyframe_summary(path: str | Path) -> KeyframeSummary:
         raise ValueError(f"Expected keyframe JSON object: {keyframe_path}")
     total_frames = _coerce_int(payload.get("total_frames"), field="total_frames")
     fps = _coerce_float(payload.get("fps"), field="fps")
-    raw_keyframes = payload.get("keyframe_frames")
+    # frame_identity_v1: keyframe_video_frame_indices (adopted) or keyframe_frames.
+    raw_keyframes = keyframe_video_frame_indices(payload, label=str(keyframe_path))
     if not isinstance(raw_keyframes, list) or not raw_keyframes:
         raise ValueError(f"Keyframe JSON has no keyframe_frames list: {keyframe_path}")
     keyframes = np.asarray([_coerce_int(v, field="keyframe_frames[]") for v in raw_keyframes], dtype=np.int64)

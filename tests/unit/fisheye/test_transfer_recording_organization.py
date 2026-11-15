@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
+import stat
 
 import h5py
 import pytest
@@ -254,6 +256,31 @@ def test_failed_optional_proof_is_refused_not_discarded(tmp_path):
         _plan(source, tmp_path / "recordings")
 
 
+def _unified_declaring_h5(path: Path) -> None:
+    """An H5 that declares the unified profile; admission is stubbed by callers.
+
+    New transfer-v2 deliveries refuse legacy H5s (test_transfer_v2_legacy_h5_refusal),
+    so the plan's camera/session mapping guards are exercised through the
+    unified route. Real unified admission is covered in test_unified_transfer_receipts.
+    """
+    from fisheye.shared.unified_h5 import PROFILE
+
+    with h5py.File(path, "w") as h5:
+        h5.create_group("metadata/session").attrs["recording_artifact_profile"] = PROFILE
+
+
+def _stub_unified_context(monkeypatch, camera, session, **extra) -> None:
+    monkeypatch.setattr(
+        organizer,
+        "_unified_h5_context",
+        lambda _source, relative, _inventory, _contexts: (
+            camera,
+            {"session_uuid": session, **extra},
+            f"receipts/{Path(relative).stem}.json",
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     "camera,session",
     [
@@ -263,14 +290,13 @@ def test_failed_optional_proof_is_refused_not_discarded(tmp_path):
         (None, "fixture-session"),
     ],
 )
-def test_h5_mapping_uses_exact_context_not_filename(tmp_path, camera, session):
+def test_h5_mapping_uses_exact_context_not_filename(
+    tmp_path, monkeypatch, camera, session
+):
     source = _source(tmp_path)
     h5_path = source / "unhelpful_filename.h5"
-    with h5py.File(h5_path, "w") as h5:
-        h5.attrs["session_uuid"] = session
-        if camera is not None:
-            h5.attrs["camera_id"] = camera
-        h5.attrs["rig_id"] = "synthetic-rig"
+    _unified_declaring_h5(h5_path)
+    _stub_unified_context(monkeypatch, camera, session, rig_id="synthetic-rig")
     _resign(source)
     if camera != "02010093" or session != "fixture-session":
         with pytest.raises(ValueError, match="H5"):
@@ -289,12 +315,11 @@ def test_h5_mapping_uses_exact_context_not_filename(tmp_path, camera, session):
         assert parent["producer_context"]["rig_id"] == "synthetic-rig"
 
 
-def test_duplicate_h5_for_one_parent_refuses_ambiguity(tmp_path):
+def test_duplicate_h5_for_one_parent_refuses_ambiguity(tmp_path, monkeypatch):
     source = _source(tmp_path)
     for name in ("one.h5", "two.hdf5"):
-        with h5py.File(source / name, "w") as h5:
-            h5.attrs["camera_id"] = "02010093"
-            h5.attrs["session_uuid"] = "fixture-session"
+        _unified_declaring_h5(source / name)
+    _stub_unified_context(monkeypatch, "02010093", "fixture-session")
     _resign(source)
     with pytest.raises(ValueError, match="multiple H5"):
         _plan(source, tmp_path / "recordings")
@@ -553,7 +578,8 @@ def test_prepare_manifest_failure_is_recoverable_without_source_retirement(
     assert _bytes(source) == before
 
 
-def test_prepare_refuses_an_incomplete_index_and_preserves_recovery_evidence(tmp_path):
+def test_prepare_sets_aside_an_incomplete_index_and_rebuilds_it(tmp_path):
+    # An attempt that died while building left an index without its manifest.
     source = _source(tmp_path)
     plan = _plan(source, tmp_path / "recordings")
     organizer.materialize_transfer_organization(plan)
@@ -561,12 +587,61 @@ def test_prepare_refuses_an_incomplete_index_and_preserves_recovery_evidence(tmp
     index.mkdir(parents=True)
     (index / "recording_frame_index.parquet").write_bytes(b"interrupted index")
     before = _bytes(source)
-    with pytest.raises((ValueError, FileNotFoundError), match="index"):
-        organizer.prepare_transfer_parent_recordings(plan)
+
+    state = organizer.prepare_transfer_parent_recordings(plan)
+
     assert _bytes(source) == before
-    assert (
-        index / "recording_frame_index.parquet"
-    ).read_bytes() == b"interrupted index"
+    assert (index / organizer.INDEX_MANIFEST_NAME).is_file()
+    [record] = state["incomplete_indexes_set_aside"]
+    assert record["from"] == str(index) and record["files"] == ["recording_frame_index.parquet"]
+    kept = Path(record["to"])
+    assert kept.parent == organizer._state_directory(plan) / "incomplete_indexes"
+    assert (kept / "recording_frame_index.parquet").read_bytes() == b"interrupted index"
+
+
+def test_prepare_resumes_after_a_kill_during_the_index_build(tmp_path, monkeypatch):
+    from fisheye.utils import build_transfer_parent_frame_index as builder
+
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    real = builder.build_transfer_parent_frame_index
+    calls = {"n": 0}
+
+    def killed_once(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            out = Path(kwargs["output_dir"])
+            out.mkdir(parents=True)
+            (out / "clip_000000_projection.json").write_text("{}")
+            raise KeyboardInterrupt("bkill during the index build")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(builder, "build_transfer_parent_frame_index", killed_once)
+    with pytest.raises(KeyboardInterrupt):
+        organizer.prepare_transfer_parent_recordings(plan)
+    state = organizer.prepare_transfer_parent_recordings(plan)
+    assert state["parent_manifests_prepared"] is True
+    assert len(state["incomplete_indexes_set_aside"]) == 1
+    for parent in plan["parents"]:
+        assert (Path(parent["destination_dir"]) / "recording_manifest.json").is_file()
+
+
+def test_prepare_refuses_a_complete_index_that_does_not_verify(tmp_path):
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    organizer.prepare_transfer_parent_recordings(plan)
+    index = Path(plan["parents"][0]["destination_dir"]) / organizer.INDEX_DIRECTORY
+    parquet = index / "recording_frame_index.parquet"
+    parquet.chmod(0o644)
+    parquet.write_bytes(parquet.read_bytes() + b"tampered")
+    state_file = organizer._state_directory(plan) / "organization_state.json"
+    state = json.loads(state_file.read_text())
+    state.pop("parent_manifests_prepared", None)
+    state_file.chmod(0o644)
+    state_file.write_text(json.dumps(state))
+    with pytest.raises(ValueError, match="digest differs"):
+        organizer.prepare_transfer_parent_recordings(plan)
+    assert not (organizer._state_directory(plan) / "incomplete_indexes").exists()
 
 
 def _prepared_with_admission_stub(tmp_path, monkeypatch):
@@ -609,6 +684,37 @@ def test_verified_retirement_empties_only_source_and_preserves_every_destination
             )
             assert path.read_bytes() == before[item["source"]["path"]]
     assert organizer.finalize_transfer_staging(plan) == result
+
+
+def test_completed_replay_accepts_a_removed_empty_staging_folder(tmp_path, monkeypatch):
+    # The registrar removes the empty folder after registration; replaying
+    # the completed delivery must still verify every copy and receipt.
+    source, plan = _prepared_with_admission_stub(tmp_path, monkeypatch)
+    result = organizer.finalize_transfer_staging(plan)
+    source.rmdir()
+    with organizer.transfer_parent_workflow_lock(plan):
+        assert organizer.finalize_transfer_staging(plan) == result
+
+
+def test_completed_replay_refuses_a_replaced_staging_folder(tmp_path, monkeypatch):
+    source, plan = _prepared_with_admission_stub(tmp_path, monkeypatch)
+    organizer.finalize_transfer_staging(plan)
+    # Create the replacement while the original still exists, so it cannot
+    # reuse the original's inode (rmdir then mkdir can, depending on the
+    # filesystem).
+    retired = source.with_name(source.name + ".retired")
+    source.rename(retired)
+    source.mkdir()
+    retired.rmdir()
+    with pytest.raises(ValueError, match="directory ownership lost"):
+        organizer.finalize_transfer_staging(plan)
+
+
+def test_missing_staging_folder_is_refused_before_completion(tmp_path, monkeypatch):
+    source, plan = _prepared_with_admission_stub(tmp_path, monkeypatch)
+    shutil.rmtree(source)
+    with pytest.raises((ValueError, OSError)):
+        organizer.finalize_transfer_staging(plan)
 
 
 @pytest.mark.parametrize(
@@ -821,3 +927,250 @@ def test_unverifiable_or_contradicted_keyframes_refuse_before_manifest(
         organizer.prepare_transfer_parent_recordings(plan, batch_rows=1)
     for parent in plan["parents"]:
         assert not (Path(parent["destination_dir"]) / "recording_manifest.json").exists()
+
+
+def test_directory_sync_stops_at_the_filesystem_boundary(tmp_path: Path, monkeypatch) -> None:
+    # /groups is an automount root on its own device; fsync on it returns
+    # EINVAL, which failed every real intake into /groups (2026-10-07).
+    deep = tmp_path / "groups" / "lab" / "recordings" / ".transfer_intake"
+    deep.mkdir(parents=True)
+    mount = tmp_path / "groups"
+    synced = []
+
+    def fsync_directory(path: Path) -> None:
+        if path in (mount, *mount.parents):
+            raise OSError(22, "Invalid argument")
+        synced.append(path)
+
+    def device(path: Path) -> int:
+        return 2 if path in (mount, *mount.parents) else 1
+
+    monkeypatch.setattr(organizer, "_fsync_directory", fsync_directory)
+    monkeypatch.setattr(organizer, "_device", device)
+    organizer._sync_directory_chain(deep)
+    assert synced == [deep, deep.parent, deep.parent.parent]
+
+
+def test_publication_flush_stops_at_the_filesystem_boundary(tmp_path: Path, monkeypatch) -> None:
+    # The pre-retirement durability barrier also walked every parent to "/",
+    # and fsync of the /groups automount root returns EINVAL (2026-10-07).
+    mount = tmp_path / "groups"
+    root = mount / "lab" / "recording"
+    (root / "zarr").mkdir(parents=True)
+    (root / "zarr" / "payload.bin").write_bytes(b"x")
+    plan = {"parents": [{"destination_dir": str(root), "identity": {"recording_id": "r"}}]}
+    state = {"parent_directory_identities": {"r": organizer._directory_identity(root)}}
+    synced = []
+
+    def fsync_directory(path: Path) -> None:
+        if path in (mount, *mount.parents):
+            raise OSError(22, "Invalid argument")
+        synced.append(path)
+
+    monkeypatch.setattr(organizer, "_fsync_directory", fsync_directory)
+    monkeypatch.setattr(organizer, "_device", lambda path: 2 if path in (mount, *mount.parents) else 1)
+    organizer._flush_parent_publications(plan, state)
+    assert set(synced) == {root / "zarr", root, root.parent}
+
+
+def _declare_realtime_products(root: Path, *, drop_file: str | None = None) -> dict[str, list[str]]:
+    """Add per-camera realtime product files and their declaration, then reseal."""
+
+    template = json.loads(
+        (FIXTURES.parent / "orange_realtime_products_v2" / "realtime_products.json").read_text()
+    )["cameras"]["2010093"]
+    session_path = root / "recording_session.json"
+    session = json.loads(session_path.read_bytes())
+    cameras: dict[str, dict] = {}
+    owned: dict[str, list[str]] = {}
+    for camera in session["cameras"]:
+        products = json.loads(json.dumps(template))
+        names = []
+        for group in (
+            products["detections"]["files"], products["pose"]["files"],
+            products["crop_files"], products["acquisition_files"],
+        ):
+            for item in group:
+                name = item["path"].replace("Cam2010093", f"Cam{camera}")
+                data = f"{camera} {item['role']} {name}\n".encode()
+                (root / name).write_bytes(data)
+                item.update(path=name, size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+                names.append(name)
+        cameras[camera] = products
+        owned[camera] = names
+    block = json.loads(
+        (FIXTURES.parent / "orange_realtime_products_v2" / "realtime_products.json").read_text()
+    )
+    block["cameras"] = cameras
+    session["realtime_products"] = block
+    session_path.write_bytes(transfer.canonical_bytes(session))
+    if drop_file is not None:
+        (root / drop_file).unlink()
+    _resign(root)
+    return owned
+
+
+def test_declared_realtime_products_go_only_to_their_camera(tmp_path):
+    source = _source(tmp_path)
+    owned = _declare_realtime_products(source)
+    plan = _plan(source, tmp_path / "recordings")
+    by_path = {item["source"]["path"]: item for item in plan["files"]}
+    recording = {p["identity"]["camera_id"]: p["identity"]["recording_id"] for p in plan["parents"]}
+    for camera, names in owned.items():
+        for name in names:
+            item = by_path[name]
+            assert (item["role"], item["camera_id"]) == ("camera_realtime_product", camera)
+            assert [t["recording_id"] for t in item["destinations"]] == [recording[camera]]
+            assert item["destinations"][0]["relative_path"] == f"raw/acquisition/{name}"
+    # Undeclared session files still go to every camera.
+    assert len(by_path["recording_session.json"]["destinations"]) == len(owned)
+
+
+def test_a_declared_but_undelivered_file_is_refused(tmp_path):
+    source = _source(tmp_path)
+    owned = _declare_realtime_products(source, drop_file=None)
+    missing = owned["02010093"][0]
+    (source / missing).unlink()
+    _resign(source)
+    with pytest.raises(ValueError, match="declared realtime product is not delivered"):
+        _plan(source, tmp_path / "recordings")
+
+
+def test_a_declaration_for_other_cameras_is_refused(tmp_path):
+    source = _source(tmp_path)
+    _declare_realtime_products(source)
+    session_path = source / "recording_session.json"
+    session = json.loads(session_path.read_bytes())
+    cameras = session["realtime_products"]["cameras"]
+    cameras["2099999"] = cameras.pop("02010094")
+    session_path.write_bytes(transfer.canonical_bytes(session))
+    _resign(source)
+    with pytest.raises(ValueError, match="declares cameras"):
+        _plan(source, tmp_path / "recordings")
+
+
+def test_sessions_without_a_declaration_keep_session_context(tmp_path):
+    source = _source(tmp_path)
+    plan = _plan(source, tmp_path / "recordings")
+    assert not any(item["role"] == "camera_realtime_product" for item in plan["files"])
+
+
+def test_realtime_products_materialize_and_retire_per_camera(tmp_path, monkeypatch):
+    source = _source(tmp_path)
+    owned = _declare_realtime_products(source)
+    plan = _plan(source, tmp_path / "recordings")
+    organizer.prepare_transfer_parent_recordings(plan)
+    monkeypatch.setattr(
+        organizer, "_verify_parent_imports",
+        lambda *args, **kwargs: {"fixture": "admission_stub_not_authority_evidence"},
+    )
+    assert organizer.finalize_transfer_staging(plan)["status"] == "complete"
+    folders = {p["identity"]["camera_id"]: Path(p["destination_dir"]) for p in plan["parents"]}
+    for camera, names in owned.items():
+        for name in names:
+            for other, folder in folders.items():
+                present = (folder / "raw/acquisition" / name).is_file()
+                assert present is (other == camera), (name, other)
+
+
+def _also_declare(root: Path, camera: str, path: str) -> None:
+    """Declare one delivered file under a camera's realtime crop_files, then reseal."""
+
+    session_path = root / "recording_session.json"
+    session = json.loads(session_path.read_bytes())
+    crop_files = session["realtime_products"]["cameras"][camera]["crop_files"]
+    data = (root / path).read_bytes()
+    crop_files.append(
+        {
+            **crop_files[0],
+            "path": path,
+            "size_bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    )
+    session_path.write_bytes(transfer.canonical_bytes(session))
+    _resign(root)
+
+
+def test_a_declared_file_that_is_its_cameras_own_output_keeps_its_placement(tmp_path):
+    # Orange declares each camera's crop metadata CSV under crop_files, and the
+    # same file is that camera's clip output (the 2026_10_09 snow sessions). It
+    # keeps its output placement; a different owner still refuses (above).
+    source = _single_video_source(tmp_path)
+    _declare_realtime_products(source)
+    _also_declare(source, "02010093", "Cam02010093_full.csv")
+    plan = _plan(source, tmp_path / "recordings")
+    item = next(i for i in plan["files"] if i["source"]["path"] == "Cam02010093_full.csv")
+    assert (item["role"], item["camera_id"]) == ("camera_output", "02010093")
+    assert [t["relative_path"] for t in item["destinations"]] == ["cams/acquisition/Cam02010093_full.csv"]
+
+
+def _mount_as_nfs(monkeypatch, mount: Path, device: int) -> None:
+    text = (
+        f"99 22 {os.major(device)}:{os.minor(device)} / {mount} rw - "
+        "nfs4 prfs.hhmi.org:/groups/johnson rw\n"
+    )
+    monkeypatch.setattr(organizer, "_mountinfo_text", lambda: text)
+
+
+def _renumber_devices(monkeypatch, device: int) -> None:
+    """Another NFS client host: every directory inode is the same, its st_dev differs."""
+    real_lstat, real_fstat = Path.lstat, os.fstat
+
+    def renumbered(result):
+        if not stat.S_ISDIR(result.st_mode):
+            return result
+        values = list(result)
+        values[2] = device
+        return os.stat_result(values)
+
+    monkeypatch.setattr(Path, "lstat", lambda self: renumbered(real_lstat(self)))
+    monkeypatch.setattr(os, "fstat", lambda fd: renumbered(real_fstat(fd)))
+
+
+def test_materialization_resumes_on_another_nfs_client_host(tmp_path, monkeypatch):
+    # 2026-10-28: six deliveries reserved in a batch job (st_dev 98) refused
+    # "directory ownership lost" when their retry ran on another node.
+    root = tmp_path.resolve()
+    source = _source(root)
+    plan = _plan(source, root / "recordings")
+    _mount_as_nfs(monkeypatch, root, root.lstat().st_dev)
+    first = organizer.materialize_transfer_organization(plan)
+    state = json.loads(
+        (organizer._state_directory(plan) / "organization_state.json").read_bytes()
+    )
+    assert state["schema_id"] == "palette.transfer_organization_state.v2"
+    assert state["source_directory_identity"]["filesystem"]["kind"] == "nfs_export"
+
+    _renumber_devices(monkeypatch, 98)
+    _mount_as_nfs(monkeypatch, root, 98)
+    assert organizer.materialize_transfer_organization(plan) == first
+
+
+def test_a_v1_state_resumes_on_another_nfs_client_host(tmp_path, monkeypatch):
+    root = tmp_path.resolve()
+    source = _source(root)
+    plan = _plan(source, root / "recordings")
+    organizer.materialize_transfer_organization(plan)
+    # The pre-v2 grammar, as a batch node recorded it ([st_dev, st_ino]).
+    path = organizer._state_directory(plan) / "organization_state.json"
+    state = json.loads(path.read_bytes())
+
+    def v1(identity):
+        return [98, identity["st_ino"]]
+
+    state["schema_id"] = "palette.transfer_organization_state.v1"
+    state["state_directory_identity"] = v1(state["state_directory_identity"])
+    state["source_directory_identity"] = v1(state["source_directory_identity"])
+    state["parent_directory_identities"] = {
+        key: v1(value) for key, value in state["parent_directory_identities"].items()
+    }
+    path.write_text(json.dumps(state))
+
+    with pytest.raises(Exception, match="directory ownership lost"):
+        organizer.materialize_transfer_organization(plan)
+    _mount_as_nfs(monkeypatch, root, root.lstat().st_dev)
+    assert organizer.materialize_transfer_organization(plan)["status"] == "materialized"
+    resumed = json.loads(path.read_bytes())
+    # Historical evidence is never rewritten into the new grammar.
+    assert resumed["source_directory_identity"] == state["source_directory_identity"]

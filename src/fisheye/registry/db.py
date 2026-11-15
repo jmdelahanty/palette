@@ -40,7 +40,12 @@ from fisheye.shared.subject_metadata import (
 from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
 from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from .analytics_reports import RegistryAnalyticsReportMixin
-from .extractors.acquisition_video_streams import _extract_acquisition_video_stream_rows
+from .realtime_products import RegistryRealtimeProductsMixin
+from .extractors.acquisition_video_streams import (
+    _extract_acquisition_video_stream_rows,
+    collection_video_facts,
+)
+from .extractors.realtime_products import extract_realtime_product_rows
 from .extractors.chaser_metadata import extract_recording_chaser_metadata
 from .extractors.stimulus_metadata import extract_stimulus_metadata
 from .extractors.crop import _extract_crop_quality_rows
@@ -890,6 +895,13 @@ def _extract_acquisition(root: zarr.Group) -> Dict[str, Any]:
         if isinstance(compressor, dict):
             compression_name = compressor.get("name")
             compression_level = _as_int(compressor.get("clevel"))
+    collection = collection_video_facts(root)
+    if fps is None:
+        fps = collection.get("fps")
+    if video_codec is None:
+        video_codec = collection.get("codec")
+    if video_pix_fmt is None:
+        video_pix_fmt = collection.get("pix_fmt")
     if has_images_ds and "gray" not in downsample_formats:
         downsample_formats.append("gray")
     if has_images_ds_rgb and "rgb" not in downsample_formats:
@@ -1024,7 +1036,9 @@ def _normalize_zarr_use(value: Any) -> Optional[str]:
     if text is None:
         return None
     norm = text.lower()
-    if norm in {"training", "analysis", "inference", "export", "archive"}:
+    # recovered_training: selector-ineligible recovered derivatives
+    # (register_recovered_training_archives); never selected as training.
+    if norm in {"training", "analysis", "inference", "export", "archive", "recovered_training"}:
         return norm
     if norm in {"production"}:
         return "analysis"
@@ -1218,6 +1232,7 @@ def _build_detection_source_records(root: zarr.Group) -> List[Dict[str, Any]]:
 class Registry(
     RegistryAcquisitionBatchMixin,
     RegistryAnalyticsReportMixin,
+    RegistryRealtimeProductsMixin,
     RegistryRecordingIdentityMixin,
     RegistryMigrationMixin,
 ):
@@ -1334,13 +1349,9 @@ class Registry(
         return row is not None
 
     def _record_schema_version(self, *, version: int, name: str) -> None:
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO schema_version (version, name, applied_utc)
-            VALUES (?, ?, ?);
-            """,
-            (int(version), str(name), _utc_now()),
-        )
+        from .migrations import record_schema_version
+
+        record_schema_version(self.conn, version=version, name=name, applied_utc=_utc_now())
 
     def _apply_schema_migrations(self) -> None:
         migrations = sorted(self._schema_migrations(), key=lambda item: item[0])
@@ -2509,6 +2520,15 @@ class Registry(
             "last_seen_utc": now,
             "status": "active",
         }
+        # B7: receipt-bound rows are owned by the recording identity authority.
+        explicit = dict(session_uuid=session_uuid, recording_id=recording_id, artifact_kind=artifact_kind)
+        explicit.update(zarr_origin=_normalize_zarr_origin(zarr_origin), zarr_use=_normalize_zarr_use(zarr_use))
+        explicit.update({key: payload[key] for key in payload if key.startswith("source_")})
+        if self.refuse_or_touch_verified_source_dataset(dataset_id, zarr_path=zarr_path, explicit=explicit):
+            return
+        self.refuse_conflicting_verified_source_identity(
+            recording_id=resolved_recording_id, session_uuid=session_uuid, writer="upsert_dataset"
+        )
         self.conn.execute(
             """
             INSERT INTO datasets (
@@ -2595,6 +2615,8 @@ class Registry(
             "created_utc": now,
             "updated_utc": now,
         }
+        if self.refuse_verified_source_recording_change(payload):
+            return
         self.conn.execute(
             """
             INSERT INTO recordings (
@@ -6578,7 +6600,15 @@ class Registry(
             raise RecordingIdentityAuthorityError(
                 "current source root is missing required recording context"
             )
-        if recording_context:
+        # B7: a derived artifact sharing a verified-source recording_id gets its
+        # own dataset row; recording-level rows stay owned by the authority.
+        derived_of_verified_source = not authoritative_current_source and (
+            self.refuse_conflicting_verified_source_identity(
+                recording_id=recording_id, session_uuid=metadata.session_uuid, writer="register_from_root"
+            )
+            is not None
+        )
+        if recording_context and not derived_of_verified_source:
             if authoritative_current_source:
                 if (
                     recording_id is None
@@ -6609,18 +6639,22 @@ class Registry(
             acquisition=acquisition,
             zarr_purpose=metadata.zarr_purpose,
         )
-        self.upsert_subject_snapshot_entities(
-            dataset_id,
-            recording_id=recording_id,
-            snapshot=snapshot,
-            snapshot_source=snapshot_source,
-            require_existing_recording=authoritative_current_source,
-        )
+        if not derived_of_verified_source:
+            self.upsert_subject_snapshot_entities(
+                dataset_id,
+                recording_id=recording_id,
+                snapshot=snapshot,
+                snapshot_source=snapshot_source,
+                require_existing_recording=authoritative_current_source,
+            )
         self.replace_detection_sources(dataset_id, _build_detection_source_records(root))
         acquisition_rows = _extract_acquisition_video_stream_rows(
             root, zarr_path=zarr_path, recording_id=recording_id, zarr_use=zarr_use
         )
         self.replace_acquisition_video_streams(dataset_id, acquisition_rows)
+        self.replace_recording_realtime_products(
+            dataset_id, extract_realtime_product_rows(root, recording_id=recording_id)
+        )
         chaser_metadata = extract_recording_chaser_metadata(
             root,
             zarr_path=zarr_path,

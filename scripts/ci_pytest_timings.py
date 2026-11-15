@@ -32,6 +32,17 @@ RUNTIME_DEPENDENCIES_BY_TEST = {
         "tests/unit/fisheye/test_refine_online_coordinate_publication.py",
     )
 }
+RUNTIME_DEPENDENCIES_BY_TEST.update(
+    {
+        path: ("tests/unit/fisheye/mask_tail_apply_refresh_cases.py",)
+        for path in (
+            "tests/unit/fisheye/test_mask_tail_apply_refresh.py",
+            "tests/unit/fisheye/test_mask_tail_apply_refresh_acceptance.py",
+            "tests/unit/fisheye/test_mask_tail_apply_refresh_browser_tasks.py",
+            "tests/unit/fisheye/test_mask_tail_apply_refresh_keypoint_batch.py",
+        )
+    }
+)
 
 
 def _sha256_file(path: Path) -> bytes:

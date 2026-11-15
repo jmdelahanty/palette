@@ -18,36 +18,40 @@ from fisheye.utils import organize_transfer_recordings as organizer
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures/recording_transfer_v2"
 REPOSITORY = Path(__file__).resolve().parents[3]
 
-# Exercise the real public workflow, preparation, command runner and lease.
-# Replace only the importer command's payload, never its descriptor handling.
+# Exercise the real public workflow, preparation and lease. The import owner
+# runs in-process (review F1); its one child writer, the stimulus importer, is
+# lent the lease through PALETTE_RECORDING_IMPORT_LEASE_FD. Replace only that
+# child's payload with a harmless writer spawned the owner's way.
 SUPERVISOR = (
     r"""
 import json
 from pathlib import Path
+import subprocess
 import sys
-from fisheye.utils import citrus_transfer_parent_workflow as workflow
+from fisheye.utils import import_recording_analysis as importer
 from fisheye.utils import run_citrus_session_import as runner
 
 worker = """
     + repr(
         "import os, sys, time\n"
         "from pathlib import Path\n"
-        "print(os.getpid(), flush=True)\n"
+        "Path(sys.argv[2]).write_text(str(os.getpid()))\n"
         "release = Path(sys.argv[1])\n"
         "deadline = time.monotonic() + 20\n"
         "while not release.exists() and time.monotonic() < deadline:\n"
         "    time.sleep(0.02)\n"
     )
     + r"""
-actual_run_command = runner._run_command
 
-def harmless_writer(command, *, name, run_dir, **kwargs):
-    return actual_run_command(
-        [sys.executable, "-c", worker, sys.argv[2]],
-        name=name, run_dir=run_dir, **kwargs,
+def harmless_stimulus_writer(plan, options, **_):
+    subprocess.run(
+        [sys.executable, "-c", worker, sys.argv[2], sys.argv[3]],
+        check=False,
+        pass_fds=importer._stimulus_import_lease_fds(),
     )
+    return importer.RecordingImportResult(ok=False, failed_step="stimulus", error="fixture")
 
-workflow._run_command = harmless_writer
+importer.process_recording_import = harmless_stimulus_writer
 # The pinned transfer fixture's MP4s are text placeholders (see its README);
 # the real sync-sample check runs against real H264 in the packaged canary.
 from fisheye.diagnostics.video import container
@@ -98,6 +102,7 @@ def test_writer_retains_workflow_lease_after_supervisor_sigkill(tmp_path):
             SUPERVISOR,
             json.dumps(arguments),
             str(release),
+            str(tmp_path / "writer.pid"),
         ],
         cwd=REPOSITORY,
         stdout=subprocess.PIPE,
@@ -106,7 +111,7 @@ def test_writer_retains_workflow_lease_after_supervisor_sigkill(tmp_path):
     )
     writer_pid = None
     try:
-        writer_pid = _wait_for_writer(supervisor, run_dir / "import_parents.stdout.txt")
+        writer_pid = _wait_for_writer(supervisor, tmp_path / "writer.pid")
         supervisor.kill()
         assert supervisor.wait(timeout=5) == -signal.SIGKILL
         os.kill(writer_pid, 0)  # The original writer has not exited with its parent.

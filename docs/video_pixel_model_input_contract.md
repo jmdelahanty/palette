@@ -3,7 +3,7 @@
 version: 1
 status: active
 implementation: implemented
-last_verified: 2026-07-19
+last_verified: 2026-10-27
 purpose: Clarify the difference between persisted video/crop pixels and model-input tensors, especially PyNvVideoCodec luma versus NV12-to-RGB detection preprocessing.
 -->
 
@@ -201,7 +201,7 @@ checklist for making this contract enforceable.
 
 - `docs/geometry_only_crop_workflow_cache_design.md`
 - `docs/diagnostics/pixel_contract_audit_2026-06-05.md`
-- `docs/training_crop_representation_migration.md`
+- `docs/archive/training_crop_representation_migration.md`
 - `docs/subject_mask_training_artifact_contract.md`
 - `docs/detect_decode_backend_benchmark_todo.md`
 - `src/fisheye/shared/pynvvc_luma_rgb.py`

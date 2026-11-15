@@ -111,10 +111,12 @@ from .web_auth import (
     _utc_timestamp,
     _verify_signed_invite_token,
 )
-from .web_app import create_labeling_app
+from .web_app import create_labeling_app, install_same_origin_guard
 from .web_static import register_static_routes
 from .web_subject_mask_edit_operations import validated_edit_operations
+from .upgrade_mask_run_metrics import ensure_full_metrics_for_tasks, metric_upgrade_warnings
 from .web_admin_inspect import register_admin_inspect_routes
+from .web_peer_review import register_peer_review_routes
 from .web_admin_api import register_admin_api_routes
 from .web_admin_pages import _admin_page_response_payload, register_admin_page_routes
 from .web_admin_renderers import (
@@ -155,7 +157,7 @@ from .web_identity import (
 )
 from .web_personal_api import _personal_api_response_payload, register_personal_api_routes
 from .web_personal_pages import _personal_page_response_payload, register_personal_page_routes
-from .web_personal_renderers import _dashboard_html, _datasets_html
+from .web_personal_renderers import _dashboard_html
 from .web_post_completion_queue import _post_completion_queue_metadata
 from .web_promotion_retry import (
     _admin_promotion_retry_preflight_error,
@@ -1152,12 +1154,14 @@ def _project_approved_keypoint_review_to_recording_step_status(
 
 def _make_handler(state: ServerState):
     flask_app = create_labeling_app(config={"LABELING_SERVER_STATE": state})
+    install_same_origin_guard(flask_app, enabled=bool(state.config.csrf_same_origin))
     register_admin_api_routes(flask_app, state)
     register_admin_page_routes(flask_app, state, _admin_page_response_payload)
     register_personal_api_routes(flask_app, state, _personal_api_response_payload)
     register_personal_page_routes(flask_app, state, _personal_page_response_payload)
     register_static_routes(flask_app)
     register_admin_inspect_routes(flask_app, state)
+    register_peer_review_routes(flask_app, state)
 
     class LabelingWorkHandler(BaseHTTPRequestHandler):
         server_version = "PaletteLabelingWork/0.1"
@@ -2993,44 +2997,6 @@ def _make_handler(state: ServerState):
                 return
             parsed = urlparse(self.path)
             path = parsed.path
-            if path == "":
-                user, _auth_source = self._require_user(html_error=True)
-                if user is None:
-                    return
-                query = parse_qs(parsed.query, keep_blank_values=True)
-                expected_user = str((query.get("expected_user") or [""])[-1]).strip()
-                if expected_user and str(user) != expected_user:
-                    self._write_error(
-                        "dashboard_user_mismatch",
-                        details=(
-                            f"This dashboard link is for {expected_user}, "
-                            f"but the browser is authenticated as {user}. "
-                            "Stop and contact the operator before labeling."
-                        ),
-                        status=HTTPStatus.FORBIDDEN,
-                        html_error=True,
-                        extra=_labeler_read_authorization_denial_metadata(
-                            user=user,
-                            expected_user=expected_user,
-                            route_path=path,
-                            response_kind="html",
-                        ),
-                    )
-                    return
-                known_user_status = self._require_active_labeling_user(
-                    user,
-                    html_error=True,
-                    expected_user=expected_user or user,
-                    route_path=path,
-                )
-                if known_user_status is None:
-                    return
-                self._write(
-                    _dashboard_html()
-                    if path in {DASHBOARD_PATH, PERSONAL_WORK_PATH}
-                    else _datasets_html()
-                )
-                return
             if path.startswith("/t/"):
                 token = path[len("/t/") :].strip("/")
                 if not token:
@@ -7584,6 +7550,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _attach_mask_task_metric_upgrades(payload: dict[str, object], store: LabelingStore, task_rows) -> None:
+    """Upgrade the runs behind newly created subject-mask tasks to full metrics, and report it."""
+
+    results = ensure_full_metrics_for_tasks(Path(store.path), [row for row in task_rows if isinstance(row, Mapping)])
+    if not results:
+        return
+    payload["subject_mask_metric_upgrades"] = results
+    warnings = [*(payload.get("warnings") or []), *metric_upgrade_warnings(results)]
+    payload["warnings"] = warnings
+    payload["warning_count"] = len(warnings)
+    payload["warning_codes"] = sorted({str(w.get("code") or "") for w in warnings if str(w.get("code") or "")})
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     store_path = Path(args.store).expanduser() if args.store is not None else default_store_path()
@@ -8321,6 +8300,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "warnings": warnings,
                 "task": task_row,
             }
+            if task_row is not None:
+                _attach_mask_task_metric_upgrades(payload, store, [task_row])
             _write_optional_json_report(payload, args.output, overwrite=bool(args.overwrite), description="single-task report")
             _print_json(payload)
             return 2 if blocked_by_warnings else 0
@@ -8479,6 +8460,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "warnings": warnings,
                 "tasks": results,
             }
+            if bool(args.apply) and not blocked_by_warnings:
+                _attach_mask_task_metric_upgrades(payload, store, [r["task"] for r in results])
             _write_optional_json_report(payload, args.output, overwrite=bool(args.overwrite), description="task import report")
             _print_json(payload)
             return 2 if blocked_by_warnings else 0
@@ -11233,6 +11216,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     json.dumps(payload, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
                 )
+            if bool(args.apply):
+                _attach_mask_task_metric_upgrades(payload, store, [r["task"] for r in task_results])
             if args.html_output:
                 html_output_path = Path(args.html_output)
                 html_output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -12624,6 +12609,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 auto_advance_on_save=not bool(args.no_auto_advance_on_save),
             )
             result = _task_generation_cli_payload(payload, warnings_as_errors=bool(args.warnings_as_errors))
+            _attach_mask_task_metric_upgrades(result, store, [g["task"] for g in payload["generated"]])
             _write_optional_json_report(result, args.output, overwrite=bool(args.overwrite), description="task-generation report")
             _print_json(result)
             return 2 if bool(result["failed_by_warnings"]) else 0

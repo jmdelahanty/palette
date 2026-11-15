@@ -1,0 +1,767 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "citrus.recording_observation_finalized_receipt.v4",
+  "title": "Citrus Finalized Recording Observation Receipt v4 (v3 with citrus.subject_reference v2)",
+  "type": "object",
+  "required": [
+    "schema_id",
+    "schema_version",
+    "canonicalization",
+    "receipt_id",
+    "contract_sha256",
+    "contract"
+  ],
+  "properties": {
+    "schema_id": {
+      "const": "citrus.recording_observation_finalized_receipt"
+    },
+    "schema_version": {
+      "const": 4
+    },
+    "canonicalization": {
+      "const": "canonical_json_utf8_sort_keys_compact_v1"
+    },
+    "receipt_id": {
+      "type": "string",
+      "pattern": "^obsbindfin_[0-9a-f]{64}$"
+    },
+    "contract_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "contract": {
+      "$ref": "#/$defs/contract"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!\\s)[^\\u0000-\\u001f\\u007f]*[^\\s\\u0000-\\u001f\\u007f]$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*(?:^|/)\\.(?:/|$)).+$"
+    },
+    "target": {
+      "type": "object",
+      "required": [
+        "rig_id",
+        "canvas_name",
+        "arena_id",
+        "camera_id",
+        "source_camera_stream_id"
+      ],
+      "properties": {
+        "rig_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "canvas_name": {
+          "$ref": "#/$defs/identifier"
+        },
+        "arena_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "camera_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "source_camera_stream_id": {
+          "$ref": "#/$defs/identifier"
+        }
+      },
+      "additionalProperties": false
+    },
+    "protocolSemantic": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "status",
+            "semantic_sha256"
+          ],
+          "properties": {
+            "status": {
+              "const": "available"
+            },
+            "semantic_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "status",
+            "semantic_status_sha256"
+          ],
+          "properties": {
+            "status": {
+              "const": "unsupported"
+            },
+            "semantic_status_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "contract": {
+      "type": "object",
+      "required": [
+        "schema_id",
+        "schema_version",
+        "request_id",
+        "request_contract_sha256",
+        "acceptance_id",
+        "acceptance_contract_sha256",
+        "observation_context_id",
+        "finalized_at_utc",
+        "citrus_experiment_id",
+        "citrus_session_uuid",
+        "target",
+        "h5_artifact",
+        "session_status",
+        "runtime_geometry_contract_sha256",
+        "protocol_semantic",
+        "citrus_artifacts",
+        "subject_reference"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "citrus.recording_observation_finalized_receipt"
+        },
+        "schema_version": {
+          "const": 4
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^obsbindreq_[0-9a-f]{64}$"
+        },
+        "request_contract_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "acceptance_id": {
+          "type": "string",
+          "pattern": "^obsbindacc_[0-9a-f]{64}$"
+        },
+        "acceptance_contract_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "observation_context_id": {
+          "type": "string",
+          "pattern": "^obsctx_[0-9a-f]{64}$"
+        },
+        "finalized_at_utc": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "citrus_experiment_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "citrus_session_uuid": {
+          "type": "string",
+          "pattern": "^citsess_[0-9a-f]{64}$"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "h5_artifact": {
+          "type": "object",
+          "required": [
+            "relative_path",
+            "size_bytes",
+            "sha256"
+          ],
+          "properties": {
+            "relative_path": {
+              "$ref": "#/$defs/relativePath"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          },
+          "additionalProperties": false
+        },
+        "session_status": {
+          "const": "COMPLETE"
+        },
+        "runtime_geometry_contract_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "protocol_semantic": {
+          "$ref": "#/$defs/protocolSemantic"
+        },
+        "citrus_artifacts": {
+          "type": "array",
+          "uniqueItems": true,
+          "description": "Every per-session file Citrus wrote besides the H5. Cross-item rules are normative in README.md.",
+          "items": {
+            "$ref": "#/$defs/citrusArtifact"
+          }
+        },
+        "subject_reference": {
+          "$ref": "#/$defs/subjectReference"
+        }
+      },
+      "additionalProperties": false
+    },
+    "citrusRelativePath": {
+      "type": "string",
+      "pattern": "^citrus/[^/\\u0000-\\u001f]+$"
+    },
+    "citrusArtifact": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "role",
+            "relative_path",
+            "size_bytes",
+            "sha256"
+          ],
+          "properties": {
+            "role": {
+              "const": "stimulus_video"
+            },
+            "relative_path": {
+              "$ref": "#/$defs/citrusRelativePath"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "role",
+            "relative_path",
+            "size_bytes",
+            "sha256",
+            "finalization"
+          ],
+          "properties": {
+            "role": {
+              "const": "stimulus_video_container_finalization"
+            },
+            "relative_path": {
+              "$ref": "#/$defs/citrusRelativePath"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "finalization": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "schema_id",
+                "schema_version",
+                "status",
+                "terminal",
+                "trailer_written",
+                "output_closed",
+                "container_file_size_bytes"
+              ],
+              "properties": {
+                "schema_id": {
+                  "const": "citrus.stimulus_video_container_finalization"
+                },
+                "schema_version": {
+                  "const": 1
+                },
+                "status": {
+                  "const": "complete"
+                },
+                "terminal": {
+                  "const": true
+                },
+                "trailer_written": {
+                  "const": true
+                },
+                "output_closed": {
+                  "const": true
+                },
+                "container_file_size_bytes": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "role",
+            "relative_path",
+            "size_bytes",
+            "sha256"
+          ],
+          "properties": {
+            "role": {
+              "const": "update_timing"
+            },
+            "relative_path": {
+              "$ref": "#/$defs/citrusRelativePath"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "role",
+            "relative_path",
+            "size_bytes",
+            "sha256"
+          ],
+          "properties": {
+            "role": {
+              "const": "process_diagnostic"
+            },
+            "relative_path": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^citrus/citsess_[0-9a-f]{64}_[^/\\u0000-\\u001f]+_threading_startup\\.json$"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^citrus/\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}Z_threading_startup_\\d+\\.json$"
+                }
+              ]
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      ]
+    },
+    "subjectReferenceUuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "subjectReference": {
+      "type": "object",
+      "required": [
+        "schema_id",
+        "schema_version",
+        "dish_id",
+        "lookup_status",
+        "lookup_reason",
+        "lookup_http_status",
+        "queried_at_utc",
+        "dish",
+        "fish_status",
+        "fish_reason",
+        "fish",
+        "subject_id",
+        "subject_type",
+        "subject_count",
+        "zebrobot_version",
+        "source"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "citrus.subject_reference"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "dish_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "lookup_status": {
+          "enum": [
+            "collected",
+            "not_collected"
+          ]
+        },
+        "lookup_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "lookup_http_status": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 100,
+          "maximum": 599,
+          "description": "HTTP status of the dish lookup when it failed with an HTTP response; null when collected or when there was no HTTP response (transport failure)."
+        },
+        "queried_at_utc": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "dish": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "dish_id",
+            "dish_uuid",
+            "dish_revision",
+            "dish_updated_at",
+            "fish_count",
+            "cross_id"
+          ],
+          "properties": {
+            "dish_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "dish_uuid": {
+              "$ref": "#/$defs/subjectReferenceUuid"
+            },
+            "dish_revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "dish_updated_at": {
+              "type": "string",
+              "minLength": 1
+            },
+            "fish_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cross_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "fish_status": {
+          "enum": [
+            "collected",
+            "not_collected"
+          ]
+        },
+        "fish_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "fish": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "fish_id",
+            "revision",
+            "updated_at"
+          ],
+          "properties": {
+            "fish_id": {
+              "$ref": "#/$defs/subjectReferenceUuid"
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "updated_at": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "subject_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/subjectReferenceUuid"
+            }
+          ]
+        },
+        "subject_type": {
+          "enum": [
+            "individual",
+            "dish_group",
+            null
+          ]
+        },
+        "subject_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "zebrobot_version": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "MZB GET /version as Citrus read it once per session before the dish lookup; null when /version was unreachable. Same field names and patterns as Orange recording_subject_reference v2 zebrobot.*, so Palette's MZB pin check applies to citrus_binding entries unchanged.",
+          "required": [
+            "base_url",
+            "api_schema_version",
+            "service_commit",
+            "service_commit_dirty",
+            "consumer_schema_sha256",
+            "http_status",
+            "error"
+          ],
+          "properties": {
+            "base_url": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            },
+            "api_schema_version": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "service_commit": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "service_commit_dirty": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "consumer_schema_sha256": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "http_status": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 100,
+              "maximum": 599
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "source": {
+          "const": "citrus_mzb_lookup"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "lookup_status": {
+                "const": "collected"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "dish": {
+                "type": "object"
+              },
+              "lookup_reason": {
+                "type": "null"
+              },
+              "lookup_http_status": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "dish": {
+                "type": "null"
+              },
+              "lookup_reason": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fish_status": {
+                "const": "collected"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "fish": {
+                "type": "object"
+              },
+              "fish_reason": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "fish": {
+                "type": "null"
+              },
+              "fish_reason": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "dish_id": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "subject_id": {
+                "type": "null"
+              },
+              "subject_type": {
+                "type": "null"
+              },
+              "subject_count": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "subject_type": {
+                "type": "string"
+              },
+              "subject_count": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "subject_type": {
+                "const": "individual"
+              }
+            },
+            "required": [
+              "subject_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "subject_id": {
+                "$ref": "#/$defs/subjectReferenceUuid"
+              },
+              "subject_count": {
+                "const": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "subject_type": {
+                "const": "dish_group"
+              }
+            },
+            "required": [
+              "subject_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "subject_id": {
+                "type": "null"
+              },
+              "subject_count": {
+                "type": "integer",
+                "minimum": 2
+              },
+              "fish_status": {
+                "const": "not_collected"
+              },
+              "fish": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "description": "Receipt v3 is receipt v2 plus contract.subject_reference (agent-contracts citrus-orange/subject_declaration_v1, schema citrus.subject_reference v1): the MetaZebrobot-confirmed subject Citrus wrote to /metadata/subject, authoritative for Orange's recording_session.json subject_references[target.camera_id]. Issued when Citrus is configured with recording_observation_receipt_schema_version 3. Everything else is unchanged from v2."
+}

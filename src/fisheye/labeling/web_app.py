@@ -4,6 +4,7 @@ This module intentionally owns only framework scaffolding:
 
 - an explicit route-claim registry,
 - reusable security-header hooks,
+- the same-origin guard for every mutating Flask route,
 - and an application factory with no migrated route families.
 
 Legacy ``BaseHTTPRequestHandler`` dispatch remains the source of truth until a
@@ -16,13 +17,19 @@ from dataclasses import dataclass, field
 from collections.abc import Iterable
 from typing import Any, Callable, Literal, TypeVar
 
-from flask import Flask, abort, g, request
+from http import HTTPStatus
+from types import SimpleNamespace
+
+from flask import Flask, Response, abort, g, request
 
 from .web_policy import BROWSER_RESPONSE_SECURITY_HEADERS
+from .web_responses import _format_error, _json_response, request_has_same_origin
 
 
 _ROUTE_CLAIMS_EXTENSION = "palette_labeling_route_claims"
 _SECURITY_HOOKS_EXTENSION = "palette_labeling_security_hooks_installed"
+_SAME_ORIGIN_GUARD_EXTENSION = "palette_labeling_same_origin_guard_installed"
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 _ViewFunc = TypeVar("_ViewFunc", bound=Callable[..., Any])
 ClaimMode = Literal["path", "prefix", "none"]
@@ -223,6 +230,37 @@ def install_security_hooks(app: Flask) -> Flask:
     return app
 
 
+def install_same_origin_guard(app: Flask, *, enabled: bool) -> Flask:
+    """Reject cross-origin mutating requests on every Flask-owned route.
+
+    The stdlib handler checks this in ``do_POST`` before dispatch, but claimed
+    routes go to Flask first, so the same check runs here once for all of
+    them instead of in each route.
+    """
+
+    if app.extensions.get(_SAME_ORIGIN_GUARD_EXTENSION):
+        return app
+
+    @app.before_request
+    def _palette_labeling_require_same_origin() -> Response | None:
+        if not enabled or request.method in SAFE_METHODS:
+            return None
+        if request_has_same_origin(SimpleNamespace(headers=request.headers)):
+            return None
+        data, status, content_type = _json_response(
+            _format_error(
+                "same_origin_required",
+                details="Cross-origin mutating requests are rejected.",
+                status=HTTPStatus.FORBIDDEN,
+            ),
+            status=HTTPStatus.FORBIDDEN,
+        )
+        return Response(data, status=int(status), content_type=content_type)
+
+    app.extensions[_SAME_ORIGIN_GUARD_EXTENSION] = True
+    return app
+
+
 def create_labeling_app(
     *,
     import_name: str = __name__,
@@ -255,6 +293,7 @@ __all__ = [
     "create_labeling_app",
     "get_route_claims",
     "install_route_claims",
+    "install_same_origin_guard",
     "install_security_hooks",
     "is_path_claimed",
     "normalize_claim_path",

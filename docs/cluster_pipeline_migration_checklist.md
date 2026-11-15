@@ -16,7 +16,7 @@ It is based on a read-through of:
 - `docs/cluster_batching_guide.md`
 - `docs/lsf_submission_framework_design.md`
 - `docs/cluster_run_group_artifact_workflow.md`
-- `scripts/submit_detect_batches_bsub.sh`
+- `scripts/submit_detect_batches_bsub.sh` (retired 2026-11-13)
 - `scripts/submit_crop_batches_bsub.sh`
 - `scripts/submit_keypoints_batches_bsub.sh`
 - `scripts/submit_eye_masks_batches_bsub.sh`
@@ -39,7 +39,7 @@ Palette already has the first layer of cluster support:
 | Area | Status | Notes |
 |------|--------|-------|
 | Environment validation | present | `scripts/validate_cluster_palette_env.sh` checks Python, CUDA, PyTorch, Decord, FFmpeg linkage, reports PyNvVideoCodec/NVIDIA video-library availability, and can require PyNv with `--require-pynvvc`. |
-| Detect submitter | present | `scripts/submit_detect_batches_bsub.sh` wraps `fisheye.utils.run_detections_batch`. |
+| Detect submitter | retired | `scripts/submit_detect_batches_bsub.sh` was retired 2026-11-13: its `run_detections_batch --apply` jobs refused every recording after flat `detect_runs` publication was retired (2026-08-14, `05f133a4`). Use the artifact submitters. |
 | Detect artifact-quality-refine submitter | present | `scripts/submit_detect_artifact_quality_refine_bsub.sh` submits per-recording scratch artifact detect jobs plus dependent import/validate/quality/refine CPU jobs. |
 | Crop submitter | present | `scripts/submit_crop_batches_bsub.sh` wraps `fisheye.utils.crop_batch`. |
 | Crop + flat ROI cache submitter | present | `scripts/submit_crop_flat_roi_cache_bsub.sh` submits crop geometry and dependent flat-cache publish jobs; `scripts/submit_crop_flat_roi_cache_batches_bsub.sh` now defers per-job registry writes and submits one serial registry finalizer after cache jobs complete. |
@@ -186,8 +186,9 @@ Read-only stale-assumption audit from 2026-05-16:
 Current implementation:
 
 - `src/fisheye/detection/detect_yolo.py`
-- `src/fisheye/utils/run_detections_batch.py`
-- `scripts/submit_detect_batches_bsub.sh`
+- `src/fisheye/utils/run_detections_batch.py` (planner only; `--apply` retired)
+- `scripts/submit_detect_artifact_bsub.sh`
+- `scripts/submit_detect_artifact_quality_refine_bsub.sh`
 
 Ready for pilot:
 

@@ -23,6 +23,7 @@ from fisheye.analysis_workflows.core_behavior_cohort_adapter import (
     CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
     CORE_BEHAVIOR_EXPORT_PROFILE_ID,
     BOUT_KINEMATICS_EXPORT_PROFILE_ID,
+    FRAME_CLOCK_EXPORT_PROFILE_ID,
     build_bundle_set_from_core_behavior_execution_reports,
     validate_core_behavior_bundle_set_current_sources,
 )
@@ -354,7 +355,11 @@ def _parser() -> argparse.ArgumentParser:
     bundle.add_argument("--output-json", type=Path, required=True)
     bundle.add_argument(
         "--export-profile",
-        choices=(CORE_BEHAVIOR_EXPORT_PROFILE_ID, BOUT_KINEMATICS_EXPORT_PROFILE_ID),
+        choices=(
+            CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+            BOUT_KINEMATICS_EXPORT_PROFILE_ID,
+            FRAME_CLOCK_EXPORT_PROFILE_ID,
+        ),
         help="Core-behavior export profile; omitted for the existing default.",
     )
 

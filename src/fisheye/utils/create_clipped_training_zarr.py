@@ -381,16 +381,6 @@ def _create_training_zarr(
         serializer=serializer,
         compressors=[],
     )
-    raw.create_array(
-        "timestamps",
-        data=np.asarray(
-            [np.nan if value is None else float(value) for value in selected["timestamp"].to_pylist()],
-            dtype=np.float64,
-        ),
-        chunks=(min(1000, max(1, int(selected.num_rows))),),
-        serializer=serializer,
-        compressors=[],
-    )
 
     for group_name in RUN_GROUPS:
         group = root.require_group(group_name)

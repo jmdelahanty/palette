@@ -1,8 +1,7 @@
 {
-  "direct_read_count": 170,
+  "direct_read_count": 169,
   "entries": {
     "src/fisheye/analysis/chaser_metrics_loader.py::load_chaser_metrics::c5dd0b0e8341cb62fd88": 1,
-    "src/fisheye/analysis/chaser_phase_analysis.py::_collect_pipeline_provenance::074a2c33093d9f90a9b7": 1,
     "src/fisheye/analysis/gaze_convention_validation.py::_resolve_roi_images::f0231681db7cea97e0e9": 1,
     "src/fisheye/analysis_workflows/availability.py::_keypoint_crop_lineage::9907e72a87ead24e287c": 1,
     "src/fisheye/cluster/subject_masks/staged_inference.py::_completed_run_evidence::02c88417974f4bfa3a2e": 1,

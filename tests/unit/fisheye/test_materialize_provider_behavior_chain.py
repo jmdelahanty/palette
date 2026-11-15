@@ -59,7 +59,10 @@ from fisheye.shared.subject_position_expression import (
 from fisheye.shared.subject_position_storage import (
     canonical_source_camera_coordinate_metadata,
 )
-from fisheye.shared.subject_position_types import POSITION_FAILURE_REASON_CODES
+from fisheye.shared.subject_position_types import (
+    POSITION_FAILURE_REASON_CODES,
+    float32_quantization_record,
+)
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 from fisheye.shared.zarr_helpers import (
     consolidate_metadata_capture_expected_warnings,
@@ -1167,6 +1170,9 @@ def _publish_detection_position(
         software_sha256=canonical_json_sha256(records["software"]),
         coordinate_record=coordinate,
         coordinate_sha256=canonical_json_sha256(coordinate),
+        float32_quantization=float32_quantization_record(
+            positions.astype(np.float64), positions, valid
+        ),
     )
     plan = plan_subject_position_run(
         archive,

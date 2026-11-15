@@ -17,6 +17,14 @@ with whatever is currently installed just to obtain a pass.
 
 ## Run a fresh canary
 
+> **Legacy H5 refused (2026-10-07).** New transfer-v2 deliveries must carry a
+> sealed unified H5 or no H5 (intake single-writer decision 1). The
+> `--with-context` generator still writes a synthetic **legacy** H5 per camera
+> (with or without `--stimulus`), so Palette now refuses those fixtures while
+> planning organization, before any write. Until the generator emits a sealed
+> unified H5, the `--with-context` runs below end in that refusal rather than a
+> pass; a fixture without `--with-context` still exercises recording-only intake.
+
 Run from the desired Palette checkout, outside the Codex sandbox. The importer
 requires that checkout to be **clean** and verifies its exact full commit and
 imported `fisheye` location. The generator must also run through that checkout's

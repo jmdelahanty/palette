@@ -12,6 +12,10 @@ class ChaserBehaviorClass(IntEnum):
     AGGRESSIVE = 1
     RANDOM_NON_CHASING = 2
     INERT = 3
+    # A chaser with a behavior_program: its behavior is the program's phases,
+    # never the per-chaser fields (agent-contracts
+    # citrus-crimson/chaser_behavior_class_contract.md).
+    PROGRAMMED = 4
 
 
 BEHAVIOR_CLASS_LABELS: dict[int, str] = {
@@ -19,7 +23,11 @@ BEHAVIOR_CLASS_LABELS: dict[int, str] = {
     int(ChaserBehaviorClass.AGGRESSIVE): "aggressive",
     int(ChaserBehaviorClass.RANDOM_NON_CHASING): "random_non_chasing",
     int(ChaserBehaviorClass.INERT): "inert",
+    int(ChaserBehaviorClass.PROGRAMMED): "programmed",
 }
+
+# Citrus ChaserProperties::BehaviorMode: ACTIVE = 0, PASSIVE = 1.
+PASSIVE_BEHAVIOR_MODE = 1
 
 LEGACY_BEHAVIOR_ALIASES: dict[str, str] = {"benign": "inert"}
 
@@ -42,11 +50,32 @@ def canonical_behavior_label(value: Any) -> str:
     return LEGACY_BEHAVIOR_ALIASES.get(label, label)
 
 
+def behavior_class_label(class_id: Any) -> str:
+    """The label of a known class id; an unknown id is refused, never relabelled."""
+
+    try:
+        key = int(class_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"chaser behavior class id is not an integer: {class_id!r}") from exc
+    if key not in BEHAVIOR_CLASS_LABELS:
+        raise ValueError(f"unknown chaser behavior class id: {key}")
+    return BEHAVIOR_CLASS_LABELS[key]
+
+
 def configured_behavior_class_id(
     *,
     enable_chase: bool,
     enable_random_movement: bool,
+    has_behavior_program: bool = False,
+    behavior_mode: int | None = None,
 ) -> int:
+    # Citrus ResolveChaserBehaviorClass: a passive chaser is inert even with a
+    # program; otherwise a program makes the chaser programmed and its
+    # enable_chase/enable_random_movement fields are ignored at runtime.
+    if has_behavior_program:
+        if behavior_mode == PASSIVE_BEHAVIOR_MODE:
+            return int(ChaserBehaviorClass.INERT)
+        return int(ChaserBehaviorClass.PROGRAMMED)
     if enable_chase:
         return int(ChaserBehaviorClass.AGGRESSIVE)
     if enable_random_movement:
@@ -101,19 +130,27 @@ def resolve_configured_chaser_behaviors(
             continue
         enable_chase = bool(chaser.get("enable_chase", False))
         enable_random_movement = bool(chaser.get("enable_random_movement", False))
-        class_id = configured_behavior_class_id(
-            enable_chase=enable_chase,
-            enable_random_movement=enable_random_movement,
-        )
+        behavior_mode = _safe_int(chaser.get("behavior_mode"))
+        if "chaser_behavior_class_id" in chaser:
+            # A recorded class (trial-index features) is taken as recorded.
+            behavior_class_label(chaser["chaser_behavior_class_id"])
+            class_id = int(chaser["chaser_behavior_class_id"])
+        else:
+            class_id = configured_behavior_class_id(
+                enable_chase=enable_chase,
+                enable_random_movement=enable_random_movement,
+                has_behavior_program=chaser.get("behavior_program") is not None,
+                behavior_mode=behavior_mode,
+            )
         explicit_index = _safe_int(chaser.get("chaser_index"))
         resolved.append(
             ConfiguredChaserBehavior(
                 chaser_index=fallback_index if explicit_index is None else explicit_index,
                 behavior_class_id=class_id,
-                behavior_class=BEHAVIOR_CLASS_LABELS[class_id],
+                behavior_class=behavior_class_label(class_id),
                 enable_chase=enable_chase,
                 enable_random_movement=enable_random_movement,
-                behavior_mode=_safe_int(chaser.get("behavior_mode")),
+                behavior_mode=behavior_mode,
                 raw_color_rgba=(
                     _safe_float(chaser.get("color_r"), 0.0),
                     _safe_float(chaser.get("color_g"), 0.0),

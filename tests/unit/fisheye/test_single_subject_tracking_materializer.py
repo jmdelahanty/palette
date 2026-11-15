@@ -126,6 +126,7 @@ def test_tracking_plan_rejects_duplicate_observations_in_one_frame(tmp_path) -> 
         software_sha256=prepared.software_sha256,
         coordinate_record=json_attr_safe(prepared.coordinate_record),
         coordinate_sha256=prepared.coordinate_sha256,
+        float32_quantization=json_attr_safe(prepared.float32_quantization),
     )
     position_plan = plan_subject_position_run(
         analysis_zarr,

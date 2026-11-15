@@ -3,7 +3,7 @@
 version: 4
 status: active
 implementation: implemented
-last_verified: 2026-08-03
+last_verified: 2026-10-28
 -->
 
 Purpose: define the downstream deterministic analysis layer for biological
@@ -120,7 +120,7 @@ Mask-quality prerequisite:
 - Do not edit or approve mask pixels here.
 - Do not replace `refined_subject_masks_runs` as the mask authority.
 - Do not collapse specialized analyses such as `analysis/eye_angle_runs` or
-  `analysis/pose_kinematics_runs` into this stage without a clear migration
+  `analysis/track_kinematics_runs` into this stage without a clear migration
   decision.
 
 ## Intended Stage Relationship
@@ -141,7 +141,16 @@ tracking_runs/<run>
 
 ## Canonical Coordinate Publication (Schema v4, Method v11)
 
-New subject-shape runs publish one strict coordinate framework; coordinate
+Since 2026-08-10, new publications that consume a recording-level subject-mask
+bundle are schema v5: profile `analysis.subject_shape.full_anatomy_v5`, method
+`subject_shape_from_recording_mask_bundle_v12` (version 12), row axis
+`recording_subject_mask_bundle_rows`
+(`fisheye.shared.subject_shape_coordinate_publication`; decision record
+`docs/subject_shape_recording_bundle_publication_2026-08-10.md`). Profile v4 /
+method v11 below remains the contract for explicit single-refined-run inputs,
+and a v5 run is never represented as v4.
+
+Subject-shape runs publish one strict coordinate framework; coordinate
 meaning is never inferred from a path suffix, array shape, value range, or
 historical helper name.
 

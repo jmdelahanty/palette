@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orange.recording_crop_output.v1",
+  "title": "Orange recording crop output declaration (version 1)",
+  "description": "recording_snapshot_start.json crop_outputs.<serial> (also in recording_snapshot.json): the moving-crop video configuration sealed at record start, per camera. runtime.crop_size_px is the side of the square crop window cut from the full frame around the selected detection (origin clamped so the window stays inside the frame, never resized) and therefore the encoded crop video's width and height (runtime.width/height repeat it). It is distinct from the pose network's inference crop (models.<serial>.pose.runtime.pose_crop_size_px). Written by update_gui_crop_output_snapshots / build_gui_crop_output_snapshot (src/gui/recording_snapshots.cpp); closed on the fields Orange writes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "enabled",
+    "mode",
+    "schema_version",
+    "runtime",
+    "source"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "mode": {
+      "enum": [
+        "yolo_centered_square",
+        "disabled"
+      ]
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "worker",
+        "crop_size_px",
+        "width",
+        "height",
+        "frame_rate",
+        "codec",
+        "container",
+        "tuning",
+        "coordinate_space",
+        "selection_policy",
+        "blank_frame_policy",
+        "files"
+      ],
+      "properties": {
+        "worker": {
+          "const": "CropAndEncodeWorker"
+        },
+        "crop_size_px": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "square crop window side in full-frame pixels; 0 only when disabled"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "frame_rate": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "codec": {
+          "type": "string"
+        },
+        "container": {
+          "type": "string"
+        },
+        "tuning": {
+          "type": "string"
+        },
+        "coordinate_space": {
+          "const": "full_frame_pixels"
+        },
+        "selection_policy": {
+          "type": "string"
+        },
+        "blank_frame_policy": {
+          "type": "string"
+        },
+        "crop_frame_pool_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "preview_max_fps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_gpu_id": {
+          "type": "integer"
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "crop_size_px": {
+                "minimum": 1
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "width": {
+                "minimum": 1
+              },
+              "height": {
+                "minimum": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "camera_config_path",
+        "ui_selected",
+        "requires_yolo",
+        "requires_recording"
+      ],
+      "properties": {
+        "camera_config_path": {
+          "type": "string"
+        },
+        "ui_selected": {
+          "type": "boolean"
+        },
+        "requires_yolo": {
+          "type": "boolean"
+        },
+        "requires_recording": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "enabled": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime": {
+            "properties": {
+              "crop_size_px": {
+                "minimum": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

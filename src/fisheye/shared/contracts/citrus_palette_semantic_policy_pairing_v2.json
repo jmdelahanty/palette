@@ -1,0 +1,64 @@
+{
+  "schema_id": "citrus_palette.stimulus_angle_convention.semantic_policy_pairing",
+  "schema_version": 1,
+  "revision": 2,
+  "status": "current",
+  "decided": "Jeremy, 2026-11-03 (recipe bump, seed change intended, relabel pooling rule)",
+  "producer": "Citrus PR #86, recipe commit 2e870c8, merge 13b6c0114c3efb5808e82e7fa2208d1d6ac8d40a",
+  "supersedes": "the single semantic policy named by stimulus_angle_convention_v1.json declared_in (revision 1: citrus.protocol.semantic.v2 only). That file is unchanged and stays pinned by unified H5 admissions v5 to v7.",
+  "hash_rule": "protocol_semantic_hash = 'sha256:' + hex(sha256(canonical_json_bytes)) over the exact recorded bytes; a consumer never re-canonicalises or regenerates them",
+  "envelope": {
+    "schema_id": "citrus.protocol.semantic",
+    "schema_version": 1,
+    "stimulus_angle_convention": "atan2_negative_y_x_degrees"
+  },
+  "pairings": [
+    {
+      "stimulus_angle_convention": "canvas_y_down_clockwise_legacy",
+      "semantic_normalization_policies": ["citrus.protocol.semantic.v1"],
+      "trial_index": "schema_version 1 or 2 (citrus.protocol.trial_index.v1 / .v2)",
+      "protocol_file": "unversioned (legacy version 1)"
+    },
+    {
+      "stimulus_angle_convention": "atan2_negative_y_x_degrees",
+      "semantic_normalization_policies": ["citrus.protocol.semantic.v2", "citrus.protocol.semantic.v3"],
+      "trial_index": "schema_version 3 (citrus.protocol.trial_index.v3) for both semantic policies",
+      "protocol_file": "citrus.stimulus_protocol schema_version 2"
+    }
+  ],
+  "mixing": "any other combination is corruption and is refused; semantic.v3 under the legacy convention is refused; an unknown policy (for example citrus.protocol.semantic.v4) is refused",
+  "semantic_v3": {
+    "changes_from_v2": "normalization_policy is citrus.protocol.semantic.v3. Chaser steps (stimulus_mode_id 12, parameters.type ProtocolChaserParams) additionally hash the fields below. Everything else in the envelope and identity is hashed exactly as in v2.",
+    "newly_hashed": [
+      {
+        "path": "identity.steps[].parameters.z_eff",
+        "rule": "required on every chaser step; null when the authored z_eff_mm is 0 (the chaser keeps its current value), otherwise a scaled number with unit mm and a positive value. The step's own value drives loom size and the visual-angle drive, never the arena's."
+      },
+      {
+        "path": "identity.steps[].parameters.target_radius",
+        "rule": "required on every chaser step; a scaled number with unit mm and a non-negative value (step level)"
+      },
+      {
+        "path": "identity.steps[].parameters.chasers[].behavior_program.phases[].target_reference",
+        "rule": "required on every phase of type chase (v2 hashed it for retreat phases only); a non-empty string"
+      },
+      {
+        "path": "identity.steps[].parameters.chasers[].loom",
+        "rule": "required on every chaser that has appearance_drive, even when loom_mode_id is None (0)"
+      }
+    ],
+    "trial_index": "stays schema_version 3 / citrus.protocol.trial_index.v3; adds chaser features.target.z_eff_mm (null when 0) and the chase-motion target_reference inside objects v3 leaves open; its hash changes because it embeds the semantic hash, and the execution-index hash changes because it embeds the trial-index hash",
+    "seeds": "per_session_v1 chaser seeds are sha256('citrus.chaser_schedule.seed.v1' | session_uuid | semantic_hash | step_index | occurrence). They change with the semantic hash for dimbatman, goodbatbadbat and redbat; because session_uuid is included no two sessions ever shared a seed under v2 or v3, so a v3 session is a replicate of a v2 session in the same sense as two v2 sessions. fixed_v1 seeds are unchanged. The change is intended (Jeremy, 2026-11-03)."
+  },
+  "relabel_pooling_rule": {
+    "scope": "protocol_semantic_hash grouping only; trial-index and execution-index hashes are never joined across policies",
+    "rule": "a v2 recording joins a v3 protocol group only if (1) its recorded protocol_semantic_json bytes hash to its recorded v2 protocol_semantic_hash, (2) the byte substring \"normalization_policy\":\"citrus.protocol.semantic.v2\" occurs exactly once in those bytes, and (3) sha256 of the bytes with that substring replaced by \"normalization_policy\":\"citrus.protocol.semantic.v3\" equals the v3 group's protocol_semantic_hash. Otherwise the recording stays in its own v2 group.",
+    "inputs": "recorded bytes only; never a re-serialisation or a fresh regeneration",
+    "expected": "matches every label-only protocol; never matches a protocol whose v3 identity adds chaser fields (a v2 recording does not show which values it ran with)"
+  },
+  "fixture": {
+    "path": "fixtures/semantic_hash_v3_cases.json",
+    "source": "Citrus protocol_identity_dump, v2 at e13f893, v3 at 2e870c8; delivered byte-identical (sha256 5ab72f82da84bfe788b8cdb8527b8228803bd0186f0d8d59c5afcb32c1f68697)",
+    "synthetic_cases": ["v3case_appearance_drive_loom_none", "v3case_empty"]
+  }
+}
