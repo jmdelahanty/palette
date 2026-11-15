@@ -27,6 +27,7 @@ from .pose import require_pose_version_for_binding
 from .protocol import validate_protocol
 from .rig_provenance import validate_rig_provenance
 from .rows import validate_table_relations
+from .subject_declaration import validate_subject_declaration
 from .schema import APPEARANCE, read_json
 from .video_overlay import STATES as VIDEO_OVERLAY_STATES
 from .video_overlay import validate_video_overlay_states
@@ -149,6 +150,9 @@ def validate_artifact(
     integrity = validate_internal_integrity(h5)
     # After the integrity gate: the sidecar bytes it compares against are sealed.
     validate_rig_provenance(h5)
+    # Subject declaration v2 (agent-contracts #126): its bytes are bound by
+    # the integrity gate; its checksum attrs and the snapshot pairing here.
+    validate_subject_declaration(h5)
     binding = validate_capacity_preflight(h5)
     validate_table_relations(h5, integrity.table_descriptors)
     correspondence = validate_component_correspondence(h5)

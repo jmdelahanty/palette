@@ -1,0 +1,14 @@
+{
+  "schema_id": "citrus.subject_declaration",
+  "schema_version": 2,
+  "dish_id": "19498_2",
+  "fish_id": "3e7a91c4-58d2-4f0b-a6e3-7c19b2d84f50",
+  "subject_count": 1,
+  "subject_type": "individual",
+  "member_fish_ids": [],
+  "unit_id": null,
+  "declared_at_utc": "2026-11-18T15:02:30Z",
+  "source": "orchard_run_plan",
+  "run_plan": null,
+  "overridden_run_plan": null
+}
