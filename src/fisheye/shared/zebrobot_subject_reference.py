@@ -67,19 +67,25 @@ SCHEMA_FILES = {
 # docs/zebrobot_snapshot.md; Palette's reliance: agent-contracts PR 54.
 MZB_PIN = {
     "repo": "jmdelahanty/metazebrobot",
-    "commit": "b2f4b20751fd4206ce5cc85fe996444a95043fe9",
-    "consumer_openapi_sha256": "d80e79a68c65a04c5ec3b519648b9cf82985bde987abdce378e7a7d07e92710f",
-    # agent-contracts metazebrobot-consumers/consumers.json (main ae52c9bd).
-    "consumers_json_sha256": "6d2baa4f8776eba8f9c65a0d72c2b986f316c2334e249949687e3963390c7e05",
+    "commit": "ecaa247ebe77ae3fa053313e8ea3d49975bc3ae0",
+    "consumer_openapi_sha256": "97c581df4fd118e0a7b1048c9e312836cf7068723f5b6695058f0bf53c499cb3",
+    # agent-contracts metazebrobot-consumers/consumers.json (main f0810590, PR 128).
+    "consumers_json_sha256": "e45d0e1e16e4f3e3d0857a85852a4a86ae731fcc8a983098cd53c4cbbc0ac2b4",
 }
 # Consumer slices a recording's serving build may report and still match: the
 # pin, plus earlier slices the pin only adds to for everything Palette relies
-# on. c93b2530 qualifies (b2f4b20 adds only X-Delivered-By on usage links,
-# which Palette does not read); slices before it do not, because
+# on. c93b2530, b2f4b20, 5f3ac60 and c48f9a2 qualify: since c93b2530 the two
+# operations Palette relies on are byte-identical in the slice and their
+# handlers unchanged (b2f4b20 adds X-Delivered-By on usage links; 5f3ac60 and
+# c48f9a2 add screening, timeline and construct endpoints; ecaa247 adds usage
+# link members), none of which Palette reads. Slices before it do not, because
 # GET /dishes/{dish_id}/fish changed meaning twice after 509a3eb8 (see
 # tests/contracts/metazebrobot_consumers/README.md).
 COMPATIBLE_CONSUMER_OPENAPI_SHA256 = frozenset({
     MZB_PIN["consumer_openapi_sha256"],
+    "6d7d35ea59f9d5dba8c8d035863d7d1d0345ce53600dd7bda26ca63f77941cc1",  # c48f9a2 (52ebae1)
+    "950353ae2f8305394c8042cba66b5ba617934cd308fdd5cc5fbe101c43c1d89a",  # 5f3ac60
+    "d80e79a68c65a04c5ec3b519648b9cf82985bde987abdce378e7a7d07e92710f",  # b2f4b20
     "a8cb88841430739f16958777062e1c6ed1e01c98583e6a2b0bc14e9864752d03",  # c93b2530
 })
 
