@@ -109,6 +109,10 @@ def _validate_static_inputs(h5, matrices):
             and origin + extent <= a[f"final_display_{dimension}_px"],
             "geometry_renderer_extent",
         )
+        # palette#377 section 6c: Citrus computes the origin with integer
+        # arithmetic and stores it as <f8. Accept an integral value (640.0)
+        # and refuse a fractional one (640.5); never round.
+        require(float(origin).is_integer(), "geometry_arena_origin_not_integral")
     forward, inverse = matrices
     for left, right in ((forward, inverse), (inverse, forward)):
         # Match the producer's scalar accumulation and tolerance.

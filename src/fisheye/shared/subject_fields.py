@@ -179,6 +179,36 @@ class _Builder:
         else:
             self.fields["subject_type"] = canonical
 
+    def members(self, value: Any) -> None:
+        """``member_fish_ids``: the fish a dish group's source declares were in the arena.
+
+        Sorted MetaZebrobot fish ids from the sealed Citrus snapshot v4
+        ``members`` (agent-contracts #125: a non-empty list names exactly
+        ``subject_count`` fish). The members of a group are not told apart in
+        the video: this is never a track-to-fish mapping and never
+        ``subject_ids``.
+        """
+
+        if value is None:
+            return
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8", "replace")
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                self.unresolved["member_fish_ids"] = "not a list of fish ids"
+                return
+        if not isinstance(value, (list, tuple)):
+            self.unresolved["member_fish_ids"] = "not a list of fish ids"
+            return
+        ids = [_text(item) if isinstance(item, (str, bytes)) else None for item in value]
+        if any(item is None for item in ids) or len(set(ids)) != len(ids):
+            self.unresolved["member_fish_ids"] = "empty, non-text or repeated fish id"
+            return
+        if ids:
+            self.fields["member_fish_ids"] = sorted(ids)
+
     def age(self, fertilization: Any, recorded_at: Any, *declared: Any) -> None:
         """``dpf_at_acquisition`` = recording date - fertilization date when both are known."""
 
@@ -200,6 +230,9 @@ class _Builder:
         count = self.fields.get("subject_count")
         if "subject_type" not in self.fields and "subject_type" not in self.unresolved and count:
             self.fields["subject_type"] = "individual" if count == 1 else "dish_group"
+        if "member_fish_ids" in self.fields and self.fields.get("subject_type") != "dish_group":
+            del self.fields["member_fish_ids"]
+            self.unresolved["member_fish_ids"] = "members declared for a subject that is not a dish_group"
         result = {key: self.fields[key] for key in sorted(self.fields)}
         if self.unresolved:
             result["unresolved"] = dict(sorted(self.unresolved.items()))
@@ -231,6 +264,8 @@ def from_h5_attributes(attrs: Mapping[str, Any], subject_ids: Sequence[str] = ()
     out.registration(attrs.get("mzb_registration_mode"), attrs.get("mzb_registration_status"),
                      attrs.get("mzb_registration_reason"))
     out.text("mzb_fish_subject_label", attrs.get("mzb_fish_subject_label"))
+    # Not an attr: unified import adds it from the sealed snapshot's ``members``.
+    out.members(attrs.get("member_fish_ids"))
     return out.finish(subject_ids)
 
 

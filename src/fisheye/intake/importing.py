@@ -320,27 +320,57 @@ def _individual_fish(zarr_path: Path) -> str | None:
     return None
 
 
+def _group_member_fish(zarr_path: Path) -> tuple[str, ...]:
+    """The member fish a parent's published dish-group subject record names.
+
+    ``member_fish_ids`` of the canonical subject fields (the sealed Citrus
+    snapshot v4 ``members``). Empty for an individual, for a group whose
+    members were not declared, and for a parent with no subject record: an
+    empty list proves nothing about who was in the arena.
+    """
+
+    import zarr
+
+    from fisheye.shared.subject_metadata import (
+        MissingSubjectMetadataError,
+        resolve_subject_metadata,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    try:
+        resolved = resolve_subject_metadata(root, allow_legacy=False)
+    except MissingSubjectMetadataError:
+        return ()
+    return tuple(str(fish) for fish in resolved.subject.get("member_fish_ids") or ())
+
+
 def _require_distinct_individual_fish(plan: Mapping[str, Any]) -> None:
-    """Refuse a delivery that records one individual fish in two arenas.
+    """Refuse a delivery that records one fish in two arenas.
 
     One fish cannot be in two arenas at once, so a repeat is an operator
     mis-pick (the 2026-10-16, 10-17 and 11-06 deliveries), never a valid
-    recording. Checked after the parents are imported and before staging is
-    retired or anything is registered: the as-recorded archives stay for a
-    correction to bind to, and the staged session stays in place.
+    recording. A fish counts whether an arena names it as its individual or as
+    a member of its dish group: member against member and member against
+    individual are both refused. Checked after the parents are imported and
+    before staging is retired or anything is registered: the as-recorded
+    archives stay for a correction to bind to, and the staged session stays in
+    place.
     """
 
     from fisheye.utils.organize_transfer_recordings import parent_zarr_paths
 
     arenas: dict[str, list[str]] = {}
     for parent, zarr_path in zip(plan["parents"], parent_zarr_paths(plan)):
-        fish = _individual_fish(zarr_path)
-        if fish is not None:
+        individual = _individual_fish(zarr_path)
+        named = ([individual] if individual is not None else []) + [
+            fish for fish in _group_member_fish(zarr_path) if fish != individual
+        ]
+        for fish in named:
             arenas.setdefault(fish, []).append(parent["identity"]["recording_id"])
     repeated = {fish: ids for fish, ids in sorted(arenas.items()) if len(ids) > 1}
     if repeated:
         raise IntakeRefused(
-            "one individual fish is recorded in more than one arena of this delivery: "
+            "one fish is recorded in more than one arena of this delivery: "
             + "; ".join(f"{fish} in {', '.join(ids)}" for fish, ids in repeated.items()),
             code="delivery_duplicate_individual_fish",
             details={"repeated_fish": repeated},
