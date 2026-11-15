@@ -149,6 +149,8 @@ def validate_z_eff(h5, semantic_normalization_policy: object) -> float | None:
     for name in ("rig_file_sha256", "tank_design_file_sha256"):
         require(FILE_SHA256.match(strings[name]) is not None, f"z_eff_sha256_form:{name}")
 
+    # The pairing's formula is not recomputed: the producer's float evaluation
+    # order is not pinned, so a bit-exact recheck could refuse a correct file.
     z = floats["z_eff_mm"]
     require(z > 0 and float(np.float32(z)) == z, "z_eff_value_not_positive_float32")
     floor = floats["dish_floor_above_image_plane_mm"]
@@ -176,7 +178,9 @@ def validate_z_eff(h5, semantic_normalization_policy: object) -> float | None:
             f"z_eff_arena_config_mismatch:{label}",
         )
     require(strings["arena_id"] == config.get("config_name"), "z_eff_arena_id_mismatch")
-    session_arena = h5["/metadata/session"].attrs.get("arena_id")
+    session = h5.get("/metadata/session")
+    require(isinstance(session, h5py.Group), "z_eff_session_missing")
+    session_arena = session.attrs.get("arena_id")
     if session_arena is not None:
         session_arena = (
             session_arena.decode("utf-8") if isinstance(session_arena, bytes) else session_arena

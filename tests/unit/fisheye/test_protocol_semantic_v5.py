@@ -408,3 +408,15 @@ def test_rig_pin_must_exist_and_agree(tmp_path):
         del h5[RIG_PIN]
         with pytest.raises(UnifiedH5ContractError, match="z_eff_rig_pin_missing"):
             validate_z_eff(h5, V5)
+
+
+def test_session_arena_id_must_agree_and_the_session_group_must_exist(tmp_path):
+    with _z_eff_h5(tmp_path) as h5:
+        h5["/metadata/session"].attrs.create("arena_id", "arena_4", dtype=h5py.string_dtype("utf-8"))
+        with pytest.raises(UnifiedH5ContractError, match="z_eff_session_arena_id_mismatch"):
+            validate_z_eff(h5, V5)
+        h5["/metadata/session"].attrs.create("arena_id", "arena_3", dtype=h5py.string_dtype("utf-8"))
+        assert validate_z_eff(h5, V5) == Z
+        del h5["/metadata/session"]
+        with pytest.raises(UnifiedH5ContractError, match="z_eff_session_missing"):
+            validate_z_eff(h5, V5)
