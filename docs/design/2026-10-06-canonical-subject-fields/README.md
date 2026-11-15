@@ -89,6 +89,7 @@ Names are chosen from what consumers already read, to keep churn low. All are op
 | `fish_reference` | {`status`, `reason`} | same vocabulary |
 | `mzb_registration` | {`mode`, `status`, `reason`} | Citrus snapshot v4 only (replaces `fish_reference`): mode `existing` \| `created_at_start` \| `outbox`; status `registered` \| `unverified` \| `queued` \| `failed`. The fish is confirmed only when `registered`. |
 | `mzb_fish_subject_label` | str | v4, display only (e.g. `Z5`); never an identifier |
+| `member_fish_ids` | list[str], sorted | `dish_group` only: the MetaZebrobot fish ids the sealed Citrus snapshot v4 `members` names (agent-contracts #125: a non-empty list names exactly `subject_count` fish). Absent when members were not declared. The members are not told apart in the video: never `subject_ids`, never a track-to-fish mapping. Intake uses it to refuse one fish in two arenas of a delivery (added 2026-11-15) |
 | `zebrobot_service` | {`service_commit`, `service_commit_dirty`, `consumer_schema_sha256`, `matches_pin`} | the build that served the dish, when sealed |
 | `intake_observations` | {`dish_revision_at_intake`, `dish_changed_since_recording`, `dish_fish_changed_since_recording`, `cross_fields_resolved_at`} | what Palette saw at intake; never mixed into the facts above |
 

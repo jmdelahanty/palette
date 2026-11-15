@@ -22,6 +22,7 @@ import pytest
 import zarr
 
 from fisheye.analysis.import_stimulus_to_zarr import import_stimulus_to_zarr
+from fisheye.shared.experiment_setup import resolve_experiment_setup
 from fisheye.shared.subject_metadata import resolve_subject_metadata
 from fisheye.shared.unified_h5 import UnifiedH5ContractError
 from fisheye.shared.unified_h5.citrus_subject_snapshot import (
@@ -224,3 +225,69 @@ def test_snapshot_v4_pairs_only_with_receipt_v4():
     v3_receipt = copy.deepcopy(receipt)
     v3_receipt["schema_version"] = 3
     check_receipt_subject_reference(v3_snapshot, v3_receipt)  # earlier pairs unchanged
+
+
+def _member(index: int) -> dict:
+    return {
+        "mzb_fish_id": f"6f1e2d3c-0000-4000-8000-{index:012d}",
+        "mzb_fish_revision": 1,
+        "provenance": "placed_from_registered_units",
+    }
+
+
+def test_snapshot_members_are_read_only_from_an_admitted_v4_snapshot():
+    snapshot = {"members": [_member(2), _member(1)]}
+    admitted = {"citrus_snapshot_status": "admitted", "citrus_snapshot_schema_version": 4}
+    assert mod._snapshot_member_fish_ids(snapshot, admitted) == [
+        _member(1)["mzb_fish_id"], _member(2)["mzb_fish_id"]]
+    assert mod._snapshot_member_fish_ids({"members": []}, admitted) == []
+    assert mod._snapshot_member_fish_ids({"members": None}, admitted) == []
+    assert mod._snapshot_member_fish_ids(snapshot, {**admitted, "citrus_snapshot_schema_version": 3}) == []
+    assert mod._snapshot_member_fish_ids(snapshot, {"citrus_snapshot_status": "pre_contract"}) == []
+    assert mod._snapshot_member_fish_ids(None, {"citrus_snapshot_status": "absent"}) == []
+
+
+def test_declared_group_members_reach_the_published_subject_record(tmp_path, monkeypatch):
+    """The dish_group witness seals ``members: []``; no sealed witness with a
+    filled list exists yet (Citrus's synthetic sample is not vendored). The
+    snapshot read is replaced so the projection sees the same sealed file with
+    its members declared, which admission then judges under R4 as usual.
+    """
+
+    plan = _import(tmp_path, "dish_group")
+    real_open = mod.open_unified_source
+    declared: list[str] = []
+
+    class _WithMembers:
+        def __init__(self, reader):
+            self._reader = reader
+
+        def __getattr__(self, name):
+            return getattr(self._reader, name)
+
+        def read_json(self, path):
+            document = self._reader.read_json(path)
+            if path == mod.CITRUS_SNAPSHOT_PATH:
+                count = document["subject"]["subject_count"]
+                document = {**document, "members": [_member(count - i) for i in range(count)]}
+                declared[:] = sorted(m["mzb_fish_id"] for m in document["members"])
+            return document
+
+    monkeypatch.setattr(mod, "open_unified_source", lambda *a, **k: _WithMembers(real_open(*a, **k)))
+    published = mod.project_unified_subject_metadata(plan, "candidate")
+
+    root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
+    resolved = resolve_subject_metadata(root, allow_legacy=False)
+    assert len(declared) >= 2 and resolved.subject["member_fish_ids"] == declared
+    # Members are not told apart in the video: they assign no track identity.
+    assert resolved.subject_ids == () and "subject_ids" not in resolved.subject
+    assert published["expected_subject_count"] == len(declared)
+    setup = resolve_experiment_setup(root, allow_legacy=False)
+    assert (setup.assigned_subject_count, setup.subject_assignment_status) == (None, "count_only")
+
+
+def test_a_group_with_no_declared_members_publishes_none(tmp_path):
+    plan = _import(tmp_path, "dish_group")
+    mod.project_unified_subject_metadata(plan, "candidate")
+    root = zarr.open_group(str(plan.zarr_path), mode="r", use_consolidated=False)
+    assert "member_fish_ids" not in resolve_subject_metadata(root, allow_legacy=False).subject

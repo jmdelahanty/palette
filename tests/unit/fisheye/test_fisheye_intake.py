@@ -1348,6 +1348,7 @@ def test_one_fish_in_two_arenas_is_refused_before_retiring_or_registering(
     session, sha = _delivery(tmp_path)
     destination = _destination(tmp_path)
     monkeypatch.setattr(importing, "_individual_fish", lambda zarr_path: "fish-z5")
+    monkeypatch.setattr(importing, "_group_member_fish", lambda zarr_path: ())
     with pytest.raises(IntakeRefused) as refused:
         import_delivery(sha, tmp_path / "runs" / "a1", destination_root=destination, session_dir=session)
     assert refused.value.code == "delivery_duplicate_individual_fish"
@@ -1365,6 +1366,7 @@ def test_distinct_fish_in_every_arena_imports(tmp_path, monkeypatch) -> None:
 
     fish = iter(["fish-1", "fish-2"])
     monkeypatch.setattr(importing, "_individual_fish", lambda zarr_path: next(fish))
+    monkeypatch.setattr(importing, "_group_member_fish", lambda zarr_path: ())
     _, _, _, result = _import(tmp_path, monkeypatch)
     assert result.verdict
 
@@ -1382,6 +1384,7 @@ def test_the_refusal_names_each_repeated_fish_and_its_arenas(monkeypatch) -> Non
         lambda plan: [Path(f"a{i}") for i in range(4)],
     )
     monkeypatch.setattr(importing, "_individual_fish", lambda zarr_path: fish[str(zarr_path)])
+    monkeypatch.setattr(importing, "_group_member_fish", lambda zarr_path: ())
     with pytest.raises(IntakeRefused) as refused:
         importing._require_distinct_individual_fish({"parents": parents})
     assert refused.value.code == "delivery_duplicate_individual_fish"
@@ -1389,3 +1392,79 @@ def test_the_refusal_names_each_repeated_fish_and_its_arenas(monkeypatch) -> Non
 
     fish["a1"] = "z6"
     importing._require_distinct_individual_fish({"parents": parents})  # distinct: admitted
+
+
+@pytest.mark.parametrize(
+    "subject,expected",
+    [
+        ({"subject_type": "dish_group", "subject_count": 2, "member_fish_ids": ["m1", "m2"]}, ("m1", "m2")),
+        ({"subject_type": "dish_group", "subject_count": 3}, ()),  # members not declared
+        ({"subject_type": "individual", "mzb_fish_id": "fish-a"}, ()),
+    ],
+)
+def test_the_members_a_parent_names_come_from_its_published_subject_record(
+    tmp_path, monkeypatch, subject, expected
+) -> None:
+    import zarr
+
+    from fisheye.intake import importing
+    from fisheye.shared import subject_metadata
+
+    zarr.open_group(str(tmp_path / "a.zarr"), mode="w")
+    monkeypatch.setattr(
+        subject_metadata, "resolve_subject_metadata",
+        lambda root, allow_legacy: _resolved_subject(subject, ()),
+    )
+    assert importing._group_member_fish(tmp_path / "a.zarr") == expected
+    assert importing._individual_fish(tmp_path / "a.zarr") == subject.get("mzb_fish_id")
+
+
+def test_a_parent_without_a_subject_record_names_no_members(tmp_path) -> None:
+    import zarr
+
+    from fisheye.intake import importing
+
+    zarr.open_group(str(tmp_path / "a.zarr"), mode="w")
+    assert importing._group_member_fish(tmp_path / "a.zarr") == ()
+
+
+def test_a_group_member_in_two_arenas_is_refused(monkeypatch) -> None:
+    """Member against member, and member against another arena's individual."""
+
+    from fisheye.intake import importing
+    from fisheye.utils import organize_transfer_recordings
+
+    parents = [{"identity": {"recording_id": f"rec_{i}"}} for i in range(4)]
+    individual = {"a0": None, "a1": None, "a2": "z9", "a3": None}
+    members = {"a0": ("m1", "m2"), "a1": ("m2", "m3"), "a2": (), "a3": ("z9", "m4")}
+    monkeypatch.setattr(
+        organize_transfer_recordings, "parent_zarr_paths",
+        lambda plan: [Path(f"a{i}") for i in range(4)],
+    )
+    monkeypatch.setattr(importing, "_individual_fish", lambda zarr_path: individual[str(zarr_path)])
+    monkeypatch.setattr(importing, "_group_member_fish", lambda zarr_path: members[str(zarr_path)])
+    with pytest.raises(IntakeRefused) as refused:
+        importing._require_distinct_individual_fish({"parents": parents})
+    assert refused.value.code == "delivery_duplicate_individual_fish"
+    assert refused.value.details == {
+        "repeated_fish": {"m2": ["rec_0", "rec_1"], "z9": ["rec_2", "rec_3"]}
+    }
+
+    members["a1"] = ("m3", "m5")
+    members["a3"] = ("m4", "m6")
+    importing._require_distinct_individual_fish({"parents": parents})  # distinct: admitted
+
+
+def test_groups_that_declare_no_members_are_not_compared(monkeypatch) -> None:
+    """An empty member list proves nothing, so it cannot refuse a delivery."""
+
+    from fisheye.intake import importing
+    from fisheye.utils import organize_transfer_recordings
+
+    parents = [{"identity": {"recording_id": f"rec_{i}"}} for i in range(2)]
+    monkeypatch.setattr(
+        organize_transfer_recordings, "parent_zarr_paths", lambda plan: [Path("a0"), Path("a1")]
+    )
+    monkeypatch.setattr(importing, "_individual_fish", lambda zarr_path: None)
+    monkeypatch.setattr(importing, "_group_member_fish", lambda zarr_path: ())
+    importing._require_distinct_individual_fish({"parents": parents})
