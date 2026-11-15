@@ -1,7 +1,8 @@
 # Shared coordinate spaces: Orange, Citrus, Palette
 
 - **Status:** draft proposal. Jeremy asked for it on 2026-10-12. Palette drafts
-  it here; Orange and Citrus answer the questions in §7. Once they agree, it
+  it here. Orange and Citrus answered the questions in §7 (2026-10-12/13,
+  updated 2026-11-14). Once they agree, it
   moves to agent-contracts as a three-party contract (proposed home:
   `systems/coordinate_spaces_v1/`).
 - **Owner:** Jeremy Delahanty. **Last reviewed:** 2026-11-14 (citations
@@ -266,30 +267,99 @@ d. **Two mm definitions.** The GoodCopBadCop workflow computes canvas mm from
    camera-derived. Mark the canvas route as legacy-only in that doc. New
    analyses use `physical.camera_mm.v1`.
 
-## 7. Open questions
+## 7. Questions and answers
 
-> **Sent 2026-11-14.** Q-O1..Q-O5 went in full to Orange (`orange [87c8d1]`) and
-> Q-C1..Q-C7 to Citrus (`citrus-agent`). Replies go to the session
-> `PR-monitor [1f32ae]`. No answers have been recorded yet.
-> Q-C7 is partly answered by code merged since: see §9.
+Both producers answered on this PR in October:
+- Citrus, 2026-10-12: <https://github.com/jmdelahanty/palette/pull/377#issuecomment-6130745356> (evidence at Citrus `5feca8d`);
+- Orange, 2026-10-13: <https://github.com/jmdelahanty/palette/pull/377#issuecomment-6150487989> (evidence at Orange `009eaf1`).
+
+Both sent updates on 2026-11-14. Citrus's was checked against Citrus main
+`be2cd47` and `/etc/pancakebatter/rigs/omnifin0.yml` rev 15.
+
+> *Correction (2026-11-14):* an earlier revision of this section said the
+> questions were sent to the owners on 2026-11-14 and still unanswered. They
+> had already been answered in the October comments above. The 2026-11-14
+> re-send was redundant, and it is what prompted the updates recorded here.
+
+**Status key:**
+- **answered:** nothing more is needed from the producer for the contract text;
+- **answered, build pending:** the answer is settled, but the producer still has to build something;
+- **open:** a decision or measurement is still missing.
+
+Palette has independently checked the following against producer main:
+- Citrus `be2cd47`: `src/core/display_snapshot.cpp:312-318` still takes the token from inside the parenthesis, and `src/ipc/pose_metadata.h:37` still sets `kCameraViewAssumed = "dorsal_unmirrored"`.
+- Orange `ec15c94` (2026-10-27) is the commit that defines `camera_native_pixels` once in `docs/recording_metadata.md`.
+
+Palette has **not** seen `rig.yml`: it is not on this workstation, and
+`jmdelahanty/pancakebatter` main has no `rigs/` tree. Its contents below are as
+reported by Citrus.
 
 ### For Orange
 
 - **Q-O1.** Is `camera_native_pixels` (in `coordinate_frame` and rim observations) the recorded video raster after AOI, flips and binning, or the full sensor? Are `full_frame_pixels` and `source_frame_pixels` the same raster?
+  - **Answered** (10-13; confirmed 11-14). All three are one raster, `camera.recorded_px.v1`. It is the AOI stream: unbinned, with no flip and no rotation. On pancake0 the AOI is the full sensor (4512×4512 at offset 0), so `camera.sensor_px` and `camera.recorded_px` coincide there. Orange defined the space once in `docs/recording_metadata.md` (`ec15c94`). Citrus's `camera_native_px` also belongs on this row of the alias table.
 - **Q-O2.** Which camera settings that change geometry can be set on the rigs today: AOI OffsetX/Y, ReverseX/ReverseY, binning, decimation, any software rotation? Which of them are already in `camera_runtime` or `sensor_pipeline`, under which keys?
+  - **Answered** (10-13; updated 11-14). Settable: AOI Width, Height, OffsetX and OffsetY, plus `Bin` (Orange requests 1x1).
+  - The HB-20000SBM has no ReverseX/Y, Binning or Decimation nodes, and Orange applies no software rotation.
+  - The inventory is recorded in `camera_runtime.<serial>.sensor_pipeline` (schema v3) and summarised in `raster_geometry`. Orange verified this on the rig on 2026-11-10.
+  - In October `Bin` was neither read nor set. The 11-14 update says Orange now requests it.
 - **Q-O3.** Can Orange seal `camera_geometry_v1` (§4) in the start snapshot, including `viewing_side` and `optical_mirror_count` from rig configuration? Who maintains the rig configuration?
+  - **Answered, build pending (Jeremy).** Pancake Batter's `rigs/<rig_id>/rig.yml` owns the declared physical facts: `viewing_side`, mirrors and `recorded_space_parity`. Since 2026-11-03 the start snapshot pins the rig documents under `session.rig_config`.
+  - The per-camera `camera_geometry_v1` record, built from the readback and refusing on a mismatch, is designed (10-13) but not built. It waits for Jeremy.
 - **Q-O4.** Are any current or past rigs viewing from below (ventral), or through a fold mirror?
+  - **Answered.** No rig views from below or through a fold mirror. omnifin0 is top-down and dorsal.
+  - `rig.yml` lists the mirror count as `unknown` until someone reads it off the rig.
+  - The undercolor colour camera has no recorded orientation (10-13 answer).
 - **Q-O5.** Orange clamps crop windows inside the frame. Confirm that a crop's `x_px`/`y_px` are its top-left in `camera.recorded_px`, as integer pixel edges.
+  - **Answered.** Confirmed: the origin is `clamp((int)cx − size/2, 0, W − size)`. The clamp shifts the window and never truncates it, and the rule is the same on every path.
+  - Caveat for Palette: on the device path, pose events' `crop.x_px` is the **192 px pose window**, not the 384 px video crop in `crop_meta.csv`. Orange will add a `crop.role` field to say which.
+  - Orange's implicit convention is `continuous_pixel_edge` for points and `pixel_edge_half_open` for boxes (10-13).
 
 ### For Citrus
 
 - **Q-C1.** What physically explains the y reflection in omnifin0 arena 1's camera→canvas homography: rear projection, projector menu flip, a mirror, or the camera? Is the same true for its other arenas and for the other rigs?
+  - **Answered for omnifin0** (11-14, as reported). `rig.yml` rev 15 declares:
+    - `projection_mode` rear;
+    - `projector_firmware_flip` vertical (BenQ "Rear Ceiling");
+    - mount rotation 180°;
+    - `optical_mirror_count` 0;
+    - `viewing_side` dorsal.
+  - That gives `canvas_space_parity` +1. Composed with Citrus's OpenGL presentation reflection, the signed chain is −1, which matches det < 0 on all four arenas. The rev-4 commissioning homographies (2026-11-13) are still det < 0.
+  - In October one reflection was unaccounted for; the declared projector menu closes it.
+  - Open: other rigs, and omnifin0 fits made before 2026-08-10, whose det > 0 is not evidence about the optics.
 - **Q-C2.** Can Citrus capture `xrandr --verbose` for the selected output each session (current rotation, reflection, `Transform:`), and declare `output_rotation`, `output_reflection` and `output_transform_matrix`?
+  - **Answered, build pending (Citrus).** The raw `--verbose` block is already stored per session under `/metadata/display`.
+  - The token bug starts in Citrus's parser (`src/core/display_snapshot.cpp:312-318` at `be2cd47`), which still takes the wrong word. Citrus owns that fix; it is not made yet. The §6a Palette fix still applies to the value Palette derives.
+  - The selected output is now DP-2 1080p240, on its own X screen.
 - **Q-C3.** Can Citrus record `projection_mode`, `projector_mount`, `projector_firmware_flip` and the projection-path `optical_mirror_count` per rig? Where would they live: rig config, session metadata, or the geometry receipt?
+  - **Answered, build pending.** The facts live in Pancake Batter's `rig.yml`.
+  - Citrus pins the rig file (rig_id, revision, sha) and reads `media_stack`. It does not yet copy the parity fields into the geometry receipt.
 - **Q-C4.** What pixel convention were the camera→canvas calibrations fitted in? Were the point pairs integer pixel centres from OpenCV, or edge coordinates?
+  - **Answered.** The fits use pixel centres on both sides, with no ±0.5 shift, so `fit_pixel_convention = pixel_center`.
+  - Only candidates fitted after 2026-10-05 declare it (`coordinate_contract` v2). The active 2026-09-14 artifacts carry v1 and no declaration.
+  - Palette applies the +0.5 shift itself.
 - **Q-C5.** Can the homography record carry `handedness_declared` and `orientation_basis` (§3)? Can Citrus refuse its own calibration when the matrix sign disagrees?
+  - **Open (Jeremy).** The sign is measured today, but nothing declares or refuses it.
+  - Design: record it at Fit; refuse at Promote with `declared_parity_mismatch` or `declared_parity_undeclared`; recheck at START. Not built; it waits for Jeremy.
 - **Q-C6.** For the arena origin: are integer-valued floats guaranteed today, or can a fractional origin occur?
+  - **Answered.** The origin is an integer by construction (int arithmetic) and becomes float64 only at the H5 boundary.
+  - Citrus proposed the §6c rule: Palette accepts `float.is_integer()` and refuses anything else, and the field becomes an integer in the next schema. Adopting it is Jeremy's call.
 - **Q-C7.** Is `pose_observation v2.camera_view_assumed` set from rig configuration, or constant? Can it come from Orange's `viewing_side` once that exists?
+  - **Answered.** It is the compile-time constant `"dorsal_unmirrored"` (`src/ipc/pose_metadata.h:37`), and pose observation v3 pins it as a schema `const` (§9).
+  - Deriving it from `viewing_side` needs a pose contract bump. Until then, Palette's §5 item 2 check compares against a constant. That still fails loudly the day a ventral or mirrored rig appears.
+
+### What still blocks the move to agent-contracts (2026-11-14)
+
+No producer question blocks the contract text any more. What remains:
+1. **Decisions for Jeremy:**
+   - the Q-C5 design (declare at Fit, refuse at Promote, recheck at START);
+   - building Orange's per-camera `camera_geometry_v1` (Q-O3);
+   - the §6c arena-origin rule;
+   - what to do with the phototaxis sessions already registered without orientation evidence (§9).
+2. **Fixtures:** one preserved rig and one reflected rig. omnifin0 can serve as the reflected one once its `rig.yml` is readable by Palette.
+3. **Read-off and verification:** omnifin0's mirror count is still `unknown`. Palette has not seen `rig.yml` rev 15 itself.
+
+Producer build items (Citrus's parser fix in Q-C2, the parity fields in the geometry receipt in Q-C3, Orange's `crop.role`) belong to §8 step 3. They do not block the contract text.
 
 ## 8. Rollout
 
@@ -297,7 +367,9 @@ d. **Two mm definitions.** The GoodCopBadCop workflow computes canvas mm from
    - The §6a xrandr parser fix.
    - The §6b agent-contracts one-line fix.
    - Stamp `orientation_status = "orientation_unverified"` on geometry runs from all current recordings, so nothing claims verified orientation.
-2. **Answers to §7,** then the agent-contracts PR `systems/coordinate_spaces_v1/`, containing:
+2. **Answers to §7** (received 2026-10-12/13 and updated 2026-11-14; what still
+   blocks is listed at the end of §7), then the agent-contracts PR
+   `systems/coordinate_spaces_v1/`, containing:
    - the registry and alias table;
    - the transform-record schema;
    - the producer evidence schemas;
@@ -317,6 +389,10 @@ A left/right split on the fish's midline needs every link of the chain to be ver
 - the projector and canvas parity (Q-C1–Q-C3);
 - the homography sign check (§5 item 1);
 - `camera_view_assumed` backed by declared `viewing_side` (§5 item 2).
+
+As of 2026-11-14 the omnifin0 parity chain is declared and accounted for
+(Q-C1, Q-O2, Q-O4). The sign check and a `viewing_side`-backed
+`camera_view_assumed` are still not built.
 
 Until those land, phototaxis sessions are acquired under `orientation_unverified`. Each needs the one-off asymmetric-pattern check on its rig before its left/right results are trusted. **The minimum to start phototaxis safely:** steps 1 and 2, plus Citrus's Q-C1 answer and that check run on the phototaxis rig.
 
@@ -344,7 +420,7 @@ All other citations, including every `AC:` one, still hold.
 - **Pose observation v3** (`6988c81f`, 2026-10-14, admission revision 7)
   carries `camera_view_assumed`, but as a schema `const: "dorsal_unmirrored"`
   (`shared/contracts/citrus_pose_observation_contract.v3.schema.json:487-489`).
-  This partly answers Q-C7: today the value is a constant, not rig
+  This matches Citrus's Q-C7 answer: the value is a constant, not rig
   configuration. Under v3 a ventral or mirrored rig cannot declare itself at
   all; it would need a schema change. The semantic-hash v4 cases
   (`citrus_palette_semantic_hash_v4_cases.json`) also embed the constant.
