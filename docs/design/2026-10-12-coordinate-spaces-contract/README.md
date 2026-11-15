@@ -486,7 +486,15 @@ Run on Jeremy's go. Rig `omnifin0`, `rig_geometry_revision` 16, rig file
 **Pattern.** Citrus `static_dots`, white on black, in every arena: a 6 mm disk at the `top_left` preset and a 3 mm disk at `top_right`.
 
 **Evidence (held by its producers; nothing is transferred yet, which is Jeremy's to start):**
-- **Camera:** Orange guided capture, calibration session `calsess_2026_11_15T17_29_47Z_shadow`, commissioning record `omnifin0_20261115T172434Z_orientation_check_nir_filters_off_static_dots` step 02; 10 frames per camera at 10 ms, plus `black_reference`. Orange holds the files and their shas.
+- **Camera:** Orange guided capture, calibration session `calsess_2026_11_15T17_29_47Z_shadow`, commissioning record `omnifin0_20261115T172434Z_orientation_check_nir_filters_off_static_dots` step 02; 10 frames per camera at 10 ms, plus `black_reference`. On pancake0, read-only:
+  - result JSON `/home/jeremy/orange_data/calibrations/commissioning/omnifin0_20261115T172434Z_orientation_check_nir_filters_off_static_dots/steps/02_static_dots_wet_tank_projected_surface_omnifin0_/orange_gui_guided_capture_20261115T172921Z.json`, sha256 `c8a07d0cebbbb351562b582e0146bf741e4564a412774eb089bee8bbb000f839`. The commanded `center_canvas_px`/`radius_px` are at `samples[1].workflow.citrus_scene_post_capture.static_dots`; large radius about 12.7 px, so about 4.23 canvas px/mm;
+  - calibration session `/home/jeremy/orange_data/calibrations/sessions/calsess_2026_11_15T17_29_47Z_shadow`, `session_index.json` sha256 `0b4ec4121822aa49ac8af7466a3cbf995d8665a3f9e212495bc1aee8fc970185`;
+  - `static_dots` capture sha256s (`black_reference` in brackets):
+    - 2010093 `c40a0d2e…` (`864d2455…`);
+    - 2010094 `302161d1…` (`07bf641f…`);
+    - 2010095 `1176435b…` (`bd7f865a…`);
+    - 2010096 `af9058c4…` (`c48385b4…`).
+  - Orange's camera centroids were thresholded at 153 DN on saturated disks, so they may be biased by up to one pixel. The result JSON does not pin the rig revision; revision 16 comes from the host at 17:29Z.
 - **Scan-out:** `xwd` of X screen `:1.1` (1920×1080) at 17:33:52Z, scene presented at 17:33:51.351Z; rig GUI `fde5467`. Files on pancake0: `screen_1_1.xwd` sha256 `74d30722bbe78f51a871751ec4ccc74607caa85f1096867ab8ec932c91c4e0de`, a PNG copy `ab1978e99ef085165e398d41cfef281d91eb3064f9677bf3f334fc60b9e33130`, and the scene status. They currently sit in a Citrus agent scratchpad and need staging somewhere durable.
 - **Active homographies:** set `calgrp_2026_11_13T00_27_59Z` (`homography_grid_projected_surface_g4`). Per arena, `homography_arena_N_<serial>.yml`, sha256s:
   - arena 1: `033f7b05…`, det −6.397e−3;
@@ -511,7 +519,7 @@ Run on Jeremy's go. Rig `omnifin0`, `rig_geometry_revision` 16, rig file
 1. **Presentation parity is −1, measured.** On scan-out, every blob sits at `y = 1079 − canvas_y` (±0.1 px) with x unchanged, and the blob pixel counts equal the scene's. §2 is corrected above. #115's `kPresentationParity = −1` is confirmed, and the vertical firmware flip is now pinned separately from it.
 2. **Camera ↔ canvas handedness: x preserved, y reflected (det < 0) on all four arenas.**
    - Through the active 11-13 homographies, every camera blob lands within 1.6 px of its canvas centre, with `w` = 0.996–1.000 (Citrus).
-   - Palette checked independently with the homography sealed in the 10-17/18 phototaxis H5s, which is the same matrix in every Citrus H5 from 2026-10-09 to 2026-11-06, det < 0. It maps today's camera blobs onto the commanded dots within 0.2–8 px (≤ about 2 mm at about 4.2 canvas px/mm). Every dot lands in its commanded corner.
+   - Palette checked independently with the homography sealed in the 10-17/18 phototaxis H5s, which is the same matrix in every Citrus H5 from 2026-10-09 to 2026-11-06, det < 0. It maps today's camera blobs onto the commanded dots within 0.2–8 px (≤ about 2 mm at 4.23 canvas px/mm). Every dot lands in its commanded corner.
    - The residual is the known November projector move (0.65–2.0 mm), a translation rather than a flip.
 3. **10-17/18 phototaxis sessions.** Per Jeremy's decision, this check plus his statement that projector orientation did not change since October lifts `orientation_unverified` for the camera ↔ canvas link of those sessions.
 4. **Still declared only: camera parity relative to the dish.** This check shows camera and projected canvas agree. It does not show the camera image is unmirrored relative to the fish. If it were, stimuli would still land on the body-frame "left", but that would be anatomical right. That link rests on Q-O2/Q-O4 (no ReverseX/Y nodes, dorsal view, `rig.yml` mirror count 0). A printed asymmetric target in a dish would measure it. Whether to require that is Jeremy's call.
