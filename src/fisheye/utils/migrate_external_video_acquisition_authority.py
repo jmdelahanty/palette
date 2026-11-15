@@ -2,8 +2,8 @@
 """Migrate metadata-only archives to sealed external-video acquisition authority.
 
 The command is dry-run by default.  It is deliberately limited to one-video
-recordings whose camera identity can be corroborated by recording attrs, the
-recording id, and the source-video filename.  Video geometry is probed from the
+recordings whose camera identity is corroborated by the source-video filename
+and recorded attrs or the recording manifest.  Video geometry is probed from the
 source file and must agree with every populated legacy metadata field before an
 archive is changed.
 """
@@ -84,22 +84,57 @@ def _recording_path(root: zarr.Group, zarr_path: Path) -> Path:
     return inferred
 
 
-def _camera_id(root: zarr.Group, *, recording_id: str, source_video: Path) -> str:
-    serials_raw = root.attrs.get("camera_serials")
-    if not isinstance(serials_raw, (list, tuple)) or len(serials_raw) != 1:
-        raise ValueError("camera_serials must contain exactly one camera for this migration.")
-    serial = _required_text(str(serials_raw[0]), field="camera_serials[0]")
+def _manifest_camera_id(recording_path: Path) -> str | None:
+    manifest_path = recording_path / "recording_manifest.json"
+    if not manifest_path.is_file():
+        return None
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    value = manifest.get("camera_id") if isinstance(manifest, Mapping) else None
+    if value in (None, ""):
+        return None
+    return _required_text(str(value), field="recording_manifest.camera_id")
+
+
+def _camera_id(
+    root: zarr.Group,
+    *,
+    recording_id: str,
+    source_video: Path,
+    recording_path: Path,
+) -> str:
+    """Return the camera only when independent evidence sources all agree.
+
+    The source-video filename token is required. At least one recorded source
+    (camera_serials, root camera_id, or the recording manifest) must name the
+    same camera; a Cam<serial> token in recording_id is used when present.
+    """
+
     candidates = {
-        "camera_serials[0]": serial,
-        "recording_id": _camera_token(recording_id, field="recording_id"),
         "source_video filename": _camera_token(source_video.name, field="source_video filename"),
     }
+    serials_raw = root.attrs.get("camera_serials")
+    if serials_raw is not None:
+        if not isinstance(serials_raw, (list, tuple)) or len(serials_raw) != 1:
+            raise ValueError("camera_serials must contain exactly one camera for this migration.")
+        candidates["camera_serials[0]"] = _required_text(
+            str(serials_raw[0]), field="camera_serials[0]"
+        )
     existing = root.attrs.get("camera_id")
     if existing not in (None, ""):
         candidates["camera_id"] = _required_text(existing, field="camera_id")
+    manifest_camera = _manifest_camera_id(recording_path)
+    if manifest_camera is not None:
+        candidates["recording_manifest.camera_id"] = manifest_camera
+    if _CAMERA_TOKEN.search(recording_id):
+        candidates["recording_id"] = _camera_token(recording_id, field="recording_id")
+    if not {"camera_serials[0]", "camera_id", "recording_manifest.camera_id"} & set(candidates):
+        raise ValueError(
+            "Camera identity needs a recorded source (camera_serials, camera_id, or "
+            "recording_manifest.camera_id) besides the source-video filename."
+        )
     if len(set(candidates.values())) != 1:
         raise ValueError(f"Camera identity evidence conflicts: {candidates}")
-    return serial
+    return candidates["source_video filename"]
 
 
 def _source_video(root: zarr.Group, *, zarr_path: Path, recording_path: Path) -> Path:
@@ -147,6 +182,30 @@ def _assert_legacy_agreement(root: zarr.Group, meta: Mapping[str, Any]) -> None:
         value = attrs.get("fps")
         if value is not None and not math.isclose(float(value), meta["fps"], rel_tol=0, abs_tol=1e-6):
             raise ValueError(f"{label}.fps conflicts with probed video: {value} != {meta['fps']}")
+    # Overwrite re-mints the colour tags; a silent tv/pc flip changes how
+    # every downstream decoder scales pixels, so a recorded value must agree.
+    probed_pix_fmt = _pix_fmt_base(meta.get("pix_fmt"))
+    for label, value in (
+        ("root.video_pix_fmt", root.attrs.get("video_pix_fmt")),
+        ("source_video_metadata.pix_fmt", nested.get("pix_fmt")),
+    ):
+        recorded = _pix_fmt_base(value)
+        if recorded is not None and probed_pix_fmt is not None and recorded != probed_pix_fmt:
+            raise ValueError(f"{label} conflicts with probed video: {value} != {meta.get('pix_fmt')}")
+    recorded_range = root.attrs.get("video_color_range")
+    probed_range = meta.get("video_color_range")
+    if recorded_range not in (None, "", "unknown") and recorded_range != probed_range:
+        raise ValueError(
+            f"root.video_color_range conflicts with probed video: {recorded_range} != {probed_range}"
+        )
+
+
+def _pix_fmt_base(value: Any) -> str | None:
+    """Return the pixel format without imageio's "(tv)"/"(pc)" range suffix."""
+
+    if value in (None, "", "unknown"):
+        return None
+    return str(value).split("(", 1)[0].strip()
 
 
 def plan_migration(zarr_path: Path) -> tuple[MigrationPlan, dict[str, Any]]:
@@ -159,7 +218,12 @@ def plan_migration(zarr_path: Path) -> tuple[MigrationPlan, dict[str, Any]]:
         zarr_path=zarr_path,
         recording_path=recording_path,
     )
-    camera_id = _camera_id(root, recording_id=recording_id, source_video=source_video)
+    camera_id = _camera_id(
+        root,
+        recording_id=recording_id,
+        source_video=source_video,
+        recording_path=recording_path,
+    )
     meta = dict(probe_video_metadata(source_video))
     meta.update(
         {

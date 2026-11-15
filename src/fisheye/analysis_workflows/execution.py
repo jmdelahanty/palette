@@ -27,6 +27,10 @@ from fisheye.shared.subject_shape_storage import (
     SUBJECT_SHAPE_LEGACY_EXPLICIT_STORAGE,
 )
 
+from .availability import (
+    PROVIDER_TRACK_KINEMATICS_RUN_PATTERN,
+    PROVIDER_TRACK_KINEMATICS_SELECTOR_NAMES,
+)
 from .contracts import AnalysisWorkflow
 from .dag import NodePlan, WorkflowPlan
 from .execution_profiles import (
@@ -162,6 +166,8 @@ def _track_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
         (
             "--keypoint-run",
             context.dependency_run("refined_keypoints"),
+            "--tracking-run",
+            context.dependency_run("tracks"),
             "--run-name",
             context.output_run,
             "--output-shard-rows",
@@ -190,8 +196,6 @@ def _track_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
         == SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
     ):
         command[4:4] = [
-            "--tracking-run",
-            context.dependency_run("tracks"),
             "--execution-profile",
             SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID,
         ]
@@ -227,7 +231,34 @@ def _tracks_command(context: StageCommandContext) -> tuple[str, ...]:
     return tuple(command)
 
 
+def _provider_motion_dependency_run(value: str) -> str | None:
+    prefix = "provider/"
+    if not value.startswith(prefix):
+        return None
+    run_name = value[len(prefix) :]
+    if (
+        PROVIDER_TRACK_KINEMATICS_RUN_PATTERN.fullmatch(run_name) is None
+        or run_name in PROVIDER_TRACK_KINEMATICS_SELECTOR_NAMES
+    ):
+        raise WorkflowExecutionError(
+            "provider-scoped swim-bout execution requires one exact "
+            "provider-motion run"
+        )
+    return run_name
+
+
 def _swim_bout_command(context: StageCommandContext) -> tuple[str, ...]:
+    dependency_run = context.dependency_run("track_kinematics")
+    provider_run = _provider_motion_dependency_run(dependency_run)
+    if provider_run is not None and (
+        context.execution_profile is None
+        or context.execution_profile.profile_id
+        != SELECTOR_INELIGIBLE_CANARY_EXECUTION_PROFILE_ID
+    ):
+        raise WorkflowExecutionError(
+            "provider-motion swim-bout execution requires the explicit "
+            "selector-ineligible canary execution profile"
+        )
     command = _module_command(
         context,
         "fisheye.analysis_workflows.materializers.swim_bouts",
@@ -241,8 +272,16 @@ def _swim_bout_command(context: StageCommandContext) -> tuple[str, ...]:
             "--apply",
             "--json",
             "--",
-            "--track-kinematics-run",
-            context.dependency_run("track_kinematics"),
+            *(
+                (
+                    "--track-kinematics-scope",
+                    "provider",
+                    "--track-kinematics-run",
+                    provider_run,
+                )
+                if provider_run is not None
+                else ("--track-kinematics-run", dependency_run)
+            ),
             "--track-id",
             "0",
             "--method",

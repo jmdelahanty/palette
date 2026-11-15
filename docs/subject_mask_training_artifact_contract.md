@@ -3,7 +3,7 @@
 version: 2
 status: active
 implementation: implemented
-last_verified: 2026-07-01
+last_verified: 2026-09-30
 -->
 
 Purpose: define the merged training artifact for a generalized ROI-local

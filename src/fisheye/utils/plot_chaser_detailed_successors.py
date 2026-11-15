@@ -27,6 +27,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Circle  # noqa: E402
 import numpy as np
 
@@ -63,11 +64,16 @@ from fisheye.visualization.chaser_body_bearing_distance import (
     positive_probability_color_max,
     uniformly_sample_indices,
 )
-
+from fisheye.visualization.chaser_provider_display import (
+    POSITION_PROVIDER_DISPLAY_POLICY_ID,
+    PositionProviderDisplayBinding,
+    paired_position_provider_display_bindings,
+    position_provider_display_binding,
+)
 
 RECEIPT_SCHEMA_ID = "palette.analysis.chaser_detailed_plot_bundle.receipt"
-RECEIPT_SCHEMA_VERSION = 6
-PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v5"
+RECEIPT_SCHEMA_VERSION = 7
+PLOT_RECIPE_ID = "sealed_chaser_detailed_plot_bundle_v6"
 PLOT_DPI = 180
 DENSE_DISPLAY_ALGORITHM = "all_exact_source_rows_rasterized_no_interpolation_v1"
 STATIC_TRAJECTORY_ROLE_MARKER_MAX_PER_PANEL_CHASER = 64
@@ -187,6 +193,18 @@ def _plain(value: Any) -> Any:
     return value
 
 
+def _paired_provider_display(
+    provider_ids: Sequence[str],
+) -> tuple[PositionProviderDisplayBinding, PositionProviderDisplayBinding]:
+    try:
+        return paired_position_provider_display_bindings(
+            provider_ids=provider_ids,
+            provider_roles=("keypoint", "detection"),
+        )
+    except ValueError as exc:
+        _fail(f"Detailed provider display binding is invalid: {exc}")
+
+
 def _load_exact_chaser_appearance(
     relative_keypoint: Any,
 ) -> ChaserAppearanceProjection:
@@ -304,10 +322,13 @@ def verify_detailed_plot_inputs(
     radial = (radial_keypoint, radial_detection)
     if any(handle.successor_kind != "chaser_radial_near_field" for handle in radial):
         _fail("Detailed provider comparison requires two radial/near-field products.")
-    if len(
-        {handle.recording_id for handle in (*chain, *radial)}
-        | {relative_keypoint.recording_id, relative_detection.recording_id}
-    ) != 1:
+    if (
+        len(
+            {handle.recording_id for handle in (*chain, *radial)}
+            | {relative_keypoint.recording_id, relative_detection.recording_id}
+        )
+        != 1
+    ):
         _fail("Detailed plot inputs belong to different recordings.")
     for handle in (*chain, *radial):
         try:
@@ -321,7 +342,10 @@ def verify_detailed_plot_inputs(
     bout_sources = bout.scientific_manifest.get("sources")
     escape_sources = escape.scientific_manifest.get("sources")
     controller_source = controller.scientific_manifest.get("source_relative_frame")
-    if not all(isinstance(value, Mapping) for value in (bout_sources, escape_sources, controller_source)):
+    if not all(
+        isinstance(value, Mapping)
+        for value in (bout_sources, escape_sources, controller_source)
+    ):
         _fail("Detailed plot dependency bindings are absent.")
     if (
         bout_sources.get("controller_trial_payload_sha256")
@@ -373,7 +397,10 @@ def verify_detailed_plot_inputs(
             _fail(f"Provider comparison has mismatched {manifest_name} evidence.")
     _epoch_records(radial_keypoint)
     for policy_name in ("coordinate_policy", "scale_policy"):
-        values = [relative.manifest.get(policy_name) for relative in (relative_keypoint, relative_detection)]
+        values = [
+            relative.manifest.get(policy_name)
+            for relative in (relative_keypoint, relative_detection)
+        ]
         if not all(isinstance(value, Mapping) for value in values) or (
             canonical_json_sha256(_plain(values[0]))
             != canonical_json_sha256(_plain(values[1]))
@@ -429,13 +456,17 @@ def verify_detailed_plot_inputs(
     _body_bearing_distance_plot_data(relative_keypoint, radial_keypoint)
 
 
-def _radial_cdf_rows(handle: Any) -> dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]]:
+def _radial_cdf_rows(
+    handle: Any,
+) -> dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]]:
     epoch = _array(handle, "cdf_epoch_role_code").astype(np.int64)
     behavior = _array(handle, "cdf_behavior_role_code").astype(np.int64)
     chaser = _array(handle, "cdf_chaser_identity_code").astype(np.int64)
     threshold = _array(handle, "cdf_threshold_mm").astype(np.float64)
     fraction = _array(handle, "cdf_fraction_at_or_below").astype(np.float64)
-    if not (epoch.size == behavior.size == chaser.size == threshold.size == fraction.size):
+    if not (
+        epoch.size == behavior.size == chaser.size == threshold.size == fraction.size
+    ):
         _fail("Radial CDF table columns have different lengths.")
     result = {}
     for key in sorted(set(zip(epoch.tolist(), behavior.tolist(), chaser.tolist()))):
@@ -501,7 +532,10 @@ def _collapsed_fish_frame(relative: Any) -> tuple[np.ndarray, np.ndarray]:
     valid = np.asarray(relative.base_frame_chaser("fish_position_valid"), dtype=bool)
     expected_position_shape = (relative.n_frames, relative.n_chasers, 2)
     expected_valid_shape = (relative.n_frames, relative.n_chasers)
-    if positions.shape != expected_position_shape or valid.shape != expected_valid_shape:
+    if (
+        positions.shape != expected_position_shape
+        or valid.shape != expected_valid_shape
+    ):
         _fail("Fish-position arrays do not preserve frame/chaser/source-xy shape.")
     if not np.all(valid == valid[:, :1]):
         _fail("Fish-position validity is not repeated identically per chaser.")
@@ -686,7 +720,9 @@ def _radial_metric_rows(handle: Any) -> dict[tuple[int, int, int], dict[str, flo
         "distance_p25_mm": _array(handle, "metric_distance_p25_mm").astype(np.float64),
         "distance_p50_mm": _array(handle, "metric_distance_p50_mm").astype(np.float64),
         "distance_p75_mm": _array(handle, "metric_distance_p75_mm").astype(np.float64),
-        "near_fraction": _array(handle, "metric_near_zone_fraction_valid").astype(np.float64),
+        "near_fraction": _array(handle, "metric_near_zone_fraction_valid").astype(
+            np.float64
+        ),
         "near_dwell_s": _array(handle, "metric_near_zone_dwell_s").astype(np.float64),
         "entry_rate_per_min": _array(
             handle, "metric_near_zone_entry_rate_per_min_valid_time"
@@ -741,13 +777,16 @@ def render_provider_distance_cdf(
     )
     epoch_registry = _registry(radial_keypoint.scientific_manifest, "epoch_role")
     behavior_registry = _registry(radial_keypoint.scientific_manifest, "behavior_role")
-    provider_names = [
+    provider_ids = [
         str(handle.scientific_manifest["position_provider"]["provider_id"])
         for handle in handles
     ]
+    provider_display = _paired_provider_display(provider_ids)
     for index, key in enumerate(keys):
         ax = axes.flat[index]
-        for provider_index, (name, provider_rows) in enumerate(zip(provider_names, rows)):
+        for provider_index, (display, provider_rows) in enumerate(
+            zip(provider_display, rows, strict=True)
+        ):
             x, y = provider_rows[key]
             valid = np.isfinite(x) & np.isfinite(y)
             ax.plot(
@@ -756,7 +795,7 @@ def render_provider_distance_cdf(
                 marker="o",
                 markersize=3,
                 linewidth=1.4,
-                label=name,
+                label=display.display_label,
                 color=("#1f77b4", "#d95f02")[provider_index],
             )
         epoch_name = epoch_registry.get(str(key[0]), f"epoch {key[0]}")
@@ -804,6 +843,7 @@ def render_provider_radial_near_field_summary(
         str(handle.scientific_manifest["position_provider"]["provider_id"])
         for handle in handles
     ]
+    provider_display = _paired_provider_display(provider_ids)
     rows = tuple(_radial_metric_rows(handle) for handle in handles)
     if set(rows[0]) != set(rows[1]) or not rows[0]:
         _fail("Paired radial metric products expose different or empty strata.")
@@ -814,8 +854,8 @@ def render_provider_radial_near_field_summary(
     colors = ("#1f77b4", "#d95f02")
 
     figure, axes = plt.subplots(2, 2, figsize=(17, 11), constrained_layout=True)
-    for provider_index, (provider_id, provider_rows) in enumerate(
-        zip(provider_ids, rows, strict=True)
+    for provider_index, (display, provider_rows) in enumerate(
+        zip(provider_display, rows, strict=True)
     ):
         median = np.asarray(
             [provider_rows[key]["distance_p50_mm"] for key in keys], dtype=float
@@ -834,7 +874,7 @@ def render_provider_radial_near_field_summary(
             fmt="o",
             capsize=3,
             color=colors[provider_index],
-            label=provider_id,
+            label=display.display_label,
         )
         near_fraction = np.asarray(
             [provider_rows[key]["near_fraction"] for key in keys], dtype=float
@@ -845,7 +885,7 @@ def render_provider_radial_near_field_summary(
             width=0.34,
             color=colors[provider_index],
             alpha=0.78,
-            label=provider_id,
+            label=display.display_label,
         )
         dwell = np.asarray(
             [provider_rows[key]["near_dwell_s"] for key in keys], dtype=float
@@ -856,7 +896,7 @@ def render_provider_radial_near_field_summary(
             width=0.34,
             color=colors[provider_index],
             alpha=0.62,
-            label=f"{provider_id} · dwell",
+            label=f"{display.compact_label} · dwell",
         )
 
     axes[0, 0].set_title("Simple distance: median and interquartile range")
@@ -891,8 +931,8 @@ def render_provider_radial_near_field_summary(
     if radial_keys[0] != radial_keys[1] or radial_keys[0] != keys or not radial_keys[0]:
         _fail("Paired radial selection products expose different or empty strata.")
     stratum_colors = plt.get_cmap("tab10")
-    for provider_index, (provider_id, columns) in enumerate(
-        zip(provider_ids, radial_rows, strict=True)
+    for provider_index, (display, columns) in enumerate(
+        zip(provider_display, radial_rows, strict=True)
     ):
         epoch, behavior, chaser, start, end, selection = columns
         for stratum_index, key in enumerate(radial_keys[0]):
@@ -907,15 +947,49 @@ def render_provider_radial_near_field_summary(
                 color=stratum_colors(stratum_index % 10),
                 linestyle=("-", "--")[provider_index],
                 linewidth=1.15,
-                label=(
-                    f"{labels[stratum_index].replace(chr(10), ' · ')} · {provider_id}"
-                ),
+                label="_nolegend_",
             )
     axes[0, 1].axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
     axes[0, 1].set_title("Area-corrected moving-chaser radial selection")
     axes[0, 1].set_xlabel("fish–chaser distance (mm)")
     axes[0, 1].set_ylabel("geometric selection index")
-    axes[0, 1].legend(fontsize=5.8, ncols=2)
+    stratum_handles = [
+        Line2D(
+            [],
+            [],
+            color=stratum_colors(index % 10),
+            linewidth=1.4,
+            label=label.replace("\n", " · "),
+        )
+        for index, label in enumerate(labels)
+    ]
+    provider_handles = [
+        Line2D(
+            [],
+            [],
+            color="black",
+            linestyle=("-", "--")[index],
+            linewidth=1.4,
+            label=display.compact_label,
+        )
+        for index, display in enumerate(provider_display)
+    ]
+    stratum_legend = axes[0, 1].legend(
+        handles=stratum_handles,
+        fontsize=5.8,
+        ncols=2,
+        loc="upper right",
+        title="semantic stratum",
+        title_fontsize=6.2,
+    )
+    axes[0, 1].add_artist(stratum_legend)
+    axes[0, 1].legend(
+        handles=provider_handles,
+        fontsize=6.5,
+        loc="lower right",
+        title="fish position",
+        title_fontsize=6.5,
+    )
 
     near_radius = float(
         radial_keypoint.scientific_manifest["config"]["near_zone_radius_mm"]
@@ -925,8 +999,8 @@ def render_provider_radial_near_field_summary(
     axes[1, 0].set_ylim(bottom=0.0)
 
     entry_axis = axes[1, 1].twinx()
-    for provider_index, (provider_id, provider_rows) in enumerate(
-        zip(provider_ids, rows, strict=True)
+    for provider_index, (display, provider_rows) in enumerate(
+        zip(provider_display, rows, strict=True)
     ):
         rates = np.asarray(
             [provider_rows[key]["entry_rate_per_min"] for key in keys], dtype=float
@@ -937,7 +1011,7 @@ def render_provider_radial_near_field_summary(
             marker=("o", "s")[provider_index],
             color=colors[provider_index],
             linewidth=1.1,
-            label=f"{provider_id} · entries/min",
+            label=f"{display.compact_label} · entries/min",
         )
     axes[1, 1].set_title("Exact-session-time near-field visits")
     axes[1, 1].set_ylabel("dwell (s)")
@@ -978,10 +1052,11 @@ def render_provider_epoch_distance_traces(
         str(relative.source_authorities["fish_position"]["provider_id"])
         for relative in relatives
     ]
+    provider_display = _paired_provider_display(provider_ids)
     epochs = _epoch_records(radial_keypoint)
-    frame_id = _collapsed_frame_scalar(relative_keypoint, "acquisition_frame_id").astype(
-        np.int64
-    )
+    frame_id = _collapsed_frame_scalar(
+        relative_keypoint, "acquisition_frame_id"
+    ).astype(np.int64)
     timestamp = _collapsed_frame_scalar(relative_keypoint, "timestamp_ns").astype(
         np.int64
     )
@@ -1002,9 +1077,7 @@ def render_provider_epoch_distance_traces(
     roles = np.asarray(
         relative_keypoint.base_frame_chaser("chaser_behavior_role_code"), dtype=np.int64
     )
-    if not (
-        np.all(identities == identities[:1]) and np.all(roles == roles[:1])
-    ):
+    if not (np.all(identities == identities[:1]) and np.all(roles == roles[:1])):
         _fail("Distance traces have unstable chaser identity or behavior-role columns.")
     behavior_registry = _registry(radial_keypoint.scientific_manifest, "behavior_role")
     row_specs: list[tuple[str, np.ndarray]] = [
@@ -1036,8 +1109,8 @@ def render_provider_epoch_distance_traces(
         row_indices = np.flatnonzero(row_mask)
         for chaser_column in range(relative_keypoint.n_chasers):
             ax = axes[row_index, chaser_column]
-            for provider_index, (provider_id, relative) in enumerate(
-                zip(provider_ids, relatives, strict=True)
+            for provider_index, (display, relative) in enumerate(
+                zip(provider_display, relatives, strict=True)
             ):
                 distance = np.asarray(
                     relative.base_frame_chaser("relative_distance_physical"),
@@ -1064,7 +1137,7 @@ def render_provider_epoch_distance_traces(
                     linewidth=0.9,
                     alpha=0.82,
                     rasterized=True,
-                    label=provider_id,
+                    label=display.display_label,
                 )
             identity = int(identities[0, chaser_column])
             role = behavior_registry.get(
@@ -1102,6 +1175,7 @@ def render_provider_epoch_trajectory_overlays(
         str(relative.source_authorities["fish_position"]["provider_id"])
         for relative in relatives
     ]
+    provider_display = _paired_provider_display(provider_ids)
     epochs = _epoch_records(radial_keypoint)
     arena = radial_keypoint.scientific_manifest.get("arena")
     if not isinstance(arena, Mapping):
@@ -1109,11 +1183,14 @@ def render_provider_epoch_trajectory_overlays(
     center_x = float(arena["center_x_px"])
     center_y = float(arena["center_y_px"])
     radius = float(arena["radius_px"])
-    if not all(np.isfinite(value) for value in (center_x, center_y, radius)) or radius <= 0:
+    if (
+        not all(np.isfinite(value) for value in (center_x, center_y, radius))
+        or radius <= 0
+    ):
         _fail("Trajectory overlay arena circle is non-finite or nonpositive.")
-    frame_id = _collapsed_frame_scalar(relative_keypoint, "acquisition_frame_id").astype(
-        np.int64
-    )
+    frame_id = _collapsed_frame_scalar(
+        relative_keypoint, "acquisition_frame_id"
+    ).astype(np.int64)
     selection_member = _collapsed_frame_scalar(
         relative_keypoint, "selection_member"
     ).astype(bool)
@@ -1133,7 +1210,9 @@ def render_provider_epoch_trajectory_overlays(
         relative_keypoint.base_frame_chaser("chaser_identity_code"), dtype=np.int64
     )
     if chaser_xy.shape != (relative_keypoint.n_frames, relative_keypoint.n_chasers, 2):
-        _fail("Trajectory chaser positions do not preserve frame/chaser/source-xy shape.")
+        _fail(
+            "Trajectory chaser positions do not preserve frame/chaser/source-xy shape."
+        )
     if not (np.all(roles == roles[:1]) and np.all(identities == identities[:1])):
         _fail("Trajectory overlay has unstable chaser identity or behavior roles.")
     appearance_projection = _validated_exact_chaser_appearance(
@@ -1148,8 +1227,8 @@ def render_provider_epoch_trajectory_overlays(
         constrained_layout=True,
         squeeze=False,
     )
-    for provider_index, (provider_id, relative) in enumerate(
-        zip(provider_ids, relatives, strict=True)
+    for provider_index, (display, relative) in enumerate(
+        zip(provider_display, relatives, strict=True)
     ):
         fish_xy, fish_valid = _collapsed_fish_frame(relative)
         for epoch_index, record in enumerate(epochs):
@@ -1172,7 +1251,7 @@ def render_provider_epoch_trajectory_overlays(
                 alpha=0.18,
                 edgecolors="none",
                 rasterized=True,
-                label=f"fish · {provider_id}",
+                label=f"fish · {display.display_label}",
             )
             for chaser_column in range(relative_keypoint.n_chasers):
                 local_chaser = chaser_xy[epoch_rows, chaser_column]
@@ -1230,7 +1309,9 @@ def render_provider_epoch_trajectory_overlays(
             ax.set_xlim(center_x - margin, center_x + margin)
             ax.set_ylim(center_y + margin, center_y - margin)
             ax.set_aspect("equal")
-            ax.set_title(f"{record['analysis_role']} · {provider_id}", fontsize=9)
+            ax.set_title(
+                f"{record['analysis_role']} · {display.display_label}", fontsize=9
+            )
             ax.set_xlabel("source-camera x (px)")
             ax.set_ylabel("source-camera y (px; +down)")
             ax.grid(alpha=0.15)
@@ -1451,7 +1532,9 @@ def render_bout_response_details(
                     (role == key[0]) & (chaser == key[1]) & (band == band_code)
                 )
                 if matches.size > 1:
-                    _fail("Bout summary contains a duplicated semantic/chaser/band row.")
+                    _fail(
+                        "Bout summary contains a duplicated semantic/chaser/band row."
+                    )
                 if matches.size == 1:
                     matrix[row_index, column_index] = values[matches[0]]
         image = ax.imshow(np.ma.masked_invalid(matrix), aspect="auto", cmap="viridis")
@@ -1467,7 +1550,11 @@ def render_bout_response_details(
                 ha="center",
                 va="center",
                 fontsize=7,
-                color="white" if matrix[row_index, column_index] > np.nanmedian(matrix) else "black",
+                color=(
+                    "white"
+                    if matrix[row_index, column_index] > np.nanmedian(matrix)
+                    else "black"
+                ),
             )
         figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
     figure.suptitle(
@@ -1492,7 +1579,9 @@ def render_trial_escape_details(
     rate = _array(escape, "trial_escape_event_rate_per_min").astype(np.float64)
     latency = _array(escape, "trial_first_escape_latency_s").astype(np.float64)
     trigger_distance = _array(escape, "trial_trigger_distance_mm").astype(np.float64)
-    freeze_fraction = _array(escape, "trial_freeze_low_speed_fraction").astype(np.float64)
+    freeze_fraction = _array(escape, "trial_freeze_low_speed_fraction").astype(
+        np.float64
+    )
     freeze_coverage = _array(escape, "trial_freeze_valid_fraction").astype(np.float64)
     recapture_fraction = _array(escape, "trial_recapture_fraction").astype(np.float64)
     separation_gain = _array(escape, "trial_mean_separation_gain_mm").astype(np.float64)
@@ -1520,7 +1609,14 @@ def render_trial_escape_details(
     response_y = {code: index for index, code in enumerate(response_codes)}
     ax.scatter(ordinal, [response_y[int(value)] for value in response[order]], s=55)
     for x, y, trial_id in zip(ordinal, response[order], logged[order]):
-        ax.annotate(f"ID {trial_id}", (x, response_y[int(y)]), xytext=(0, 6), textcoords="offset points", ha="center", fontsize=8)
+        ax.annotate(
+            f"ID {trial_id}",
+            (x, response_y[int(y)]),
+            xytext=(0, 6),
+            textcoords="offset points",
+            ha="center",
+            fontsize=8,
+        )
     ax.set_yticks(
         range(len(response_codes)),
         [response_registry.get(str(code), f"class {code}") for code in response_codes],
@@ -1565,11 +1661,20 @@ def render_trial_escape_details(
     ax.grid(alpha=0.2)
 
     ax = axes[1, 0]
-    for recaptured, marker, label in ((False, "x", "not recaptured"), (True, "o", "recaptured")):
+    for recaptured, marker, label in (
+        (False, "x", "not recaptured"),
+        (True, "o", "recaptured"),
+    ):
         valid = event_recaptured == recaptured
         valid &= np.isfinite(event_distance) & np.isfinite(event_peak)
         if np.any(valid):
-            ax.scatter(event_distance[valid], event_peak[valid], marker=marker, s=55, label=label)
+            ax.scatter(
+                event_distance[valid],
+                event_peak[valid],
+                marker=marker,
+                s=55,
+                label=label,
+            )
     ax.set_xlabel("distance at escape onset (mm)")
     ax.set_ylabel("peak speed (mm/s)")
     ax.set_title("Per-event onset state")
@@ -1578,7 +1683,9 @@ def render_trial_escape_details(
         ax.legend(fontsize=8)
 
     ax = axes[1, 1]
-    bars = ax.bar(ordinal, count[order], color="#d95f02", alpha=0.75, label="event count")
+    bars = ax.bar(
+        ordinal, count[order], color="#d95f02", alpha=0.75, label="event count"
+    )
     ax.bar_label(bars, fontsize=8)
     ax.set_xlabel("trial ordinal")
     ax.set_ylabel("escape event count")
@@ -1590,18 +1697,30 @@ def render_trial_escape_details(
 
     ax = axes[2, 0]
     valid_latency = np.isfinite(latency[order])
-    ax.plot(ordinal[valid_latency], latency[order][valid_latency], marker="o", color="#d62728")
+    ax.plot(
+        ordinal[valid_latency],
+        latency[order][valid_latency],
+        marker="o",
+        color="#d62728",
+    )
     ax.set_xlabel("trial ordinal")
     ax.set_ylabel("first escape latency (s)", color="#d62728")
     trigger_ax = ax.twinx()
     valid_trigger = np.isfinite(trigger_distance[order])
-    trigger_ax.plot(ordinal[valid_trigger], trigger_distance[order][valid_trigger], marker="s", color="#2ca02c")
+    trigger_ax.plot(
+        ordinal[valid_trigger],
+        trigger_distance[order][valid_trigger],
+        marker="s",
+        color="#2ca02c",
+    )
     trigger_ax.set_ylabel("trigger distance (mm)", color="#2ca02c")
     ax.set_title("First-event latency and trigger distance")
     ax.grid(alpha=0.2)
 
     ax = axes[2, 1]
-    ax.plot(ordinal, freeze_fraction[order], marker="o", label="freeze low-speed fraction")
+    ax.plot(
+        ordinal, freeze_fraction[order], marker="o", label="freeze low-speed fraction"
+    )
     ax.plot(ordinal, freeze_coverage[order], marker="s", label="freeze-window coverage")
     ax.plot(ordinal, recapture_fraction[order], marker="^", label="recapture fraction")
     ax.set_ylim(-0.05, 1.05)
@@ -1609,7 +1728,14 @@ def render_trial_escape_details(
     ax.set_ylabel("fraction")
     gain_ax = ax.twinx()
     valid_gain = np.isfinite(separation_gain[order])
-    gain_ax.plot(ordinal[valid_gain], separation_gain[order][valid_gain], color="black", linestyle="--", marker="d", label="mean separation gain")
+    gain_ax.plot(
+        ordinal[valid_gain],
+        separation_gain[order][valid_gain],
+        color="black",
+        linestyle="--",
+        marker="d",
+        label="mean separation gain",
+    )
     gain_ax.set_ylabel("mean separation gain (mm)")
     ax.set_title("Freeze, recapture, and separation evidence")
     ax.grid(alpha=0.2)
@@ -1646,14 +1772,24 @@ def render_trial_distance_traces(
     if np.any((start < 0) | (end <= start) | (end > relative.n_frames)):
         _fail("Controller trial trace bounds leave the relative-frame row axis.")
 
-    distance = np.asarray(relative.base_frame_chaser("relative_distance_physical"), dtype=np.float64)
-    distance_valid = np.asarray(relative.base_frame_chaser("relative_physical_valid"), dtype=bool)
+    distance = np.asarray(
+        relative.base_frame_chaser("relative_distance_physical"), dtype=np.float64
+    )
+    distance_valid = np.asarray(
+        relative.base_frame_chaser("relative_physical_valid"), dtype=bool
+    )
     timestamp = np.asarray(relative.base_frame_chaser("timestamp_ns"), dtype=np.int64)
-    timestamp_valid = np.asarray(relative.base_frame_chaser("timestamp_valid"), dtype=bool)
-    identity = np.asarray(relative.base_frame_chaser("chaser_identity_code"), dtype=np.int64)
+    timestamp_valid = np.asarray(
+        relative.base_frame_chaser("timestamp_valid"), dtype=bool
+    )
+    identity = np.asarray(
+        relative.base_frame_chaser("chaser_identity_code"), dtype=np.int64
+    )
     active = _array(controller, "logged_active_trial_member").astype(bool)
     if active.size != relative.n_rows:
-        _fail("Controller active membership does not match the relative-frame row axis.")
+        _fail(
+            "Controller active membership does not match the relative-frame row axis."
+        )
     active = active.reshape(relative.n_frames, relative.n_chasers)
 
     columns = min(2, start.size)
@@ -1678,12 +1814,21 @@ def render_trial_distance_traces(
         if not trigger_valid[trial_row]:
             _fail("A plotted controller trial lacks an exact trigger timestamp.")
         times = (timestamp[frame_slice, column] - trigger[trial_row]) / 1e9
-        valid = timestamp_valid[frame_slice, column] & distance_valid[frame_slice, column]
+        valid = (
+            timestamp_valid[frame_slice, column] & distance_valid[frame_slice, column]
+        )
         values = distance[frame_slice, column].copy()
         values[~valid] = np.nan
         ax.plot(times, values, linewidth=1.2, color="#1f77b4", label="valid distance")
         active_valid = active[frame_slice, column] & valid
-        ax.scatter(times[active_valid], values[active_valid], s=4, color="#d95f02", alpha=0.55, label="exact active member")
+        ax.scatter(
+            times[active_valid],
+            values[active_valid],
+            s=4,
+            color="#d95f02",
+            alpha=0.55,
+            label="exact active member",
+        )
         ax.axvline(0.0, color="black", linestyle="--", linewidth=0.9)
         ax.set_xlabel("session time from trigger (s)")
         ax.set_ylabel("fish–chaser distance (mm)")
@@ -1695,10 +1840,19 @@ def render_trial_distance_traces(
             ax.legend(fontsize=8)
     for trial_row in range(start.size, axes.size):
         axes.flat[trial_row].set_visible(False)
-    provider = relative.source_authorities["fish_position"]["provider_id"]
+    try:
+        provider_display = position_provider_display_binding(
+            provider_role="keypoint",
+            provider_id=str(
+                relative.source_authorities["fish_position"]["provider_id"]
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        _fail(f"Trial-distance provider display binding is invalid: {exc}")
     figure.suptitle(
         f"Trigger-aligned direct distance traces · {controller.recording_id}\n"
-        f"position provider: {provider} · exact session time · no interpolation",
+        f"fish position: {provider_display.display_label} · exact session time · "
+        "no interpolation",
         fontsize=13,
     )
     return _save_figure(figure, output_stem)
@@ -1748,21 +1902,20 @@ def detailed_plot_parameters(
         cdf_parameters.append(
             {
                 "provider_id": str(provider["provider_id"]),
-                "cdf_thresholds_mm": [
-                    float(value) for value in np.unique(thresholds)
-                ],
+                "cdf_thresholds_mm": [float(value) for value in np.unique(thresholds)],
                 "radial_config": _plain(config),
             }
         )
+    provider_display = _paired_provider_display(
+        [record["provider_id"] for record in cdf_parameters]
+    )
     if set(cdf_rows[0]) != set(cdf_rows[1]) or not cdf_rows[0]:
         _fail("Provider CDF plot strata are empty or mismatched.")
     cdf_panel_count = len(cdf_rows[0])
     cdf_columns = min(3, cdf_panel_count)
     cdf_rows_count = int(math.ceil(cdf_panel_count / cdf_columns))
 
-    sweep_thresholds = _array(
-        escape, "sweep_speed_threshold_mm_s"
-    ).astype(np.float64)
+    sweep_thresholds = _array(escape, "sweep_speed_threshold_mm_s").astype(np.float64)
     if np.any(~np.isfinite(sweep_thresholds)):
         _fail("Escape plot threshold sweep contains non-finite values.")
     trial_count = int(_array(controller, "trial_ordinal").size)
@@ -1772,7 +1925,10 @@ def detailed_plot_parameters(
     trace_rows = int(math.ceil(trial_count / trace_columns))
     epoch_records = _epoch_records(radial_keypoint)
     radial_metric_rows = tuple(_radial_metric_rows(handle) for handle in radial_handles)
-    if set(radial_metric_rows[0]) != set(radial_metric_rows[1]) or not radial_metric_rows[0]:
+    if (
+        set(radial_metric_rows[0]) != set(radial_metric_rows[1])
+        or not radial_metric_rows[0]
+    ):
         _fail("Provider radial summary plot strata are empty or mismatched.")
     arena = radial_keypoint.scientific_manifest.get("arena")
     if not isinstance(arena, Mapping):
@@ -1857,6 +2013,15 @@ def detailed_plot_parameters(
             "png_dpi": PLOT_DPI,
             "pdf_mode": "vector",
             "constrained_layout": True,
+            "position_provider_display": {
+                "policy_id": POSITION_PROVIDER_DISPLAY_POLICY_ID,
+                "bindings": [
+                    binding.provenance_record() for binding in provider_display
+                ],
+                "role_source": "explicit_keypoint_detection_function_arguments",
+                "provider_id_parsing": "prohibited",
+                "full_provider_identity_visible": False,
+            },
             "provider_distance_cdf": {
                 "subplot_grid": [cdf_rows_count, cdf_columns],
                 "figure_size_inches": [
@@ -2014,7 +2179,11 @@ def render_detailed_bundle(
     )
     outputs = []
     for renderer, suffix, args in (
-        (render_provider_distance_cdf, "provider_distance_cdf", (radial_keypoint, radial_detection)),
+        (
+            render_provider_distance_cdf,
+            "provider_distance_cdf",
+            (radial_keypoint, radial_detection),
+        ),
         (render_bout_response_details, "bout_response_details", (bout,)),
         (render_trial_escape_details, "trial_escape_details", (escape,)),
         (
@@ -2118,7 +2287,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         for extension in ("png", "pdf")
     ) + (receipt_path,)
     if not args.overwrite and any(path.exists() for path in expected):
-        raise FileExistsError("Detailed plot output already exists; pass --overwrite explicitly.")
+        raise FileExistsError(
+            "Detailed plot output already exists; pass --overwrite explicitly."
+        )
 
     exact_child_receipts = (
         args.controller_validation_receipt,
@@ -2131,9 +2302,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         value is not None for value in exact_child_receipts
     ):
         _fail("All five exact-child source receipts must be supplied together.")
-    receipt_bound_successors = all(
-        value is not None for value in exact_child_receipts
-    )
+    receipt_bound_successors = all(value is not None for value in exact_child_receipts)
     controller, bout, escape = tuple(
         load_composable_chaser_successor_source_handle(
             archive,
@@ -2160,7 +2329,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if any(value is not None for value in receipt_values) and not all(
         value is not None for value in receipt_values
     ):
-        _fail("Keypoint and detection relative-frame receipts must be supplied together.")
+        _fail(
+            "Keypoint and detection relative-frame receipts must be supplied together."
+        )
     if all(value is not None for value in receipt_values):
         relative_keypoint = load_chaser_relative_frame_targeted_source_handle(
             args.keypoint_relative_frame_receipt,
@@ -2309,7 +2480,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         },
     }
     output_records = [
-        {"path": str(path), "size_bytes": path.stat().st_size, "sha256": _file_sha256(path)}
+        {
+            "path": str(path),
+            "size_bytes": path.stat().st_size,
+            "sha256": _file_sha256(path),
+        }
         for path in outputs
     ]
     body = {
@@ -2355,7 +2530,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     receipt = {**body, "payload_sha256": canonical_json_sha256(body)}
     write_json_atomic(receipt_path, receipt)
-    print(json.dumps({**receipt, "receipt_path": str(receipt_path)}, sort_keys=True, indent=2))
+    print(
+        json.dumps(
+            {**receipt, "receipt_path": str(receipt_path)}, sort_keys=True, indent=2
+        )
+    )
     return 0
 
 

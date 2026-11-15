@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Citrus unified-H5 writer-capacity evidence v1",
+  "description": "Closed structure for /metadata/admission/capacity_preflight_json. This version records writer table catalog validation only, not complete recording admission. Semantic validation must additionally check exact selected table coverage, distinct sorted paths, schema widths/chunks, row-bound arithmetic and dependency identities.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id", "schema_version", "status", "scope", "session_uuid",
+    "citrus_experiment_id", "arena_id", "admission_policy_sha256",
+    "core_schema_contract_json_sha256", "maximum_duration_ns",
+    "total_table_logical_bytes", "tables", "dependencies",
+    "unresolved_for_recording_admission"
+  ],
+  "properties": {
+    "schema_id": {"const": "citrus.experimental_h5.capacity_preflight"},
+    "schema_version": {"const": 1},
+    "status": {"const": "writer_table_catalog_validated"},
+    "scope": {"const": "writer_capacity_preflight_only"},
+    "session_uuid": {"type": "string", "minLength": 1},
+    "citrus_experiment_id": {"type": "string", "minLength": 1},
+    "arena_id": {"type": "string", "minLength": 1},
+    "admission_policy_sha256": {
+      "const": "d544b0814006360b11b02cd9d171eefbddae7cc9cc41ad57470bbd240bc83cb9"
+    },
+    "core_schema_contract_json_sha256": {"$ref": "#/$defs/sha256"},
+    "maximum_duration_ns": {
+      "type": "integer", "minimum": 1, "maximum": 9223372036854775807
+    },
+    "total_table_logical_bytes": {"$ref": "#/$defs/u64"},
+    "tables": {
+      "type": "array", "minItems": 1,
+      "items": {"$ref": "#/$defs/table"}
+    },
+    "dependencies": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "frozen_recording_snapshot_sha256", "binding_request_sha256",
+        "binding_acceptance_sha256", "request_contract_sha256",
+        "acceptance_contract_sha256", "pose_enabled_from_frozen_snapshot",
+        "live_correspondence_enabled", "protocol_snapshot_source_text_sha256",
+        "software_git_commit"
+      ],
+      "properties": {
+        "frozen_recording_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+        "binding_request_sha256": {"$ref": "#/$defs/sha256"},
+        "binding_acceptance_sha256": {"$ref": "#/$defs/sha256"},
+        "request_contract_sha256": {"$ref": "#/$defs/sha256"},
+        "acceptance_contract_sha256": {"$ref": "#/$defs/sha256"},
+        "pose_enabled_from_frozen_snapshot": {"type": "boolean"},
+        "live_correspondence_enabled": {"const": true},
+        "protocol_snapshot_source_text_sha256": {"$ref": "#/$defs/sha256"},
+        "software_git_commit": {
+          "type": "string",
+          "description": "Caller-supplied SessionInfo provenance, possibly empty. Not verification of the executable/build recipe."
+        }
+      }
+    },
+    "unresolved_for_recording_admission": {
+      "const": [
+        "configuration_digest_and_noncore_schema_digests",
+        "source_rate_guarantees",
+        "metadata_and_scratch_budgets",
+        "destination_and_deployment_storage_budgets",
+        "multi_arena_start_transaction",
+        "monotonic_deadline_owner_and_drain"
+      ]
+    }
+  },
+  "$defs": {
+    "u64": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "table": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "path", "row_bytes", "chunk_rows", "maximum_rows",
+        "maximum_logical_bytes", "bound"
+      ],
+      "properties": {
+        "path": {"type": "string", "pattern": "^/[^{}]+[^/]$"},
+        "row_bytes": {"type": "integer", "minimum": 1, "maximum": 67108864},
+        "chunk_rows": {"type": "integer", "minimum": 1, "maximum": 67108864},
+        "maximum_rows": {"type": "integer", "minimum": 0, "maximum": 1099511627776},
+        "maximum_logical_bytes": {"type": "integer", "minimum": 0, "maximum": 1099511627776},
+        "bound": {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "fixed_rows", "burst_rows", "events_per_second_numerator",
+            "events_per_second_denominator", "rows_per_event"
+          ],
+          "properties": {
+            "fixed_rows": {"$ref": "#/$defs/u64"},
+            "burst_rows": {"$ref": "#/$defs/u64"},
+            "events_per_second_numerator": {"$ref": "#/$defs/u64"},
+            "events_per_second_denominator": {
+              "type": "integer", "minimum": 1, "maximum": 18446744073709551615
+            },
+            "rows_per_event": {"$ref": "#/$defs/u64"}
+          }
+        }
+      }
+    }
+  }
+}

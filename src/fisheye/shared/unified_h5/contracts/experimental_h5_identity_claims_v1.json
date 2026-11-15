@@ -1,0 +1,131 @@
+{
+  "schema_id": "citrus.experimental_h5.identity_claims_migration",
+  "schema_version": 1,
+  "scope": "test_only_native_identity_consistency_and_source_claim_preservation_not_binding_admission_or_file_seal",
+  "component": {
+    "id": "recording_association",
+    "claims_path": "/metadata/recording_association/claims_json",
+    "receipt_path": "/metadata/recording_association/receipt_json",
+    "claims_schema": {
+      "schema_id": "citrus.experimental_h5.recording_association_claims",
+      "schema_version": 1,
+      "closed": true,
+      "fields": {
+        "schema_id": "utf8",
+        "schema_version": "integer",
+        "recording_id": "utf8",
+        "observation_context_id": "utf8",
+        "citrus_experiment_id": "utf8",
+        "citrus_session_uuid": "utf8",
+        "finalized_observation_receipt": "null_or_closed_receipt_reference"
+      },
+      "receipt_reference": {
+        "receipt_id": "utf8",
+        "contract_sha256": "sha256_prefixed_lowercase"
+      }
+    },
+    "receipt_fields": [
+      "schema_id",
+      "schema_version",
+      "status",
+      "reason",
+      "claims_ref",
+      "claims_sha256",
+      "recording_ref",
+      "binding_sha256",
+      "experiment_ref",
+      "session_ref",
+      "source_receipt_validation",
+      "scope"
+    ],
+    "receipt_scope": "submitted_identity_consistency_not_binding_acceptance_receipt_validation_or_experiment_seal",
+    "source_receipt_validation": [
+      "not_present",
+      "not_performed"
+    ],
+    "status": [
+      "pending",
+      "complete",
+      "failed"
+    ],
+    "invariants": [
+      "same_open_logger_owner_post_capture_drain",
+      "freeze_before_start_single_attempt",
+      "retain_claims_before_validation",
+      "compare_recording_session_experiment_against_canonical_owners",
+      "context_is_a_submitted_nonempty_identity_not_externally_validated",
+      "source_receipt_optional_for_fresh_native_records",
+      "no_self_file_path_size_checksum",
+      "no_receipt_content_validation_or_binding_admission",
+      "global_finalization_remains_pending_transfer_false"
+    ]
+  },
+  "migration_routes": {
+    "companion:/presentation_mapping#attribute:contract_sha256": "h5:/geometry/correspondence/input#reconstruct:presentation/presentation_mapping/attribute:contract_sha256",
+    "companion:/presentation_mapping#attribute:schema_id": "h5:/geometry/correspondence/input#reconstruct:presentation/presentation_mapping/attribute:schema_id",
+    "companion:/presentation_mapping#attribute:schema_version": "h5:/geometry/correspondence/input#reconstruct:presentation/presentation_mapping/attribute:schema_version",
+    "companion:/presentation_mapping#attribute:status": "h5:/geometry/correspondence/input#reconstruct:presentation/presentation_mapping/attribute:status",
+    "companion:/presentation_mapping/contract_json#object": "h5:/geometry/correspondence/input#reconstruct:presentation/presentation_mapping~contract_json/object",
+    "companion:/presentation_mapping/contract_json#attribute:canonicalization": "h5:/geometry/correspondence/input#reconstruct:presentation/presentation_mapping~contract_json/attribute:canonicalization",
+    "companion:/presentation_mapping/contract_json#attribute:checksum_sha256": "h5:/geometry/correspondence/input#reconstruct:presentation/presentation_mapping~contract_json/attribute:checksum_sha256"
+  },
+  "external_custody_routes": {
+    "companion:/stimulus_coordinate_v6#attribute:schema_id": "external:/migration_source_custody#atom:companion:/stimulus_coordinate_v6#attribute:schema_id",
+    "companion:/stimulus_coordinate_v6#attribute:schema_version": "external:/migration_source_custody#atom:companion:/stimulus_coordinate_v6#attribute:schema_version",
+    "companion:/stimulus_coordinate_v6#attribute:status": "external:/migration_source_custody#atom:companion:/stimulus_coordinate_v6#attribute:status",
+    "companion:/stimulus_coordinate_v6#attribute:reason_code": "external:/migration_source_custody#atom:companion:/stimulus_coordinate_v6#attribute:reason_code",
+    "companion:/stimulus_coordinate_v6/raw_citrus_h5_binding_json#object": "external:/migration_source_custody#atom:companion:/stimulus_coordinate_v6/raw_citrus_h5_binding_json#object",
+    "companion:/stimulus_coordinate_v6/raw_citrus_h5_binding_json#attribute:canonicalization": "external:/migration_source_custody#atom:companion:/stimulus_coordinate_v6/raw_citrus_h5_binding_json#attribute:canonicalization",
+    "companion:/stimulus_coordinate_v6/raw_citrus_h5_binding_json#attribute:checksum_sha256": "external:/migration_source_custody#atom:companion:/stimulus_coordinate_v6/raw_citrus_h5_binding_json#attribute:checksum_sha256"
+  },
+  "identity_subfield_lineage": {
+    "/recording_id": "h5:/metadata/recording_association/claims_json#/recording_id",
+    "/observation_context_id": "h5:/metadata/recording_association/claims_json#/observation_context_id",
+    "/citrus_experiment_id": "h5:/metadata/recording_association/claims_json#/citrus_experiment_id",
+    "/citrus_session_uuid": "h5:/metadata/recording_association/claims_json#/citrus_session_uuid",
+    "/finalized_observation_receipt/receipt_id": "h5:/metadata/recording_association/claims_json#/finalized_observation_receipt/receipt_id",
+    "/finalized_observation_receipt/contract_sha256": "h5:/metadata/recording_association/claims_json#/finalized_observation_receipt/contract_sha256"
+  },
+  "source_only_binding_fields": [
+    "/schema_id",
+    "/schema_version",
+    "/canonicalization",
+    "/h5_artifact/relative_path",
+    "/h5_artifact/size_bytes",
+    "/h5_artifact/sha256"
+  ],
+  "custody": {
+    "schema_id": "citrus.h5_migration_source_custody",
+    "schema_version": 1,
+    "closed_fields": [
+      "schema_id",
+      "schema_version",
+      "value_encoding",
+      "artifact",
+      "atoms",
+      "scope"
+    ],
+    "implementation": "scripts/h5_companion_identity_evidence.py:source_custody",
+    "source_artifact": "exact_closed_old_companion_size_sha256_and_path",
+    "value_encoding": "typed_numpy_le_hex_and_utf8_bytes_v1",
+    "dataset_values": "explicit_binding_payload_not_just_inventory_digest",
+    "applicability": "four_root_attributes_always; three_binding_atoms_only_when_current_writer_emits_binding",
+    "native_status": "never_inferred_from_old_sealed_or_unsealed"
+  },
+  "presentation": {
+    "implementation": "scripts/h5_companion_identity_evidence.py:presentation_claims",
+    "input_owner": "/geometry/correspondence/input",
+    "validation": "input_digest_then_current_presentation_extent_rules",
+    "scope": "potential_current_writer_presentation_claim_not_native_geometry_acceptance_or_old_global_status",
+    "applicability": "compare_only_when_actual_current_writer_emits_it",
+    "serialization": "current_writer_canonical_json_utf8_sort_keys_compact_v1; exact_bytes_verified_for_named_witnesses"
+  },
+  "exclusions": [
+    "full_bound_raw_companion_pair_equivalence",
+    "production_selector_or_live_accepted_binding",
+    "observed_renderer_initialization",
+    "normative_global_finalization",
+    "transfer_publication",
+    "old_writer_retirement"
+  ]
+}

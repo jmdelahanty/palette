@@ -44,6 +44,7 @@ retune_frame_flags*
 
 # Local model checkpoints / downloaded defaults
 /*.pt
+/experimental_training/*.pt
 
 # Local extracted/reference PNGs
 /*.png

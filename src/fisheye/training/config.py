@@ -5,52 +5,63 @@ from enum import Enum
 from pathlib import Path
 import yaml
 
+
 class SamplingStrategy(str, Enum):
     BALANCED = "balanced"
     PROPORTIONAL = "proportional"
     WEIGHTED = "weighted"
 
+
 class SourceType(str, Enum):
-    """Detection source types"""
+    """Training source types."""
+
     DETECT = "detect"
     REFINED = "refined"
     FILTERED = "filtered"
     INTERPOLATED = "interpolated"
     MANUAL = "manual"
+    MATERIALIZED_POSE_CROP = "materialized_pose_crop"
+    RECOVERED_POSE_CROP = "recovered_pose_crop"
+
 
 class DatasetSplit(BaseModel):
     """Train/val split configuration"""
+
     train: float = Field(0.8, gt=0.0, lt=1.0)
     val: float = Field(0.2, gt=0.0, lt=1.0)
-    
-    @field_validator('val')
+
+    @field_validator("val")
     @classmethod
     def check_split_sum(cls, v, info):
-        train = info.data.get('train', 0.8)
+        train = info.data.get("train", 0.8)
         if abs(train + v - 1.0) > 0.001:
             raise ValueError(f"train ({train}) + val ({v}) must equal 1.0")
         return v
 
+
 class DatasetConfig(BaseModel):
     """Configuration for a single dataset"""
+
     zarr_path: Path
     source_type: SourceType = SourceType.REFINED
     input_format: Literal["gray", "rgb"] = "gray"
     keypoint_run: Optional[str] = None
     split: Optional[DatasetSplit] = None
-    
-    @field_validator('zarr_path')
+
+    @field_validator("zarr_path")
     @classmethod
     def check_zarr_path(cls, v):
         v = Path(v)
         if not v.is_dir():
             raise ValueError(f"Path '{v}' is not a valid directory")
-        if not (v / 'zarr.json').exists() and not (v / '.zgroup').exists():
+        if not (v / "zarr.json").exists() and not (v / ".zgroup").exists():
             raise ValueError(f"Path '{v}' is not a valid Zarr directory")
         return v
 
+
 class TrainingParams(BaseModel):
     """Model & Training Hyperparameters"""
+
     model: str
     epochs: int = Field(..., gt=0)
     batch: int = Field(..., gt=0)
@@ -169,9 +180,7 @@ class PoseTrainingParams(TrainingParams):
     box: float = Field(7.5, ge=0.0)
     cls: float = Field(0.5, ge=0.0)
     dfl: float = Field(1.5, ge=0.0)
-    optimizer: Literal[
-        "SGD", "Adam", "AdamW", "NAdam", "RAdam", "RMSProp"
-    ] = "AdamW"
+    optimizer: Literal["SGD", "Adam", "AdamW", "NAdam", "RAdam", "RMSProp"] = "AdamW"
     augment: bool = False
     hsv_h: float = Field(0.0, ge=0.0, le=1.0)
     hsv_s: float = Field(0.0, ge=0.0, le=1.0)
@@ -200,7 +209,9 @@ class PoseTrainingParams(TrainingParams):
             self.flipud,
             self.erasing,
         )
-        if not self.augment and any(float(value) != 0.0 for value in augmentation_values):
+        if not self.augment and any(
+            float(value) != 0.0 for value in augmentation_values
+        ):
             raise ValueError(
                 "Pose augmentation parameters are nonzero but training_params.augment "
                 "is false. Enable augmentation explicitly or set them to zero."
@@ -232,9 +243,7 @@ class PoseAugmentationConfig(BaseModel):
 
     @field_validator("fliplr_keypoint_pairs", "flipud_keypoint_pairs")
     @classmethod
-    def validate_flip_pairs(
-        cls, value: List[Tuple[str, str]]
-    ) -> List[Tuple[str, str]]:
+    def validate_flip_pairs(cls, value: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
         seen: set[str] = set()
         normalized: List[Tuple[str, str]] = []
         for left, right in value:
@@ -249,6 +258,17 @@ class PoseAugmentationConfig(BaseModel):
             seen.update((left_text, right_text))
             normalized.append((left_text, right_text))
         return normalized
+
+
+class TrainingDatasetStagingConfig(BaseModel):
+    """Execution-only policy for verified node-local training inputs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["auto", "required", "disabled"] = "auto"
+    max_total_size_gib: float = Field(8.0, gt=0.0)
+    min_free_space_gib_after_stage: float = Field(8.0, ge=0.0)
+    scratch_root: Optional[Path] = None
 
 
 class EyeMaskTrainingParams(TrainingParams):
@@ -323,21 +343,26 @@ class SubjectMaskTrainingParams(TrainingParams):
     @classmethod
     def validate_val_preview_thresholds(cls, value: List[float]) -> List[float]:
         if not value:
-            raise ValueError("val_preview_thresholds must contain at least one threshold")
+            raise ValueError(
+                "val_preview_thresholds must contain at least one threshold"
+            )
         for threshold in value:
             if not 0.0 <= float(threshold) <= 1.0:
-                raise ValueError("val_preview_thresholds entries must be between 0 and 1")
+                raise ValueError(
+                    "val_preview_thresholds entries must be between 0 and 1"
+                )
         return [float(threshold) for threshold in value]
 
 
 class DetectConfig(BaseModel):
     """Flat configuration for detection training"""
+
     # Dummy YOLO fields
     train: Path
     val: Path
     nc: int
     names: List[str]
-    
+
     # Dataset configuration (flat, not nested!)
     datasets: Dict[str, DatasetConfig]
     task: str = Field(..., pattern="^(detect|pose)$")
@@ -345,35 +370,39 @@ class DetectConfig(BaseModel):
     sampling_strategy: SamplingStrategy = SamplingStrategy.BALANCED
     dataset_weights: Optional[Dict[str, float]] = None
     allow_source_mismatch: bool = False
-    
+
     # Training parameters
     training_params: TrainingParams
-    
-    @field_validator('datasets')
+
+    @field_validator("datasets")
     @classmethod
     def check_datasets_not_empty(cls, v):
         if v is None or len(v) == 0:
             raise ValueError("'datasets' cannot be empty")
         return v
-    
-    @field_validator('dataset_weights')
+
+    @field_validator("dataset_weights")
     @classmethod
     def check_weights_match_strategy(cls, v, info):
-        strategy = info.data.get('sampling_strategy')
+        strategy = info.data.get("sampling_strategy")
         if strategy == SamplingStrategy.WEIGHTED:
             if v is None or len(v) == 0:
-                raise ValueError("dataset_weights required when using 'weighted' sampling")
+                raise ValueError(
+                    "dataset_weights required when using 'weighted' sampling"
+                )
         return v
 
     @classmethod
     def from_yaml(cls, path: Path):
         """Loads and validates configuration from a YAML file."""
-        with open(path, 'r') as f:
+        with open(path, "r") as f:
             config_dict = yaml.safe_load(f)
         return cls(**config_dict)
 
+
 class PoseConfig(DetectConfig):
     """Configuration for pose estimation task"""
+
     model_config = ConfigDict(extra="forbid")
 
     kpt_shape: Tuple[int, int]
@@ -381,8 +410,9 @@ class PoseConfig(DetectConfig):
     preprocessing: PosePreprocessingConfig = Field(
         default_factory=PosePreprocessingConfig
     )
-    augmentation: PoseAugmentationConfig = Field(
-        default_factory=PoseAugmentationConfig
+    augmentation: PoseAugmentationConfig = Field(default_factory=PoseAugmentationConfig)
+    dataset_staging: TrainingDatasetStagingConfig = Field(
+        default_factory=TrainingDatasetStagingConfig
     )
     # Compatibility section consumed by batch inference utilities, not training.
     keypoints: Optional[Dict[str, Any]] = None
@@ -395,6 +425,7 @@ class CacheBackend(str, Enum):
 
 class EyeMaskDatasetConfig(BaseModel):
     """Configuration for an eye-mask segmentation dataset sourced from a Zarr store."""
+
     zarr_path: Path
     crop_run: Optional[str] = None
     mask_run: Optional[str] = None
@@ -408,13 +439,13 @@ class EyeMaskDatasetConfig(BaseModel):
     background_run: Optional[str] = None
     background_from_downsampled: bool = False
 
-    @field_validator('zarr_path')
+    @field_validator("zarr_path")
     @classmethod
     def check_zarr_path(cls, v: Path) -> Path:
         v = Path(v)
         if not v.is_dir():
             raise ValueError(f"Path '{v}' is not a valid directory")
-        if not (v / 'zarr.json').exists() and not (v / '.zgroup').exists():
+        if not (v / "zarr.json").exists() and not (v / ".zgroup").exists():
             raise ValueError(f"Path '{v}' is not a valid Zarr directory")
         return v
 
@@ -443,6 +474,7 @@ class EyeMaskCacheConfig(BaseModel):
 
 class EyeMaskTrainingConfig(BaseModel):
     """Configuration for training eye-mask segmentation models."""
+
     datasets: Dict[str, EyeMaskDatasetConfig]
     names: List[str] = Field(default_factory=lambda: ["eye"])
     nc: int = Field(1, gt=0)
@@ -452,7 +484,11 @@ class EyeMaskTrainingConfig(BaseModel):
     training_params: EyeMaskTrainingParams
     num_workers: int = Field(8, ge=0)
     cache: EyeMaskCacheConfig = EyeMaskCacheConfig()
-    mask_smoothing_kernel: int = Field(0, ge=0, description="Morphological kernel size (odd) for optional mask smoothing")
+    mask_smoothing_kernel: int = Field(
+        0,
+        ge=0,
+        description="Morphological kernel size (odd) for optional mask smoothing",
+    )
     edge_enhancement: Optional[str] = Field(
         default=None,
         description="Optional edge map added as an extra channel ('sobel', 'laplacian', 'canny')",
@@ -464,24 +500,26 @@ class EyeMaskTrainingConfig(BaseModel):
         description="Optional fixed intensity threshold (0-255) for an additional binarized input channel",
     )
 
-    @field_validator('datasets')
+    @field_validator("datasets")
     @classmethod
-    def validate_datasets(cls, v: Dict[str, EyeMaskDatasetConfig]) -> Dict[str, EyeMaskDatasetConfig]:
+    def validate_datasets(
+        cls, v: Dict[str, EyeMaskDatasetConfig]
+    ) -> Dict[str, EyeMaskDatasetConfig]:
         if not v:
             raise ValueError("'datasets' cannot be empty")
         return v
 
-    @field_validator('names')
+    @field_validator("names")
     @classmethod
     def validate_names(cls, v: List[str], info) -> List[str]:
-        nc = info.data.get('nc', 1)
+        nc = info.data.get("nc", 1)
         if len(v) != nc:
             raise ValueError(f"Length of 'names' ({len(v)}) must match 'nc' ({nc})")
         return v
 
     @classmethod
     def from_yaml(cls, path: Path) -> "EyeMaskTrainingConfig":
-        with open(path, 'r') as f:
+        with open(path, "r") as f:
             config_dict = yaml.safe_load(f)
         return cls(**config_dict)
 
@@ -493,13 +531,13 @@ class SubjectMaskDatasetConfig(BaseModel):
     crop_run: Optional[str] = None
     subject_mask_run: Optional[str] = None
 
-    @field_validator('zarr_path')
+    @field_validator("zarr_path")
     @classmethod
     def check_zarr_path(cls, v: Path) -> Path:
         v = Path(v)
         if not v.is_dir():
             raise ValueError(f"Path '{v}' is not a valid directory")
-        if not (v / 'zarr.json').exists() and not (v / '.zgroup').exists():
+        if not (v / "zarr.json").exists() and not (v / ".zgroup").exists():
             raise ValueError(f"Path '{v}' is not a valid Zarr directory")
         return v
 
@@ -514,14 +552,16 @@ class SubjectMaskTrainingConfig(BaseModel):
     training_params: SubjectMaskTrainingParams
     num_workers: int = Field(8, ge=0)
 
-    @field_validator('datasets')
+    @field_validator("datasets")
     @classmethod
-    def validate_datasets(cls, v: Dict[str, SubjectMaskDatasetConfig]) -> Dict[str, SubjectMaskDatasetConfig]:
+    def validate_datasets(
+        cls, v: Dict[str, SubjectMaskDatasetConfig]
+    ) -> Dict[str, SubjectMaskDatasetConfig]:
         if not v:
             raise ValueError("'datasets' cannot be empty")
         return v
 
-    @field_validator('names')
+    @field_validator("names")
     @classmethod
     def validate_names(cls, v: Optional[List[str]], info) -> Optional[List[str]]:
         del info
@@ -533,8 +573,14 @@ class SubjectMaskTrainingConfig(BaseModel):
     def validate_subject_mask_schema(self) -> "SubjectMaskTrainingConfig":
         schema_id = str(self.training_params.label_schema_id)
         if schema_id == "auto":
-            if self.names is not None and self.nc is not None and int(self.nc) != len(self.names):
-                raise ValueError(f"Length of 'names' ({len(self.names)}) must match 'nc' ({self.nc}).")
+            if (
+                self.names is not None
+                and self.nc is not None
+                and int(self.nc) != len(self.names)
+            ):
+                raise ValueError(
+                    f"Length of 'names' ({len(self.names)}) must match 'nc' ({self.nc})."
+                )
             return self
 
         expected = SUBJECT_MASK_LABEL_SCHEMAS[schema_id]
@@ -556,6 +602,6 @@ class SubjectMaskTrainingConfig(BaseModel):
 
     @classmethod
     def from_yaml(cls, path: Path) -> "SubjectMaskTrainingConfig":
-        with open(path, 'r') as f:
+        with open(path, "r") as f:
             config_dict = yaml.safe_load(f)
         return cls(**config_dict)

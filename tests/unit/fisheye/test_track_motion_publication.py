@@ -34,6 +34,7 @@ def _fresh_full_motion_run(
     hysteresis_enabled: bool = False,
     source_rows: np.ndarray | None = None,
     source_position_dtype: np.dtype | type = np.float64,
+    refined_keypoints: bool = False,
     _return_template_source: bool = False,
 ):
     world = _world(convention="continuous", archive_token=object())
@@ -80,6 +81,22 @@ def _fresh_full_motion_run(
             "keypoints_processed": 2,
         }
     )
+    root["keypoints_runs"] = keypoint_parent
+    if refined_keypoints:
+        refined_parent = _WritableGroup(
+            path="refined_keypoints_runs",
+            archive_token=world["archive_token"],
+        )
+        keypoint = refined_parent.create_group("kp_1")
+        keypoint.attrs.update(
+            {
+                "palette_run_completion_status": "complete",
+                "stage_selector_eligible": True,
+                "source_keypoints_run": "kp_1",
+                "keypoints_processed": 2,
+            }
+        )
+        root["refined_keypoints_runs"] = refined_parent
     heading_node = keypoint.create_array(
         "heading",
         data=source_heading_values,
@@ -92,7 +109,6 @@ def _fresh_full_motion_run(
         "instance_key",
         data=np.asarray(source.coordinates.row_identity._key_array_node[:]),
     )
-    root["keypoints_runs"] = keypoint_parent
 
     tracking_parent = _WritableGroup(
         path="tracking_runs",
@@ -199,7 +215,7 @@ def _fresh_full_motion_run(
         "position_source_path": "crop_runs/c1/centers_img_xy",
         "position_source_rowset_path": "crop_runs/c1",
         "position_source_kind": "canonical_crop_rows_source_camera_centers",
-        "keypoint_path": "keypoints_runs/kp_1",
+        "keypoint_path": keypoint.path,
         "crop_run": "c1",
         "tracking_path": "tracking_runs/trk_1",
     }

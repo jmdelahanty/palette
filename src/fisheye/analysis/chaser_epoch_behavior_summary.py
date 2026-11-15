@@ -41,6 +41,7 @@ from fisheye.shared.run_lineage_fingerprint import (
     write_run_lineage_attrs,
 )
 from fisheye.shared.system_metadata import get_git_info
+from fisheye.shared.heading_convention import wrap_delta_degrees
 
 SCHEMA_ID = "palette.chaser.epoch_behavior_summary.v2"
 SCHEMA_VERSION = 2
@@ -564,11 +565,6 @@ def _resolve_arena_geometry(
     )
 
 
-def _wrap_heading_delta_degrees(values: np.ndarray | float) -> np.ndarray:
-    data = np.asarray(values, dtype=np.float64)
-    return ((data + 180.0) % 360.0) - 180.0
-
-
 def _center_distance_mm(
     run_group: zarr.Group,
     geometry: ArenaGeometry,
@@ -651,8 +647,8 @@ def _bout_heading_values(
         values = heading_values[mask]
         if values.shape[0] < 2:
             continue
-        net_delta[idx] = float(_wrap_heading_delta_degrees(values[-1] - values[0]))
-        heading_path[idx] = float(np.nansum(np.abs(_wrap_heading_delta_degrees(np.diff(values)))))
+        net_delta[idx] = float(wrap_delta_degrees(values[-1] - values[0]))
+        heading_path[idx] = float(np.nansum(np.abs(wrap_delta_degrees(np.diff(values)))))
     return net_delta, heading_path
 
 

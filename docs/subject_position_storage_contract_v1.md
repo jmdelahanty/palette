@@ -4,7 +4,7 @@
 version: 1
 status: active
 implementation: partial
-last_verified: 2026-08-20
+last_verified: 2026-11-13
 -->
 
 Purpose: freeze the logical arrays, exact dtypes, coordinate authority,
@@ -141,6 +141,18 @@ The writer must:
 5. validate exact decoded float32 equality with the staged array; and
 6. record the maximum absolute float64-to-float32 quantization error over valid
    rows.
+
+The evaluator measures step 6 at the cast and the run manifest records it as
+`payload.float32_quantization` (`palette.subject_position_float32_quantization`
+v1: `scope`, `valid_row_count`, `max_abs_error` in `position_xy` units). Planning
+refuses an input without it. Run validation checks that `valid_row_count`
+matches the `valid` array and that `max_abs_error` does not exceed half the
+float32 spacing at the largest published valid coordinate, which no
+round-to-nearest cast can exceed. The record was added in run-manifest schema
+version 2 (2026-11-13). Version 1 manifests, which lack it, remain readable as
+historical runs; the writer emits only version 2. No precision budget is
+defined yet, so the record is evidence for the acceptance criterion below, not
+a gate.
 
 The logical content digest is computed from canonical C-order decoded values
 and the exact dtype/shape declaration. The physical plan separately records

@@ -20,6 +20,9 @@ from ..shared.refined_detect_curation import (
     has_sparse_curated_refined_detect_instances_arrays,
 )
 from ..shared.type_conversions import as_int, normalize_attr
+from ..shared.zarr.canonical_detection_activation import (
+    canonical_detection_lineage_equivalent_runs,
+)
 
 _BBOX_DRIFT_PIXEL_ATOL = 0.25
 
@@ -458,6 +461,10 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
     detect_latest = _latest(detect_parent)
     detect_group = _first_matching_run(detect_parent, detect_latest)
     detect_rows = _count_detections(detect_group)
+    # Products recorded against the legacy source of an activated canonical
+    # successor (validated sealed manifest) reference the selected lineage.
+    detect_lineage = canonical_detection_lineage_equivalent_runs(root, detect_latest)
+    detect_lineage_paths = {f"detect_runs/{name}" for name in detect_lineage}
 
     refined_parent_name = "refined_detect_runs"
     refined_parent = root.get(refined_parent_name)
@@ -482,7 +489,7 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
                     "(expected one of: bbox_norm_coords, bbox_coords, bbox)."
                 )
         source_detect = refined_group.attrs.get("source_detect_run")
-        if detect_latest and source_detect and detect_latest != source_detect:
+        if detect_latest and source_detect and source_detect not in detect_lineage:
             issues.append(
                 f"Refined detect run '{refined_latest}' references detect '{source_detect}', "
                 f"but latest detect is '{detect_latest}'."
@@ -518,7 +525,15 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
             crop_source_path = source_path
         crop_source_group = _group_for_path(root, source_path)
         crop_source_rows = _count_detections(crop_source_group)
-        if crop_source and expected_path and crop_source != expected_path:
+        if (
+            crop_source
+            and expected_path
+            and crop_source != expected_path
+            and not (
+                crop_source in detect_lineage_paths
+                and expected_path in detect_lineage_paths
+            )
+        ):
             issues.append(
                 f"Crop run '{crop_latest}' sourced from '{crop_source}' but expected '{expected_path}'."
             )
@@ -594,7 +609,11 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
     arena_source_rows = None
     if arena_group is not None:
         arena_source_detect = arena_group.attrs.get("source_detect_run")
-        if detect_latest and arena_source_detect and detect_latest != arena_source_detect:
+        if (
+            detect_latest
+            and arena_source_detect
+            and arena_source_detect not in detect_lineage
+        ):
             issues.append(
                 f"Arena assignment run '{arena_latest}' references detect '{arena_source_detect}' but latest detect is '{detect_latest}'."
             )

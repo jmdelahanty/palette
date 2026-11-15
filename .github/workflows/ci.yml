@@ -1,13 +1,14 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
+  workflow_dispatch:
 
+# One group per pull request: a new push cancels the run for the superseded
+# head instead of finishing a full run nobody can merge. Manual runs stay
+# keyed by commit.
 concurrency:
-  group: ci-${{ github.event.pull_request.head.sha || github.sha }}
+  group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -59,6 +60,7 @@ jobs:
           git diff --exit-code -- scripts/keypoint_motion_authority_access_ratchet_baseline.json
           python scripts/check_tail_payload_receipt_access.py
           python scripts/check_paradigm_core_authority_access.py
+          python scripts/check_heading_convention_access.py
 
   file-size-ratchet:
     name: file-size ratchet
@@ -167,6 +169,29 @@ jobs:
         run: |
           python -c "import pathlib, fisheye, fisheye.analysis, fisheye.pose; path = pathlib.Path(fisheye.__file__).resolve(); assert 'site-packages' in path.parts, path; print(fisheye.__version__, path)"
 
+      - name: Load installed labeling templates
+        working-directory: /tmp
+        run: |
+          python - <<'PY'
+          import pathlib
+          from importlib import resources
+
+          import fisheye.labeling.web_session_renderers  # reads its assets at import
+          from fisheye.labeling.template_assets import read_labeling_asset
+
+          root = resources.files("fisheye.labeling")
+          assert "site-packages" in pathlib.Path(str(root)).parts, root
+          names = [
+              f"templates/{group.name}/{item.name}"
+              for group in (root / "templates").iterdir() if group.is_dir()
+              for item in group.iterdir() if item.name.endswith(".html.j2")
+          ]
+          assert len(names) >= 11, names
+          for name in names:
+              assert read_labeling_asset(name).strip(), name
+          print(f"{len(names)} labeling templates load from the installed wheel")
+          PY
+
       - name: Load installed runtime contracts
         working-directory: /tmp
         run: |
@@ -267,6 +292,16 @@ jobs:
           restore-keys: |
             palette-subject-mask-finalizer-fixture-v1-${{ runner.os }}-
 
+      - name: Run isolated subject-mask finalizer tests
+        if: steps.subject-mask-finalizer-fixture-owner.outputs.selected == 'true'
+        run: |
+          mkdir -p .ci-results
+          python -m pytest tests/unit/fisheye/test_finalize_subject_masks.py \
+            -q -m "not gpu" --durations=25 --durations-min=1.0 \
+            -o junit_family=legacy \
+            -o junit_duration_report=total \
+            --junitxml=".ci-results/pytest-shard-${{ matrix.shard }}.subject-mask-finalizer.xml"
+
       - name: Run non-GPU test shard
         run: |
           mkdir -p .ci-results
@@ -274,6 +309,7 @@ jobs:
             --shard-index "${{ matrix.shard }}" \
             --shard-count 16 \
             -- -q -m "not gpu" --durations=25 --durations-min=1.0 \
+            --deselect=tests/unit/fisheye/test_finalize_subject_masks.py \
             -o junit_family=legacy \
             -o junit_duration_report=total \
             --junitxml=".ci-results/pytest-shard-${{ matrix.shard }}.xml"
@@ -281,9 +317,14 @@ jobs:
       - name: Summarize per-file pytest durations
         if: always()
         run: |
-          if test -f ".ci-results/pytest-shard-${{ matrix.shard }}.xml"; then
+          junit_args=()
+          for report in ".ci-results/pytest-shard-${{ matrix.shard }}"*.xml; do
+            test -f "$report" || continue
+            junit_args+=(--junitxml "$report")
+          done
+          if test "${#junit_args[@]}" -gt 0; then
             python scripts/ci_pytest_junit_summary.py \
-              --junitxml ".ci-results/pytest-shard-${{ matrix.shard }}.xml" \
+              "${junit_args[@]}" \
               --shard-index "${{ matrix.shard }}" \
               --output ".ci-results/pytest-shard-${{ matrix.shard }}.json"
           fi
@@ -294,7 +335,10 @@ jobs:
         with:
           name: pytest-duration-shard-${{ matrix.shard }}
           path: .ci-results/pytest-shard-${{ matrix.shard }}.*
-          if-no-files-found: warn
+          # .ci-results is a dot directory; upload-artifact@v4 skips hidden
+          # files by default, which silently dropped every duration artifact.
+          include-hidden-files: true
+          if-no-files-found: error
           retention-days: 14
 
       - name: Save canonical subject-shape source fixture

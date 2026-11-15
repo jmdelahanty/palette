@@ -42,7 +42,6 @@ from fisheye.shared.zarr.chaser_relative_frame_schema import (
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
-
 PREPARED_CHASER_RELATIVE_FRAME_SCHEMA_ID = (
     "palette.analysis.chaser_relative_frame.prepared_candidate"
 )
@@ -50,6 +49,14 @@ PREPARED_CHASER_RELATIVE_FRAME_SCHEMA_VERSION = 1
 FLATTEN_POLICY_ID = "acquisition_frame_major_chaser_axis_minor_v1"
 COMPUTATION_ID = "compute_chaser_relative_frame_v2_activity_orthogonal"
 MAX_CONTEXT_RECORD_BYTES = 65_536
+CORE_TRACK_INTERSECTION_TEMPORAL_SCHEMA_ID = (
+    "palette.chaser_relative_frame.core_temporal_selection"
+)
+CORE_TRACK_INTERSECTION_TEMPORAL_SCHEMA_VERSION = 1
+CORE_TRACK_INTERSECTION_SELECTION_ID = "core_track_chaser_frame_intersection_v1"
+CORE_TRACK_INTERSECTION_SELECTION = (
+    "source_chaser_frames_exactly_present_in_selected_core_track"
+)
 
 _INPUT_PROVENANCE_PROJECTION_FIELDS = frozenset(
     {
@@ -109,8 +116,227 @@ _INPUT_PROVENANCE_PUBLICATION_BINDING_FIELDS = frozenset(
 )
 
 _REASON_TO_CODE = {
-    reason: np.uint16(code) for code, reason in CHASER_RELATIVE_FRAME_REASON_CODES.items()
+    reason: np.uint16(code)
+    for code, reason in CHASER_RELATIVE_FRAME_REASON_CODES.items()
 }
+
+
+def _uses_core_track_intersection(
+    context: ChaserRelativeFramePublicationContext,
+    *,
+    n_frames: int,
+    row_axis_authority_id: str,
+    row_axis_authority_sha256: str,
+) -> bool:
+    """Validate the exact core-row subset contract, when present."""
+
+    core = context.core_authority_record
+    if core is None:
+        return False
+    temporal = context.temporal_selection_record
+    expected_core_fields = {
+        "schema_id",
+        "schema_version",
+        "recording_id",
+        "core_authority_roster_sha256",
+        "core_authority_consumption_receipt",
+        "core_motion",
+        "core_subject_body_frame",
+        "chaser_source",
+        "fish_pixel_projection",
+        "core_motion_facts_repeated",
+        "fallback",
+    }
+    expected_temporal_fields = {
+        "schema_id",
+        "schema_version",
+        "recording_id",
+        "selection_id",
+        "row_axis_authority_id",
+        "row_axis_authority_sha256",
+        "recording_timing_authority_sha256",
+        "selected_frame_count",
+        "selection",
+        "fallback",
+    }
+    motion = core.get("core_motion")
+    body = core.get("core_subject_body_frame")
+    chaser = core.get("chaser_source")
+    fish = core.get("fish_pixel_projection")
+    receipt = core.get("core_authority_consumption_receipt")
+    expected_motion_fields = {
+        "run_path",
+        "source_manifest_sha256",
+        "source_binding_sha256",
+        "track_id",
+        "row_axis_sha256",
+    }
+    expected_body_fields = {
+        "run_path",
+        "publication_manifest_sha256",
+        "source_binding_sha256",
+        "row_identity_sha256",
+        "body_frame_record_sha256",
+        "projection_record_sha256",
+    }
+    expected_chaser_fields = {
+        "run_path",
+        "manifest_sha256",
+        "verification_digest",
+        "consumed_authority",
+        "fish_position_authority",
+        "body_frame_authority",
+    }
+    expected_fish_fields = {
+        "schema_id",
+        "schema_version",
+        "recording_id",
+        "projection_id",
+        "core_authority_roster_sha256",
+        "source_core_motion_run_path",
+        "source_core_motion_manifest_sha256",
+        "source_chaser_run_path",
+        "source_chaser_manifest_sha256",
+        "source_chaser_profile_sha256",
+        "row_axis_authority_id",
+        "row_axis_authority_sha256",
+        "physical_authority_sha256",
+        "source",
+        "formula",
+        "fallback",
+        "record_sha256",
+    }
+    expected_receipt_fields = {
+        "schema_id",
+        "schema_version",
+        "consumer_id",
+        "recording_id",
+        "analysis_zarr",
+        "core_authority_roster_sha256",
+        "required_capabilities",
+        "capability_binding_digests",
+        "selected_track_id",
+        "record_sha256",
+    }
+    controller = context.controller_state_record
+    session_timing = (
+        controller.get("session_timestamp_authority")
+        if isinstance(controller, Mapping)
+        else None
+    )
+    required_capabilities = (
+        receipt.get("required_capabilities") if isinstance(receipt, Mapping) else None
+    )
+    if (
+        set(core) != expected_core_fields
+        or core.get("schema_id")
+        != "palette.chaser_relative_frame.core_authority_binding"
+        or core.get("schema_version") != 1
+        or core.get("fallback") != "prohibited"
+        or core.get("core_motion_facts_repeated") is not False
+        or not isinstance(motion, Mapping)
+        or set(motion) != expected_motion_fields
+        or not isinstance(body, Mapping)
+        or set(body) != expected_body_fields
+        or not isinstance(chaser, Mapping)
+        or set(chaser) != expected_chaser_fields
+        or not isinstance(fish, Mapping)
+        or set(fish) != expected_fish_fields
+        or not isinstance(receipt, Mapping)
+        or set(receipt) != expected_receipt_fields
+        or not isinstance(session_timing, Mapping)
+        or set(temporal) != expected_temporal_fields
+        or temporal.get("schema_id") != CORE_TRACK_INTERSECTION_TEMPORAL_SCHEMA_ID
+        or temporal.get("schema_version")
+        != CORE_TRACK_INTERSECTION_TEMPORAL_SCHEMA_VERSION
+        or temporal.get("selection_id") != CORE_TRACK_INTERSECTION_SELECTION_ID
+        or temporal.get("selected_frame_count") != n_frames
+        or temporal.get("selection") != CORE_TRACK_INTERSECTION_SELECTION
+        or temporal.get("fallback") != "prohibited"
+        or temporal.get("row_axis_authority_id") != row_axis_authority_id
+        or temporal.get("row_axis_authority_sha256") != row_axis_authority_sha256
+        or _SHA256_RE.fullmatch(row_axis_authority_sha256) is None
+        or type(temporal.get("recording_timing_authority_sha256")) is not str
+        or _SHA256_RE.fullmatch(temporal["recording_timing_authority_sha256"]) is None
+    ):
+        _fail("Core-bound temporal intersection context is incomplete or stale.")
+    assert (
+        isinstance(motion, Mapping)
+        and isinstance(body, Mapping)
+        and isinstance(chaser, Mapping)
+        and isinstance(fish, Mapping)
+        and isinstance(receipt, Mapping)
+    )
+    digest_fields = (
+        core.get("core_authority_roster_sha256"),
+        motion.get("source_manifest_sha256"),
+        motion.get("source_binding_sha256"),
+        motion.get("row_axis_sha256"),
+        body.get("publication_manifest_sha256"),
+        body.get("source_binding_sha256"),
+        body.get("row_identity_sha256"),
+        body.get("body_frame_record_sha256"),
+        body.get("projection_record_sha256"),
+        chaser.get("manifest_sha256"),
+        chaser.get("verification_digest"),
+        fish.get("source_chaser_profile_sha256"),
+        fish.get("physical_authority_sha256"),
+        fish.get("record_sha256"),
+        receipt.get("record_sha256"),
+    )
+    receipt_body = {
+        key: value for key, value in receipt.items() if key != "record_sha256"
+    }
+    fish_body = {key: value for key, value in fish.items() if key != "record_sha256"}
+    if (
+        any(
+            type(value) is not str or _SHA256_RE.fullmatch(value) is None
+            for value in digest_fields
+        )
+        or type(motion.get("track_id")) is not int
+        or motion["track_id"] < 0
+        or receipt.get("schema_id")
+        != "palette.core_behavior.authority_consumption_receipt"
+        or receipt.get("schema_version") != 1
+        or receipt.get("consumer_id") != "palette.chaser.core_relative_frame.v1"
+        or receipt.get("recording_id") != core.get("recording_id")
+        or receipt.get("core_authority_roster_sha256")
+        != core.get("core_authority_roster_sha256")
+        or receipt.get("selected_track_id") != motion.get("track_id")
+        or not isinstance(required_capabilities, list)
+        or any(type(value) is not str for value in required_capabilities)
+        or set(required_capabilities)
+        != {
+            "cross_grain_join_authority",
+            "kinematics_samples",
+            "subject_body_frame_samples",
+        }
+        or canonical_json_sha256(receipt_body) != receipt.get("record_sha256")
+        or fish.get("schema_id")
+        != "palette.chaser_relative_frame.core_fish_position_projection"
+        or fish.get("schema_version") != 1
+        or fish.get("recording_id") != core.get("recording_id")
+        or fish.get("projection_id") != "core_motion_on_exact_chaser_carrier_v1"
+        or fish.get("core_authority_roster_sha256")
+        != core.get("core_authority_roster_sha256")
+        or fish.get("source_core_motion_run_path") != motion.get("run_path")
+        or fish.get("source_core_motion_manifest_sha256")
+        != motion.get("source_manifest_sha256")
+        or fish.get("source_chaser_run_path") != chaser.get("run_path")
+        or fish.get("source_chaser_manifest_sha256") != chaser.get("manifest_sha256")
+        or fish.get("row_axis_authority_id") != row_axis_authority_id
+        or fish.get("row_axis_authority_sha256") != row_axis_authority_sha256
+        or motion.get("row_axis_sha256") != row_axis_authority_sha256
+        or fish.get("source") != "core_positions_mm"
+        or fish.get("formula") != "positions_mm * pixels_per_mm"
+        or fish.get("fallback") != "prohibited"
+        or canonical_json_sha256(fish_body) != fish.get("record_sha256")
+        or not isinstance(session_timing, Mapping)
+        or session_timing.get("recording_timing_authority_sha256")
+        != temporal.get("recording_timing_authority_sha256")
+    ):
+        _fail("Core-bound temporal intersection context is incomplete or stale.")
+    return True
 
 
 class ChaserRelativeFrameStorageError(ValueError):
@@ -238,9 +464,7 @@ def _validate_input_provenance_publication_binding(
         "schema_id": _INPUT_PROVENANCE_PUBLICATION_BINDING_SCHEMA_ID,
         "schema_version": 1,
         "recording_id": projection["recording_id"],
-        "acquisition_projection_record_sha256": canonical_json_sha256(
-            dict(projection)
-        ),
+        "acquisition_projection_record_sha256": canonical_json_sha256(dict(projection)),
         "policy_id": projection["policy_id"],
         "temporal_alignment_class": projection["temporal_alignment_class"],
         "source_run_path": projection["source_run_path"],
@@ -442,9 +666,7 @@ class ChaserRelativeFramePublicationContext:
             "acquisition_projection_publication": (
                 None
                 if self.acquisition_projection_publication_record is None
-                else self._envelope(
-                    self.acquisition_projection_publication_record
-                )
+                else self._envelope(self.acquisition_projection_publication_record)
             ),
             "analysis_profile": self._envelope(self.analysis_profile_record),
             "arena_geometry": (
@@ -459,17 +681,13 @@ class ChaserRelativeFramePublicationContext:
             ),
         }
         if self.controller_state_record is not None:
-            manifest["controller_state"] = self._envelope(
-                self.controller_state_record
-            )
+            manifest["controller_state"] = self._envelope(self.controller_state_record)
         if self.body_frame_projection_record is not None:
             manifest["body_frame_projection"] = self._envelope(
                 self.body_frame_projection_record
             )
         if self.core_authority_record is not None:
-            manifest["core_authority"] = self._envelope(
-                self.core_authority_record
-            )
+            manifest["core_authority"] = self._envelope(self.core_authority_record)
         return manifest
 
 
@@ -523,9 +741,10 @@ def validate_prepared_chaser_relative_frame(
     ):
         _fail("Prepared manifest identity or selector-ineligible state is invalid.")
     dimensions = manifest.get("dimensions")
-    if not isinstance(dimensions, Mapping) or dimensions.get(
-        "n_rows"
-    ) != prepared.dimensions.n_rows:
+    if (
+        not isinstance(dimensions, Mapping)
+        or dimensions.get("n_rows") != prepared.dimensions.n_rows
+    ):
         _fail("Prepared manifest dimensions do not match the typed arrays.")
     n_frames = dimensions.get("n_frames")
     n_chasers = dimensions.get("n_chasers")
@@ -733,7 +952,19 @@ def prepare_chaser_relative_frame(
         _fail("A chaser-relative publication requires a non-empty chaser axis.")
     projection = context.acquisition_projection_record
     if projection.get("policy_id") == INPUT_PROVENANCE_PROXY_POLICY_ID:
-        if projection["unique_acquisition_frame_count"] != n_frames:
+        core_intersection = _uses_core_track_intersection(
+            context,
+            n_frames=n_frames,
+            row_axis_authority_id=result.frame_keys.row_axis_authority_id,
+            row_axis_authority_sha256=result.frame_keys.row_axis_authority_digest,
+        )
+        if (
+            core_intersection
+            and projection["unique_acquisition_frame_count"] < n_frames
+        ) or (
+            not core_intersection
+            and projection["unique_acquisition_frame_count"] != n_frames
+        ):
             _fail(
                 "Input-provenance projection frame count does not match the "
                 "relative-frame acquisition axis."
@@ -744,9 +975,18 @@ def prepare_chaser_relative_frame(
                 "relative-frame chaser axis."
             )
         complete_selected_rows = np.all(result.chaser_valid, axis=1)
-        if int(np.count_nonzero(complete_selected_rows)) != projection[
-            "selected_acquisition_frame_count"
-        ]:
+        complete_count = int(np.count_nonzero(complete_selected_rows))
+        if (
+            core_intersection
+            and (
+                complete_count != n_frames
+                or projection["selected_acquisition_frame_count"] < n_frames
+                or not np.all(result.selection_membership)
+            )
+        ) or (
+            not core_intersection
+            and complete_count != projection["selected_acquisition_frame_count"]
+        ):
             _fail(
                 "Input-provenance selected count does not match complete "
                 "relative-frame chaser rows."
@@ -757,9 +997,7 @@ def prepare_chaser_relative_frame(
             "source_authority_id": publication["run_path"],
             "source_digest": publication["manifest_sha256"],
             "provider_id": projection["policy_id"],
-            "provider_digest": publication[
-                "acquisition_projection_record_sha256"
-            ],
+            "provider_digest": publication["acquisition_projection_record_sha256"],
         }
         for name, expected_value in expected_chaser_authority.items():
             if getattr(result.chaser_authority, name) != expected_value:
@@ -1002,9 +1240,7 @@ def prepare_chaser_relative_frame(
             ),
             "body_heading_valid": body_valid,
             "body_heading_reason_code": body_reason,
-            "body_heading_transition_valid": frame(
-                result.heading_transition_valid
-            ),
+            "body_heading_transition_valid": frame(result.heading_transition_valid),
             "body_heading_transition_reason_code": _encode_reasons(
                 frame(result.heading_transition_reason_code),
                 field="body_heading_transition_reason_code",
@@ -1034,7 +1270,9 @@ def prepare_chaser_relative_frame(
             "body_reason_code": body_pair_reason,
         }
 
-    base = {name: _readonly(value, np.asarray(value).dtype) for name, value in base.items()}
+    base = {
+        name: _readonly(value, np.asarray(value).dtype) for name, value in base.items()
+    }
     if body_arrays is not None:
         body_arrays = {
             name: _readonly(value, np.asarray(value).dtype)
@@ -1074,9 +1312,7 @@ def prepare_chaser_relative_frame(
                 str(index + 1): identity
                 for index, identity in enumerate(result.chaser_identities)
             },
-            "behavior_role": {
-                str(code): role for role, code in role_to_code.items()
-            },
+            "behavior_role": {str(code): role for role, code in role_to_code.items()},
             "active_state": {"0": "inactive", "1": "active"},
         },
         "reason_codes": {
@@ -1120,9 +1356,7 @@ def prepare_chaser_relative_frame(
             "policy_id": result.active_position_validity_policy,
             "active_state_present": result.chaser_active is not None,
             "active_state_surface": (
-                "base/active_state_code"
-                if result.chaser_active is not None
-                else None
+                "base/active_state_code" if result.chaser_active is not None else None
             ),
             "position_validity_semantics": (
                 "controller activity is preserved as evidence and does not "
@@ -1140,9 +1374,7 @@ def prepare_chaser_relative_frame(
     prepared = PreparedChaserRelativeFrame(
         dimensions=dimensions,
         base_arrays=MappingProxyType(base),
-        body_arrays=(
-            None if body_arrays is None else MappingProxyType(body_arrays)
-        ),
+        body_arrays=(None if body_arrays is None else MappingProxyType(body_arrays)),
         manifest=MappingProxyType(manifest),
     )
     validate_prepared_chaser_relative_frame(prepared)
@@ -1151,6 +1383,10 @@ def prepare_chaser_relative_frame(
 
 __all__ = [
     "COMPUTATION_ID",
+    "CORE_TRACK_INTERSECTION_SELECTION",
+    "CORE_TRACK_INTERSECTION_SELECTION_ID",
+    "CORE_TRACK_INTERSECTION_TEMPORAL_SCHEMA_ID",
+    "CORE_TRACK_INTERSECTION_TEMPORAL_SCHEMA_VERSION",
     "FLATTEN_POLICY_ID",
     "MAX_CONTEXT_RECORD_BYTES",
     "PREPARED_CHASER_RELATIVE_FRAME_SCHEMA_ID",

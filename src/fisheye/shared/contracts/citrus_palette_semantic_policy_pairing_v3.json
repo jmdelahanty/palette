@@ -1,0 +1,59 @@
+{
+  "schema_id": "citrus_palette.stimulus_angle_convention.semantic_policy_pairing",
+  "schema_version": 1,
+  "revision": 3,
+  "status": "draft",
+  "decided": "Jeremy, 2026-11-10 (240 Hz stimulus rendering on omnifin0; the render rate joins the protocol identity in the shape Palette proposed: a new recipe, a session-level exact integer, always present)",
+  "producer": "Citrus branch agent/citrus/protocol-semantic-v4-render-rate (PR to follow)",
+  "supersedes": "semantic_policy_pairing_v2.json (revision 2). That file is unchanged and stays pinned by the admissions that already pin it.",
+  "hash_rule": "protocol_semantic_hash = 'sha256:' + hex(sha256(canonical_json_bytes)) over the exact recorded bytes; a consumer never re-canonicalises or regenerates them",
+  "envelope": {
+    "schema_id": "citrus.protocol.semantic",
+    "schema_version": 1,
+    "stimulus_angle_convention": "atan2_negative_y_x_degrees"
+  },
+  "pairings": [
+    {
+      "stimulus_angle_convention": "canvas_y_down_clockwise_legacy",
+      "semantic_normalization_policies": ["citrus.protocol.semantic.v1"],
+      "trial_index": "schema_version 1 or 2 (citrus.protocol.trial_index.v1 / .v2)",
+      "protocol_file": "unversioned (legacy version 1)"
+    },
+    {
+      "stimulus_angle_convention": "atan2_negative_y_x_degrees",
+      "semantic_normalization_policies": ["citrus.protocol.semantic.v2", "citrus.protocol.semantic.v3", "citrus.protocol.semantic.v4"],
+      "trial_index": "schema_version 3 (citrus.protocol.trial_index.v3) for all three semantic policies",
+      "protocol_file": "citrus.stimulus_protocol schema_version 2"
+    }
+  ],
+  "mixing": "any other combination is corruption and is refused; semantic.v3 or semantic.v4 under the legacy convention is refused; an unknown policy (for example citrus.protocol.semantic.v5) is refused",
+  "semantic_v4": {
+    "changes_from_v3": "normalization_policy is citrus.protocol.semantic.v4, and the identity gains one session-level key. Everything else in the envelope and identity is hashed exactly as in v3.",
+    "newly_hashed": [
+      {
+        "path": "identity.stimulus_render_rate_hz",
+        "rule": "required on every v4 identity, 120 included; a JSON integer (no fraction, no scale object), positive. It is the process's stimulus frame rate: arena update ticks and display submissions per second. Citrus refuses to build a v4 identity for a rate that is not a whole number of hertz (status code stimulus_render_rate_invalid), so a recording at such a rate has no semantic hash.",
+        "allowed_values": "120 or 240 as of 2026-11-10; Citrus refuses to launch at any other rate"
+      }
+    ],
+    "consistency": "in a v4 recording, identity.stimulus_render_rate_hz equals the H5's display_submission_rate_target_hz and stimulus_frame_rate_nominal_hz. All three come from one per-process value in Citrus (StimulusTiming::FrameRateHz), set once at launch. Palette refuses a recording where they differ.",
+    "why": "the chaser draws random numbers once per update tick, and other per-tick behaviour may differ, so the same protocol and seed show a different stimulus at 240 Hz than at 120 Hz; one hash must never name both",
+    "trial_index": "stays schema_version 3 / citrus.protocol.trial_index.v3, with no new keys; its bytes differ from a v3-era trial index only in the embedded protocol_semantic_hash value, as for semantic v2 to v3. Its hash changes because it embeds the semantic hash, and the execution-index hash changes because it embeds the trial-index hash.",
+    "seeds": "per_session_v1 chaser seeds are sha256('citrus.chaser_schedule.seed.v1' | session_uuid | semantic_hash | step_index | occurrence), so they change with the semantic hash; session_uuid is included, so no two sessions ever shared a seed and a v4 session at 120 Hz is a replicate of a v3 session in the same sense as two v3 sessions. fixed_v1 seeds are unchanged, but at 240 Hz the trajectory they produce differs from 120 Hz because draws happen per tick.",
+    "rate_history": "Citrus rendered at a compile-time 120 Hz until main 7e92836 (2026-11-10), and 7e92836 allows only 120. Every v1, v2 and v3 recording therefore ran at 120 Hz."
+  },
+  "relabel_pooling_rule": {
+    "scope": "protocol_semantic_hash grouping only; trial-index and execution-index hashes are never joined across policies",
+    "rule_v3_to_v4": "a v3 recording joins a v4 protocol group only if (1) its recorded protocol_semantic_json bytes hash to its recorded v3 protocol_semantic_hash, (2) the byte substring },\"normalization_policy\":\"citrus.protocol.semantic.v3\" occurs exactly once in those bytes, and (3) sha256 of the bytes with that substring replaced by ,\"stimulus_render_rate_hz\":120},\"normalization_policy\":\"citrus.protocol.semantic.v4\" equals the v4 group's protocol_semantic_hash. Otherwise the recording stays in its own v3 group.",
+    "why_the_substring_works": "the canonical JSON is minified with keys in sorted order, so the identity object is the first key and closes immediately before ,\"normalization_policy\"; within identity, stimulus_render_rate_hz sorts after steps and is therefore its last key",
+    "rate": "only 120 is ever inserted, because every v3 recording ran at 120 Hz (rate_history); a v3 recording never joins a v4 group at 240",
+    "chaining": "a v2 recording reaches v4 only by applying the revision-2 v2-to-v3 rule and then this rule, each step on bytes, each step checked",
+    "inputs": "recorded bytes only; never a re-serialisation or a fresh regeneration",
+    "expected": "matches every v3 protocol at 120 Hz; never matches a v4 identity at 240 Hz"
+  },
+  "fixture": {
+    "path": "fixtures/semantic_hash_v4_cases.json (Citrus: docs/protocol_semantic_v4/semantic_hash_v4_cases.json)",
+    "source": "Citrus protocol_identity_dump --render-rate-hz 120 and 240, built from the producer branch; v3 bytes from main 7e92836",
+    "status": "generated 2026-11-10 from the producer branch; five repository protocols, each at v3 (main 7e92836), v4 at 120 and v4 at 240; the v3-to-v4 relabel rule matches all five at 120 and none at 240"
+  }
+}

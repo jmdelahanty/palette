@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, Sequence
 
 import numpy as np
+from fisheye.shared.heading_convention import wrap_delta_degrees
 
 
 _MOVING_GRATING = "MOVING_GRATING"
@@ -71,12 +72,6 @@ def resolve_grating_speed_mm_s(step: Any) -> float:
     return 0.0
 
 
-def _wrap_angle(angle_deg: np.ndarray) -> np.ndarray:
-    """Wrap angles to [-180, +180]."""
-
-    return ((angle_deg + 180.0) % 360.0) - 180.0
-
-
 def _grating_direction_vector(direction_deg: float) -> np.ndarray:
     """Return a unit vector in camera/mm coordinates for grating drift."""
 
@@ -125,7 +120,7 @@ def compute_grating_per_frame(
 
         # Alignment angle: heading - grating direction, wrapped to [-180, 180].
         raw_diff = heading_step - grating_dir_deg
-        alignment_angle[i] = _wrap_angle(raw_diff)
+        alignment_angle[i] = wrap_delta_degrees(raw_diff, dtype=raw_diff.dtype)
         alignment_cos[i] = np.cos(np.deg2rad(alignment_angle[i]))
 
         # Speed projected onto grating direction.

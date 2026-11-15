@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orange.recording_realtime_products.v1",
+  "title": "Orange recording realtime products (version 1)",
+  "description": "recording_session.json realtime_products: per camera, the realtime detection and pose event logs and the per-camera perf and diagnostic CSVs written beside the session, declared with their digests so an intake can bind each camera's files to that camera and to the model that produced them (models.<serial>.detect / .pose in recording_snapshot.json). Paths are relative to the recording folder; sha256 is the lowercase hex digest of the file bytes, the same value the transfer inventory records. Row counts come from a scan of the event log at finalize: row_count is the number of frame rows (header rows excluded), rows_by_kind maps each row's status to result | no_result | failed | other (detections: detections and zero_detections are result; failed, timeout and error are failed; pose: poses is result), rows_by_status keeps the raw status counts. Coverage against the recording frame clock is the consumer's to derive.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_id", "schema_version", "paths_relative_to", "digest", "cameras"],
+  "properties": {
+    "schema_id": {"const": "orange.recording_realtime_products"},
+    "schema_version": {"const": 1},
+    "paths_relative_to": {"const": "recording_folder"},
+    "digest": {"type": "string"},
+    "cameras": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[0-9]+$"},
+      "additionalProperties": {"$ref": "#/$defs/camera"}
+    }
+  },
+  "$defs": {
+    "sha256_hex": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "path", "size_bytes", "sha256"],
+      "properties": {
+        "role": {"type": "string", "enum": ["events", "perf", "diagnostic", "crop_ledger_session"]},
+        "path": {"type": "string", "pattern": "^Cam[0-9]+_[A-Za-z0-9_.]+$"},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "#/$defs/sha256_hex"}
+      }
+    },
+    "model_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["models_key", "enabled", "model_id", "engine_path", "engine_sha256", "weights_sha256"],
+      "properties": {
+        "models_key": {"type": "string", "pattern": "^models\\.[0-9]+\\.(detect|pose)$"},
+        "enabled": {"type": "boolean"},
+        "model_id": {"type": "string"},
+        "engine_path": {"type": "string"},
+        "engine_sha256": {"type": "string", "pattern": "^([0-9a-f]{64})?$"},
+        "weights_sha256": {"type": "string", "pattern": "^([0-9a-f]{64})?$"}
+      }
+    },
+    "rows_by_kind": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result", "no_result", "failed", "other"],
+      "properties": {
+        "result": {"type": "integer", "minimum": 0},
+        "no_result": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "other": {"type": "integer", "minimum": 0}
+      }
+    },
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "model_ref", "files"],
+      "properties": {
+        "status": {"type": "string", "enum": ["present", "absent"]},
+        "model_ref": {"$ref": "#/$defs/model_ref"},
+        "files": {"type": "array", "items": {"$ref": "#/$defs/file"}},
+        "line_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_id", "schema_version"],
+          "properties": {
+            "schema_id": {"type": "string", "enum": ["orange.yolo_event", "orange.pose_event"]},
+            "schema_version": {"type": "integer", "minimum": 1}
+          }
+        },
+        "frame_identity_key": {"const": "frame.recording_frame_id"},
+        "row_count": {"type": "integer", "minimum": 0},
+        "header_rows": {"type": "integer", "minimum": 0},
+        "parse_errors": {"type": "integer", "minimum": 0},
+        "first_recording_frame_id": {"type": "integer", "minimum": 0},
+        "last_recording_frame_id": {"type": "integer", "minimum": 0},
+        "rows_by_kind": {"$ref": "#/$defs/rows_by_kind"},
+        "rows_by_status": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "pose_crop_size_px": {"type": "integer", "minimum": 0}
+      },
+      "if": {"properties": {"status": {"const": "present"}}},
+      "then": {"required": ["line_schema", "frame_identity_key", "row_count", "header_rows", "parse_errors", "first_recording_frame_id", "last_recording_frame_id", "rows_by_kind", "rows_by_status"]}
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["detections", "pose", "crop_files", "acquisition_files"],
+      "properties": {
+        "detections": {"$ref": "#/$defs/product"},
+        "pose": {"$ref": "#/$defs/product"},
+        "crop_files": {"type": "array", "items": {"$ref": "#/$defs/file"}},
+        "acquisition_files": {"type": "array", "items": {"$ref": "#/$defs/file"}}
+      }
+    }
+  }
+}

@@ -670,6 +670,33 @@ authority belong to the same archive. Keyless or manifestless historical
 tracking remains available through the legacy compatibility reader but cannot
 become modern provider-motion authority without an immutable keyed successor.
 
+Provider behavior-chain task v3 makes that composition boundary available to
+provider-neutral orchestration. Its `source_runs.position` field contains one
+exact `analysis/subject_position_runs/observation/<run>` path and that run's
+manifest SHA-256. The chain reopens the named selector-ineligible publication
+through the strict subject-position handle in both direct and published
+consolidated metadata modes and requires their manifest and decoded-content
+digests to agree. It creates or reuses tracking and provider-motion outputs
+only when their sealed lineage identifies that same position authority, and
+validates the exact upstream lineage of every downstream reuse. The estimator
+may be detection-, keypoint-, or mask-backed; the chain neither discovers a
+default nor infers a modality. Task v1/v2 retain their keypoint-triad
+materialization behavior as compatibility adapters.
+
+Task v4 is the receipted successor to v3. It closes and canonicalizes the task
+field set and binds it with a self `task_sha256`. A successful run emits a
+versioned receipt with the exact evidence and canonical digest for all seven
+stages plus a self `receipt_sha256`; the persisted CLI receipt is reloaded and
+validated before success. Task and receipt tampering fail closed. The receipt
+validator verifies the sealed document; the chain's strict loaders establish
+the bound live-artifact claims while executing. Task v3 keeps its existing
+undigested result grammar for compatibility.
+
+This is one caller migration, not production activation. The default core
+workflow remains on its crop/detection-centroid plus keypoint-heading recipe,
+and task v3/v4 changes no subject-position, tracking, motion, or registry
+selector.
+
 This closes the Phase 3 tracking-authority implementation blocker. Production
 activation remains blocked by required CI and Phase 5 canary/promotion
 evidence, not by another implicit tracking input surface.
@@ -683,24 +710,29 @@ physical array as its float32 pixel peer multiplied by the bound
 selector-ineligible canary exception and records that omission in the immutable
 computation manifest.
 
-Existing provider-motion runs preserve exact acquisition-frame indices and
-compute `time_seconds` from a caller-supplied FPS. The Phase 4 binding layer now
-late-binds an existing immutable run to the recording authority without
-rewriting it. The strict loader requires canonical `source_video_metadata.v2`,
-the exact selected acquisition frame-clock record and array digests, matching
-recording/camera/frame-count/FPS metadata, the complete zero-based acquisition
-frame domain, source indices within that domain, and direct/consolidated
-metadata equality. A provider-motion run additionally has to declare the same
-FPS as the recording authority. The resulting authority digest is shared by
-position, body-frame, motion, and temporal-selection identities; an offer is
-not `ready` when any required identity is missing it or the digests disagree.
+Provider motion preserves exact acquisition-frame indices and continues to
+compute `time_seconds` from the declared nominal FPS. Computation schema v2 for
+new provider-motion publications binds the exact live recording timing
+authority record and SHA-256. Preparation, planning, local materialization,
+publication, activation, and strict reload reopen that authority, require exact
+nominal-FPS agreement, and validate every motion source index against the
+complete acquisition-frame domain. The strict loader also requires canonical
+`source_video_metadata.v2`, the selected
+acquisition frame-clock record and array digests, matching
+recording/camera/frame-count/FPS metadata, and direct/consolidated metadata
+equality. Computation-v1 runs remain readable as explicit caller-FPS-only
+compatibility evidence, but cannot satisfy a consumer that requires
+authoritative timing.
 
-This is intentionally a read-time, no-write bridge. It validates the existing
-clock publication and array digests, but neither copies camera or system
-timestamp values into provider runs nor changes the numerical values of
-existing motion products. A legacy archive without an acquisition frame clock
-remains explicit `legacy_missing`/`blocked_temporal_authority`; no nominal
-clock is guessed.
+This timing extension changes provenance and enforcement, not numerical motion
+semantics. It neither copies camera or system timestamp arrays into provider
+runs nor changes the existing FPS-based calculations. The recording authority
+loader also remains available as a no-write binding surface for immutable
+artifacts. A legacy archive without an acquisition frame clock remains explicit
+`legacy_missing`/`blocked_temporal_authority`; no nominal clock is guessed. The
+resulting authority digest is shared by position, body-frame, motion, and
+temporal-selection identities; an offer is not `ready` when any required
+identity is missing it or the digests disagree.
 
 #### Nominal-timebase evidence decision (2026-08-17)
 

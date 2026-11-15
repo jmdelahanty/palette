@@ -273,7 +273,7 @@ def plan_target(target: BackfillTarget) -> dict[str, Any]:
     row["source_h5_path"] = str(h5_path)
     try:
         metadata = read_h5_subject_metadata(h5_path)
-        subject_record = build_subject_metadata_record(metadata)
+        subject_record = build_subject_metadata_record(metadata, translator="h5_attributes")
         subject_ids = [str(value) for value in subject_record["subject_ids"]]
         if not subject_ids:
             return _finish(
@@ -471,6 +471,7 @@ def apply_backfill_plan(
                     root,
                     metadata,
                     source_h5_path=h5_path,
+                    translator="h5_attributes",
                 )
                 setup_record = build_experiment_setup_record(
                     metadata,

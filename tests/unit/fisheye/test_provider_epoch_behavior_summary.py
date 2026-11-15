@@ -6,6 +6,9 @@ import numpy as np
 import pytest
 
 from fisheye.analysis.chaser_distance_runs import ChaserDistanceWindow
+from fisheye.analysis_workflows.materializers import (
+    provider_epoch_behavior_summary as provider_epoch_behavior_summary_module,
+)
 from fisheye.analysis_workflows.materializers.provider_epoch_behavior_summary import (
     ProviderEpochBehaviorSummaryError,
     _bind_protocol_semantic_row_identity,
@@ -24,6 +27,151 @@ from fisheye.analysis_workflows.protocol_semantic_chaser_selection import (
     CHASER_WINDOW_ROLES,
 )
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from tests.unit.fisheye.test_provider_swim_bout_binding import (
+    _fixture as _provider_swim_bout_fixture,
+)
+
+
+class _ExpectedSwimBoutLoader(RuntimeError):
+    pass
+
+
+def _patch_compute_result_to_reach_core_swim_bout_loader(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    selector_eligible: object,
+) -> None:
+    bout_source = SimpleNamespace(
+        binding={
+            "run_name": "bouts_1",
+            "completion_snapshot": {
+                "selector_eligible": selector_eligible,
+            },
+        }
+    )
+    provider = SimpleNamespace(
+        run_path="analysis/track_kinematics_runs/offline/motion_1",
+        canonical_bout_source=bout_source,
+    )
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        "resolve_exact_stimulus_epoch_selection",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        "bind_core_motion_and_bouts_from_roster",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        "bind_core_motion_track_source_handle",
+        lambda *_args, **_kwargs: provider,
+    )
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        "_track_slice",
+        lambda *_args, **_kwargs: slice(0, 1),
+    )
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        "open_zarr_root",
+        lambda *_args, **_kwargs: object(),
+    )
+
+
+def _call_compute_result_through_core_swim_bout_loader(tmp_path) -> None:
+    provider_epoch_behavior_summary_module._compute_result(
+        tmp_path / "recording.zarr",
+        run_name="summary_1",
+        epoch_run_name="epochs_1",
+        protocol_semantic_selection_run_name=None,
+        motion_run_path="analysis/track_kinematics_runs/offline/motion_1",
+        swim_bout_run_name="bouts_1",
+        track_id=0,
+        speed_level="speed_exponential",
+        core_authority_roster={"sealed": True},
+    )
+
+
+@pytest.mark.parametrize(
+    ("selector_eligible", "expected_loader_name", "unexpected_loader_name"),
+    [
+        (
+            True,
+            "load_default_swim_bout_tables",
+            "load_exact_selector_ineligible_default_swim_bout_tables",
+        ),
+        (
+            False,
+            "load_exact_selector_ineligible_default_swim_bout_tables",
+            "load_default_swim_bout_tables",
+        ),
+    ],
+)
+def test_compute_result_preserves_core_swim_bout_selector_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    selector_eligible: bool,
+    expected_loader_name: str,
+    unexpected_loader_name: str,
+) -> None:
+    _patch_compute_result_to_reach_core_swim_bout_loader(
+        monkeypatch,
+        selector_eligible=selector_eligible,
+    )
+
+    def expected_loader(*_args, **_kwargs):
+        raise _ExpectedSwimBoutLoader
+
+    def unexpected_loader(*_args, **_kwargs):
+        pytest.fail("The opposite swim-bout authority loader was called.")
+
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        expected_loader_name,
+        expected_loader,
+    )
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        unexpected_loader_name,
+        unexpected_loader,
+    )
+
+    with pytest.raises(_ExpectedSwimBoutLoader):
+        _call_compute_result_through_core_swim_bout_loader(tmp_path)
+
+
+@pytest.mark.parametrize("selector_eligible", [None, 0, "false"])
+def test_compute_result_rejects_invalid_core_swim_bout_selector_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    selector_eligible: object,
+) -> None:
+    _patch_compute_result_to_reach_core_swim_bout_loader(
+        monkeypatch,
+        selector_eligible=selector_eligible,
+    )
+
+    def unexpected_loader(*_args, **_kwargs):
+        pytest.fail("A swim-bout loader was called for invalid lifecycle evidence.")
+
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        "load_default_swim_bout_tables",
+        unexpected_loader,
+    )
+    monkeypatch.setattr(
+        provider_epoch_behavior_summary_module,
+        "load_exact_selector_ineligible_default_swim_bout_tables",
+        unexpected_loader,
+    )
+
+    with pytest.raises(
+        ProviderEpochBehaviorSummaryError,
+        match="selector lifecycle",
+    ):
+        _call_compute_result_through_core_swim_bout_loader(tmp_path)
 
 
 def _window() -> ChaserDistanceWindow:
@@ -322,50 +470,18 @@ def test_source_binding_digest_normalizes_immutable_nested_mappings() -> None:
 
 
 def test_swim_bout_binding_requires_the_exact_provider_manifest_and_row_slice() -> None:
-    frames = np.arange(10, dtype=np.int64)
-    provider = SimpleNamespace(
-        run_name="motion_1",
-        provider_manifest_sha256="a" * 64,
-        verification_digest="b" * 64,
-        source_acquisition_frame_index=frames,
-    )
-    authority = {
-        "motion_manifest_sha256": "a" * 64,
-        "provider_verification_digest": "b" * 64,
-        "track_id": 0,
-        "track_row_start": 0,
-        "track_row_stop": 10,
-    }
-    from fisheye.analysis.swim_bout_frame_axis import canonical_frame_axis_sha256
-
-    tables = SimpleNamespace(
-        run_name="bouts_1",
-        run_path="analysis/swim_bout_runs/bouts_1",
-        run_attrs={
-            "source_track_kinematics_scope": "provider",
-            "source_track_kinematics_run": "motion_1",
-            "track_id": 0,
-            "source_track_motion_manifest_sha256": "a" * 64,
-            "source_track_motion_authority": authority,
-            "frame_axis_contract": {
-                "content_sha256": canonical_frame_axis_sha256(frames)
-            },
-            "lineage_hash": "c" * 64,
-        },
-        candidate=SimpleNamespace(candidate_id=0),
-        signal=SimpleNamespace(signal_id=4, speed_level="speed_exponential"),
-    )
+    provider, tables = _provider_swim_bout_fixture()
 
     binding, lineage, frame_digest = _swim_bout_binding(
         tables,
         provider=provider,
-        rows=slice(0, 10),
+        rows=slice(0, 3),
         track_id=0,
     )
 
-    assert lineage == "c" * 64
+    assert lineage == "d" * 64
     assert binding["source_track_motion_manifest_sha256"] == "a" * 64
-    assert binding["track_row_stop"] == 10
+    assert binding["track_row_stop"] == 3
     assert binding["frame_axis_sha256"] == frame_digest
 
     tables.run_attrs["source_track_motion_manifest_sha256"] = "d" * 64
@@ -373,7 +489,7 @@ def test_swim_bout_binding_requires_the_exact_provider_manifest_and_row_slice() 
         _swim_bout_binding(
             tables,
             provider=provider,
-            rows=slice(0, 10),
+            rows=slice(0, 3),
             track_id=0,
         )
 

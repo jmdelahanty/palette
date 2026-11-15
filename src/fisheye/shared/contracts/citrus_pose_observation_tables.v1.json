@@ -1,0 +1,447 @@
+{
+  "schema_id": "citrus.pose_observation_tables",
+  "schema_version": 1,
+  "contract": "citrus.pose_observation v1",
+  "row_layout": "packed_no_padding_little_endian",
+  "tables": {
+    "updates": {
+      "path": "/observations/pose/updates",
+      "attributes": {
+        "schema_id": "citrus.pose.updates",
+        "schema_version": "1",
+        "contract_ref": "/observations/pose/contract_json"
+      },
+      "row_bytes": 356,
+      "fields": [
+        {
+          "name": "sequence_id",
+          "offset_bytes": 0,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "state_frame_id",
+          "offset_bytes": 8,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "source_frame_id",
+          "offset_bytes": 16,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "camera_frame_id",
+          "offset_bytes": 24,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "recording_frame_id",
+          "offset_bytes": 32,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "producer_generation",
+          "offset_bytes": 40,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "producer_instance_id",
+          "offset_bytes": 48,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "camera_timestamp_ns",
+          "offset_bytes": 56,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "timestamp_sys_ns",
+          "offset_bytes": 64,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "orange_publish_timestamp_us_epoch",
+          "offset_bytes": 72,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "orange_publish_timestamp_us_monotonic",
+          "offset_bytes": 80,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "pose_model_id_hash",
+          "offset_bytes": 88,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "pose_skeleton_id_hash",
+          "offset_bytes": 96,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "detection_model_id_hash",
+          "offset_bytes": 104,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "objects_start",
+          "offset_bytes": 112,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "ipc_read_time_ns",
+          "offset_bytes": 120,
+          "width_bytes": 8,
+          "encoding": "i64le",
+          "numpy_dtype": "<i8"
+        },
+        {
+          "name": "session_time_ns",
+          "offset_bytes": 128,
+          "width_bytes": 8,
+          "encoding": "i64le",
+          "numpy_dtype": "<i8"
+        },
+        {
+          "name": "camera_id",
+          "offset_bytes": 136,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "source_width_px",
+          "offset_bytes": 140,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "source_height_px",
+          "offset_bytes": 144,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "detection_status",
+          "offset_bytes": 148,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "pose_status",
+          "offset_bytes": 152,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "detection_reason",
+          "offset_bytes": 156,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "object_order",
+          "offset_bytes": 160,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "source_detection_count",
+          "offset_bytes": 164,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "retained_detection_count",
+          "offset_bytes": 168,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "transmitted_object_count",
+          "offset_bytes": 172,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "objects_truncated",
+          "offset_bytes": 176,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "logged_object_count",
+          "offset_bytes": 180,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "scope",
+          "offset_bytes": 184,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "camera_serial",
+          "offset_bytes": 188,
+          "width_bytes": 32,
+          "encoding": "utf8_fixed_null_padded",
+          "numpy_dtype": "|S32"
+        },
+        {
+          "name": "recording_identity_token",
+          "offset_bytes": 220,
+          "width_bytes": 72,
+          "encoding": "utf8_fixed_null_padded",
+          "numpy_dtype": "|S72"
+        },
+        {
+          "name": "region_id",
+          "offset_bytes": 292,
+          "width_bytes": 64,
+          "encoding": "utf8_fixed_null_padded",
+          "numpy_dtype": "|S64"
+        }
+      ]
+    },
+    "objects": {
+      "path": "/observations/pose/objects",
+      "attributes": {
+        "schema_id": "citrus.pose.objects",
+        "schema_version": "1",
+        "contract_ref": "/observations/pose/contract_json"
+      },
+      "row_bytes": 80,
+      "fields": [
+        {
+          "name": "update_row",
+          "offset_bytes": 0,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "keypoints_start",
+          "offset_bytes": 8,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "payload_object_index",
+          "offset_bytes": 16,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "flags",
+          "offset_bytes": 20,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "keypoint_count",
+          "offset_bytes": 24,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "heading_status",
+          "offset_bytes": 28,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "x_px",
+          "offset_bytes": 32,
+          "width_bytes": 4,
+          "encoding": "f32le",
+          "numpy_dtype": "<f4"
+        },
+        {
+          "name": "y_px",
+          "offset_bytes": 36,
+          "width_bytes": 4,
+          "encoding": "f32le",
+          "numpy_dtype": "<f4"
+        },
+        {
+          "name": "width_px",
+          "offset_bytes": 40,
+          "width_bytes": 4,
+          "encoding": "f32le",
+          "numpy_dtype": "<f4"
+        },
+        {
+          "name": "height_px",
+          "offset_bytes": 44,
+          "width_bytes": 4,
+          "encoding": "f32le",
+          "numpy_dtype": "<f4"
+        },
+        {
+          "name": "confidence",
+          "offset_bytes": 48,
+          "width_bytes": 4,
+          "encoding": "f32le",
+          "numpy_dtype": "<f4"
+        },
+        {
+          "name": "label_id",
+          "offset_bytes": 52,
+          "width_bytes": 4,
+          "encoding": "i32le",
+          "numpy_dtype": "<i4"
+        },
+        {
+          "name": "track_id",
+          "offset_bytes": 56,
+          "width_bytes": 4,
+          "encoding": "i32le",
+          "numpy_dtype": "<i4"
+        },
+        {
+          "name": "heading_origin_x_px",
+          "offset_bytes": 60,
+          "width_bytes": 4,
+          "encoding": "f32le",
+          "numpy_dtype": "<f4"
+        },
+        {
+          "name": "heading_origin_y_px",
+          "offset_bytes": 64,
+          "width_bytes": 4,
+          "encoding": "f32le",
+          "numpy_dtype": "<f4"
+        },
+        {
+          "name": "heading_direction_x",
+          "offset_bytes": 68,
+          "width_bytes": 4,
+          "encoding": "f32le",
+          "numpy_dtype": "<f4"
+        },
+        {
+          "name": "heading_direction_y",
+          "offset_bytes": 72,
+          "width_bytes": 4,
+          "encoding": "f32le",
+          "numpy_dtype": "<f4"
+        },
+        {
+          "name": "heading_angle_degrees",
+          "offset_bytes": 76,
+          "width_bytes": 4,
+          "encoding": "f32le",
+          "numpy_dtype": "<f4"
+        }
+      ]
+    },
+    "keypoints": {
+      "path": "/observations/pose/keypoints",
+      "attributes": {
+        "schema_id": "citrus.pose.keypoints",
+        "schema_version": "1",
+        "contract_ref": "/observations/pose/contract_json"
+      },
+      "row_bytes": 28,
+      "fields": [
+        {
+          "name": "object_row",
+          "offset_bytes": 0,
+          "width_bytes": 8,
+          "encoding": "u64le",
+          "numpy_dtype": "<u8"
+        },
+        {
+          "name": "payload_keypoint_index",
+          "offset_bytes": 8,
+          "width_bytes": 4,
+          "encoding": "u32le",
+          "numpy_dtype": "<u4"
+        },
+        {
+          "name": "label_id",
+          "offset_bytes": 12,
+          "width_bytes": 2,
+          "encoding": "u16le",
+          "numpy_dtype": "<u2"
+        },
+        {
+          "name": "flags",
+          "offset_bytes": 14,
+          "width_bytes": 2,
+          "encoding": "u16le",
+          "numpy_dtype": "<u2"
+        },
+        {
+          "name": "x_px",
+          "offset_bytes": 16,
+          "width_bytes": 4,
+          "encoding": "f32le",
+          "numpy_dtype": "<f4"
+        },
+        {
+          "name": "y_px",
+          "offset_bytes": 20,
+          "width_bytes": 4,
+          "encoding": "f32le",
+          "numpy_dtype": "<f4"
+        },
+        {
+          "name": "confidence",
+          "offset_bytes": 24,
+          "width_bytes": 4,
+          "encoding": "f32le",
+          "numpy_dtype": "<f4"
+        }
+      ]
+    }
+  }
+}

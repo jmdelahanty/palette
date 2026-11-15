@@ -40,6 +40,17 @@ class StimulusMetadataExtraction:
     recording_runs: tuple[dict[str, Any], ...]
     recording_steps: tuple[dict[str, Any], ...]
     recording_modes: tuple[dict[str, Any], ...]
+    # Runs declaring a source profile are not legacy protocol runs and are
+    # never extracted as such; they are named here instead of dropped silently.
+    unsupported_native_runs: tuple[str, ...] = ()
+
+
+def is_unsupported_native_stimulus_run(run_group: Any) -> bool:
+    """Legacy v5/v6 runs never declare ``source_profile``; any declaration
+    (e.g. ``unified_experimental_h5_v1`` native candidates) has no legacy
+    ``protocol_json`` and must not be read as one."""
+
+    return run_group.attrs.get("source_profile") is not None
 
 
 def _group_keys(group: Any | None) -> list[str]:
@@ -669,9 +680,13 @@ def extract_stimulus_metadata(
     recording_runs: list[dict[str, Any]] = []
     recording_steps: list[dict[str, Any]] = []
     recording_modes: list[dict[str, Any]] = []
+    unsupported_native_runs: list[str] = []
 
     for run_name in _group_keys(parent):
         run_group = parent[run_name]
+        if is_unsupported_native_stimulus_run(run_group):
+            unsupported_native_runs.append(run_name)
+            continue
         semantic_status, semantic_snapshot = _materialized_semantic_state(run_group)
         execution_index, correspondence_proxy_record = (
             _materialized_execution_state(run_group, semantic_snapshot)
@@ -880,7 +895,12 @@ def extract_stimulus_metadata(
         recording_runs=tuple(recording_runs),
         recording_steps=tuple(recording_steps),
         recording_modes=tuple(recording_modes),
+        unsupported_native_runs=tuple(unsupported_native_runs),
     )
 
 
-__all__ = ["StimulusMetadataExtraction", "extract_stimulus_metadata"]
+__all__ = [
+    "StimulusMetadataExtraction",
+    "extract_stimulus_metadata",
+    "is_unsupported_native_stimulus_run",
+]

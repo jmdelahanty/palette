@@ -75,11 +75,27 @@ def archive_metadata_publication_lock_path(zarr_path: str | Path) -> Path:
     )
 
 
+def archive_publication_lock_held_by_current_thread(zarr_path: str | Path) -> bool:
+    """Whether this thread holds the archive publication lock for ``zarr_path``."""
+
+    if getattr(_ARCHIVE_LOCK_STATE, "pid", None) != os.getpid():
+        return False
+    held = getattr(_ARCHIVE_LOCK_STATE, "held", None) or {}
+    return str(archive_metadata_publication_lock_path(zarr_path)) in held
+
+
 @contextmanager
 def archive_metadata_publication_lock(
     zarr_path: str | Path,
 ) -> Iterator[Path]:
-    """Hold the process-reentrant, cross-process archive publication lock."""
+    """Hold the process-reentrant, cross-process archive publication lock.
+
+    Lock order: a thread that needs both locks takes the refined subject-mask
+    run write lock (``_refined_subject_write_lock``) first and this archive
+    lock second.  The run lock refuses to be taken while this thread holds
+    the archive lock for the same archive, so a reversed order fails loudly
+    instead of deadlocking.
+    """
 
     lock_path = archive_metadata_publication_lock_path(zarr_path)
     key = str(lock_path)

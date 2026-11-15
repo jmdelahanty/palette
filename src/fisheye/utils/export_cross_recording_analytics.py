@@ -3606,7 +3606,9 @@ def _egocentric_chaser_behaviors(
         label = canonical_behavior_label(
             labels[index] if index < len(labels) else "unknown"
         )
-        result.append((class_id_by_label.get(label, 0), label))
+        if label not in class_id_by_label:
+            raise ValueError(f"unknown chaser behavior class label: {label!r}")
+        result.append((class_id_by_label[label], label))
     return result
 
 

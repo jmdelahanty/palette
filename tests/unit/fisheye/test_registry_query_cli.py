@@ -218,3 +218,22 @@ def test_registry_query_dpf_uses_identity_free_count_only_context(
     assert [str(row["dataset_id"]) for row in rows] == ["dataset_count_only"]
     assert rows[0]["fish_id"] is None
     assert int(rows[0]["dpf_at_acquisition"]) == 7
+
+
+def test_registry_query_hides_missing_unless_requested(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        _register_dataset(registry, dataset_id="present", root=tmp_path)
+        _register_dataset(registry, dataset_id="gone", root=tmp_path)
+        registry.conn.execute("UPDATE datasets SET status = 'missing' WHERE dataset_id = 'gone'")
+        registry.conn.commit()
+
+        def ids(*argv: str) -> list[str]:
+            query, params = _build_query(_parse_args([*argv, "--limit", "0"]))
+            return sorted(str(r["dataset_id"]) for r in registry.conn.execute(query, params))
+
+        assert ids() == ["present"]
+        assert ids("--include-missing") == ["gone", "present"]
+        assert ids("--status", "missing") == ["gone"]
+    finally:
+        registry.close()

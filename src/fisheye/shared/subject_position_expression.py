@@ -25,6 +25,7 @@ from fisheye.shared.subject_position_types import (
     SOURCE_CAMERA_POSITION_PROFILE_ID,
     canonical_float32_nan,
     empty_position_xy,
+    float32_quantization_record,
 )
 from fisheye.shared.coordinate_surface_contract import SOURCE_CAMERA_BBOX_XYXY
 from fisheye.shared.zarr.manifest_digest import (
@@ -763,6 +764,7 @@ def _canonicalize_output(
             raise ValueError("Diagnostic confidence overflows float32 publication.")
     else:
         support_confidence32 = None
+    quantization = float32_quantization_record(evaluation.values64, values32, valid)
     return PositionEvaluationResult(
         position_xy=values32,
         valid=valid,
@@ -773,6 +775,7 @@ def _canonicalize_output(
             evaluation.support_reasons, dtype=np.uint16
         ),
         source_point_confidence=support_confidence32,
+        float32_quantization=quantization,
     )
 
 

@@ -41,6 +41,10 @@ from .chaser_relative_frame_source_handle import (
     require_chaser_relative_frame_source_handle,
 )
 from .chaser_relative_frame_storage import (
+    CORE_TRACK_INTERSECTION_SELECTION,
+    CORE_TRACK_INTERSECTION_SELECTION_ID,
+    CORE_TRACK_INTERSECTION_TEMPORAL_SCHEMA_ID,
+    CORE_TRACK_INTERSECTION_TEMPORAL_SCHEMA_VERSION,
     ChaserRelativeFramePublicationContext,
     PreparedChaserRelativeFrame,
     prepare_chaser_relative_frame,
@@ -71,7 +75,6 @@ CORE_CHASER_RELATIVE_ADAPTER_SCHEMA_VERSION = 1
 CORE_CHASER_RELATIVE_CONSUMER_ID = "palette.chaser.core_relative_frame.v1"
 CORE_CHASER_RELATIVE_PROFILE_ID = "core_roster_chaser_relative_frame_v1"
 CORE_CHASER_ROW_AXIS_POLICY_ID = "core_track_to_chaser_frame_exact_join_v1"
-CORE_CHASER_TEMPORAL_SELECTION_ID = "core_track_chaser_frame_intersection_v1"
 CORE_CHASER_FISH_PROJECTION_ID = "core_motion_on_exact_chaser_carrier_v1"
 
 
@@ -492,6 +495,68 @@ class PreparedCoreChaserRelativeFrame:
         }
 
 
+def _require_shared_source_camera_authority(
+    *,
+    body: CoreSubjectBodyFrameSourceHandle,
+    join: Mapping[str, Any],
+    chaser_context: Mapping[str, Any],
+    coordinate: Mapping[str, Any],
+) -> tuple[str, str, str]:
+    """Close spatial pixel identity through the roster acquisition record."""
+
+    coordinate_id = str(coordinate.get("coordinate_authority_id"))
+    if (
+        coordinate.get("coordinate_frame") != "source_camera_continuous_pixel_xy"
+        or coordinate.get("origin") != "top_left"
+        or coordinate.get("x_axis_direction") != "right"
+        or coordinate.get("y_axis_direction") != "down"
+    ):
+        _fail("Chaser coordinates are not canonical source-camera pixels.")
+
+    source_camera = body.source_camera_frame_authority
+    acquisition = source_camera.reference_extent
+    acquisition_record = getattr(acquisition, "record", None)
+    if (
+        source_camera.pixel_convention != "continuous"
+        or acquisition_record is None
+        or acquisition.record_ref != join.get("acquisition_camera_frame_ref")
+        or acquisition.record_sha256 != join.get("acquisition_camera_frame_sha256")
+        or acquisition_record.recording_id != join.get("recording_id")
+        or acquisition_record.camera_id != join.get("camera_id")
+        or acquisition_record.source_total_frames != join.get("source_total_frames")
+        or acquisition_record.source_video_metadata_sha256
+        != join.get("source_video_metadata_sha256")
+    ):
+        _fail(
+            "Core body-frame pixels do not bind the roster acquisition-camera "
+            "authority."
+        )
+    if coordinate_id != source_camera.record_ref:
+        _fail(
+            "Core and chaser sources do not share one source-camera pixel " "authority."
+        )
+
+    transform = _context_record(
+        chaser_context,
+        "arena_to_source_camera_transform",
+        required=False,
+    )
+    if transform is not None:
+        pointer = _mapping(
+            transform.get("source_camera_frame"),
+            label="chaser source-camera transform pointer",
+        )
+        if set(pointer) != {"record_ref", "record_sha256"} or pointer != {
+            "record_ref": source_camera.record_ref,
+            "record_sha256": source_camera.record_sha256,
+        }:
+            _fail(
+                "Core and chaser sources do not share one source-camera "
+                "pixel authority."
+            )
+    return coordinate_id, source_camera.record_ref, source_camera.record_sha256
+
+
 def _prepare_core_chaser_relative_frame(
     core_motion: CoreMotionTrackSourceHandle,
     core_body_frame: CoreSubjectBodyFrameSourceHandle,
@@ -541,17 +606,17 @@ def _prepare_core_chaser_relative_frame(
     timing_policy_source = _mapping(
         manifest.get("timing_policy"), label="chaser timing policy"
     )
-    coordinate_id = str(coordinate.get("coordinate_authority_id"))
+    source_context = _mapping(chaser.context, label="chaser source context")
+    coordinate_id, source_camera_ref, source_camera_sha256 = (
+        _require_shared_source_camera_authority(
+            body=body,
+            join=join,
+            chaser_context=source_context,
+            coordinate=coordinate,
+        )
+    )
     scale_id = str(scale.get("scale_authority_id"))
     timing_id = str(timing_policy_source.get("timing_authority_id"))
-    if (
-        coordinate.get("coordinate_frame") != "source_camera_continuous_pixel_xy"
-        or coordinate.get("origin") != "top_left"
-        or coordinate.get("x_axis_direction") != "right"
-        or coordinate.get("y_axis_direction") != "down"
-        or coordinate_id != join.get("acquisition_camera_frame_ref")
-    ):
-        _fail("Core and chaser sources do not share one source-camera authority.")
     pixels_per_mm = scale.get("pixels_per_unit")
     if (
         scale.get("unit") != "mm"
@@ -561,14 +626,25 @@ def _prepare_core_chaser_relative_frame(
         or float(pixels_per_mm) <= 0
     ):
         _fail("Chaser source lacks one valid pixels-per-millimeter authority.")
-    position_surface = _mapping(
-        core.selected_surfaces.get("positions_mm"),
-        label="core physical-position surface",
+    physical = _mapping(
+        core.physical_authority,
+        label="core physical-coordinate authority",
     )
-    if position_surface.get("physical_authority_sha256") != scale.get("scale_digest"):
+    mm_per_pixel = physical.get("mm_per_pixel")
+    if (
+        core.physical_authority_sha256 != canonical_json_sha256(_plain(physical))
+        or physical.get("physical_frame_ref") != scale_id
+        or physical.get("physical_frame_sha256") != scale.get("scale_digest")
+        or physical.get("source_camera_frame_ref") != source_camera_ref
+        or physical.get("source_camera_frame_sha256") != source_camera_sha256
+        or isinstance(mm_per_pixel, bool)
+        or not isinstance(mm_per_pixel, (int, float))
+        or not math.isfinite(float(mm_per_pixel))
+        or float(mm_per_pixel) <= 0
+        or float(pixels_per_mm) != 1.0 / float(mm_per_pixel)
+    ):
         _fail("Core and chaser positions bind different physical-scale authority.")
 
-    source_context = _mapping(chaser.context, label="chaser source context")
     controller = _context_record(source_context, "controller_state")
     assert controller is not None
     session_timing = _mapping(
@@ -597,21 +673,31 @@ def _prepare_core_chaser_relative_frame(
     ):
         _fail("Core and chaser sources bind different acquisition timing authority.")
 
-    frames = _same_across_chasers(
+    source_frames = _same_across_chasers(
         chaser.base_frame_chaser("acquisition_frame_id"),
         label="chaser acquisition frame",
     ).astype(np.int64, copy=False)
+    if source_frames.size > 1 and np.any(np.diff(source_frames) <= 0):
+        _fail("Chaser frames are not one unique increasing identity axis.")
     core_frames = np.asarray(core.frame_indices, dtype=np.int64)
     if core_frames.shape != (core.sample_count,) or (
         core_frames.size > 1 and np.any(np.diff(core_frames) <= 0)
     ):
         _fail("Core track frames are not one unique increasing identity axis.")
-    positions = np.searchsorted(core_frames, frames)
-    if np.any(positions >= core_frames.size) or not np.array_equal(
-        core_frames[positions], frames
-    ):
-        _fail("Every chaser frame must resolve one exact selected core-track row.")
-    core_rows = positions.astype(np.int64, copy=False)
+    positions = np.searchsorted(core_frames, source_frames)
+    selected = positions < core_frames.size
+    bounded_rows = np.flatnonzero(selected)
+    selected[bounded_rows] &= (
+        core_frames[positions[bounded_rows]] == source_frames[bounded_rows]
+    )
+    if not np.any(selected):
+        _fail("Chaser and selected core-track frames have no exact intersection.")
+    frames = source_frames[selected]
+    core_rows = positions[selected].astype(np.int64, copy=False)
+    selected_frame_count = int(frames.size)
+
+    def selected_chaser_array(name: str) -> np.ndarray:
+        return np.asarray(chaser.base_frame_chaser(name))[selected]
 
     core_positions_mm = np.asarray(core.positions_mm, dtype=np.float64)
     core_sample_valid = np.asarray(core.array("sample_valid"), dtype=bool)
@@ -633,11 +719,11 @@ def _prepare_core_chaser_relative_frame(
     fish_px[~fish_valid] = np.nan
 
     timestamp_ns = _same_across_chasers(
-        chaser.base_frame_chaser("timestamp_ns"),
+        selected_chaser_array("timestamp_ns"),
         label="chaser session timestamp",
     ).astype(np.int64, copy=False)
     timestamp_valid = _same_across_chasers(
-        chaser.base_frame_chaser("timestamp_valid"),
+        selected_chaser_array("timestamp_valid"),
         label="chaser timestamp validity",
     ).astype(bool, copy=False)
     if not np.all(timestamp_valid):
@@ -725,9 +811,7 @@ def _prepare_core_chaser_relative_frame(
         recording_id=core.recording_id,
         source_authority_id=core.run_path,
         source_digest=core.source_manifest_sha256,
-        provider_id=(
-            f"{CORE_CHASER_FISH_PROJECTION_ID}:{fish_projection_sha256}"
-        ),
+        provider_id=(f"{CORE_CHASER_FISH_PROJECTION_ID}:{fish_projection_sha256}"),
         provider_digest=fish_projection_sha256,
         coordinate_authority_id=coordinate_id,
         scale_authority_id=scale_id,
@@ -745,7 +829,7 @@ def _prepare_core_chaser_relative_frame(
     identities = tuple(
         str(identity_registry[str(index)]) for index in range(1, chaser.n_chasers + 1)
     )
-    role_codes = np.asarray(chaser.base_frame_chaser("chaser_behavior_role_code"))
+    role_codes = selected_chaser_array("chaser_behavior_role_code")
     try:
         roles = np.asarray(
             [role_registry[str(int(code))] for code in role_codes.reshape(-1)],
@@ -756,26 +840,24 @@ def _prepare_core_chaser_relative_frame(
             "Chaser role codes are not closed by the source registry."
         ) from exc
     selection = _same_across_chasers(
-        chaser.base_frame_chaser("selection_member"),
+        selected_chaser_array("selection_member"),
         label="chaser selection membership",
     ).astype(bool, copy=False)
     occurrence = np.asarray(
-        chaser.base_frame_chaser("chaser_occurrence_member"), dtype=bool
+        selected_chaser_array("chaser_occurrence_member"), dtype=bool
     )
     chaser_px = np.asarray(
-        chaser.base_frame_chaser("chaser_position_xy_px"), dtype=np.float64
+        selected_chaser_array("chaser_position_xy_px"), dtype=np.float64
     )
     chaser_valid = np.asarray(
-        chaser.base_frame_chaser("chaser_position_valid"), dtype=bool
+        selected_chaser_array("chaser_position_valid"), dtype=bool
     )
     chaser_rows = np.asarray(
-        chaser.base_frame_chaser("chaser_source_row_id"), dtype=np.int64
+        selected_chaser_array("chaser_source_row_id"), dtype=np.int64
     )
-    trial_ids = np.asarray(chaser.base_frame_chaser("trial_id"), dtype=np.int64)
-    active = (
-        np.asarray(chaser.base_frame_chaser("active_state_code"), dtype=np.uint8) == 1
-    )
-    expected_pair_shape = (chaser.n_frames, chaser.n_chasers)
+    trial_ids = np.asarray(selected_chaser_array("trial_id"), dtype=np.int64)
+    active = np.asarray(selected_chaser_array("active_state_code"), dtype=np.uint8) == 1
+    expected_pair_shape = (selected_frame_count, chaser.n_chasers)
     if (
         chaser_px.shape != (*expected_pair_shape, 2)
         or chaser_valid.shape != expected_pair_shape
@@ -866,15 +948,15 @@ def _prepare_core_chaser_relative_frame(
         "fallback": "prohibited",
     }
     temporal_record = {
-        "schema_id": "palette.chaser_relative_frame.core_temporal_selection",
-        "schema_version": 1,
+        "schema_id": CORE_TRACK_INTERSECTION_TEMPORAL_SCHEMA_ID,
+        "schema_version": CORE_TRACK_INTERSECTION_TEMPORAL_SCHEMA_VERSION,
         "recording_id": core.recording_id,
-        "selection_id": CORE_CHASER_TEMPORAL_SELECTION_ID,
+        "selection_id": CORE_TRACK_INTERSECTION_SELECTION_ID,
         "row_axis_authority_id": row_axis_id,
         "row_axis_authority_sha256": row_axis_digest,
         "recording_timing_authority_sha256": timing.sha256,
-        "selected_frame_count": chaser.n_frames,
-        "selection": "source_chaser_frames_exactly_present_in_selected_core_track",
+        "selected_frame_count": selected_frame_count,
+        "selection": CORE_TRACK_INTERSECTION_SELECTION,
         "fallback": "prohibited",
     }
     analysis_profile = {

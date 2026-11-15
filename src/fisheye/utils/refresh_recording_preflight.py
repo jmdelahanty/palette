@@ -8,6 +8,10 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
+from fisheye.shared.recording_manifest_seal import (
+    SealedRecordingManifestError,
+    require_unsealed_recording_manifest,
+)
 from fisheye.utils.organize_recordings import (
     RecordingPlan,
     _persist_preflight_to_manifest,
@@ -77,6 +81,13 @@ def refresh_manifest_preflight(
         return "failed", str(exc)
     if not apply:
         return "planned", None
+    try:
+        # Refuse before running diagnostics whose result could not be stored.
+        require_unsealed_recording_manifest(
+            manifest_path, tool="fisheye.utils.refresh_recording_preflight"
+        )
+    except SealedRecordingManifestError as exc:
+        return "failed", str(exc)
 
     video_result = _run_video_diagnostics_for_plan(plan, logger=None) if run_video else None
     h5_result = _run_h5_diagnostics_for_plan(plan, logger=None) if run_h5 else None

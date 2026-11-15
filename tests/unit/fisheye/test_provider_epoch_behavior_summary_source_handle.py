@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,17 @@ import fisheye.analysis_workflows.provider_epoch_behavior_summary_source_handle 
 from apps.marimo.components.chaser_exact_epoch_behavior_discovery import (
     compatible_epoch_behavior_binding,
 )
+from fisheye.analysis_workflows.core_motion_source_handle import (
+    bind_core_motion_track_source_handle,
+    core_motion_dependency_record,
+)
 from fisheye.analysis_workflows.materializers.provider_epoch_behavior_summary import (
+    ANALYSIS_CLASS_ID,
+    ANALYSIS_CLASS_VERSION,
+    CORE_EPOCH_BEHAVIOR_CONSUMER_ID,
+    CORE_EPOCH_REQUIRED_CAPABILITIES,
+    CORE_SEMANTIC_METHOD_VERSION,
+    CORE_SEMANTIC_SCHEMA_VERSION,
     MANIFEST_ATTR,
     MANIFEST_DIGEST_ATTR,
     METHOD_ID,
@@ -22,13 +33,13 @@ from fisheye.analysis_workflows.materializers.provider_epoch_behavior_summary im
     ProviderEpochBehaviorSummaryError,
     build_provider_epoch_behavior_summary_plan,
 )
-from fisheye.analysis_workflows.protocol_semantic_chaser_selection import (
-    CHASER_WINDOW_ROLES,
-)
 from fisheye.analysis_workflows.provider_epoch_behavior_summary_source_handle import (
     ProviderEpochBehaviorSummarySourceError,
     load_provider_epoch_behavior_summary_source_handle,
     validate_provider_epoch_behavior_summary_metadata,
+)
+from fisheye.analysis_workflows.protocol_semantic_chaser_selection import (
+    CHASER_WINDOW_ROLES,
 )
 from fisheye.shared.coordinate_frame_record import array_values_sha256
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
@@ -189,7 +200,99 @@ def _attrs(*, run_name: str = "epoch-v2") -> dict[str, Any]:
     }
 
 
-def test_metadata_validation_admits_only_exact_semantic_v2_binding() -> None:
+def _redigest(
+    attrs: dict[str, Any],
+    *,
+    sources: dict[str, Any] | None = None,
+    offer: dict[str, Any] | None = None,
+) -> None:
+    manifest = deepcopy(attrs[MANIFEST_ATTR])
+    if sources is not None:
+        attrs["source_refs"] = sources
+        attrs["source_refs_sha256"] = canonical_json_sha256(sources)
+        manifest["sources"] = sources
+    if offer is not None:
+        offer_sha256 = canonical_json_sha256(offer)
+        attrs["analysis_offer"] = offer
+        attrs["analysis_offer_sha256"] = offer_sha256
+        manifest["analysis_offer_sha256"] = offer_sha256
+    body = {key: value for key, value in manifest.items() if key != "payload_digest"}
+    manifest = {**body, "payload_digest": canonical_json_sha256(body)}
+    attrs[MANIFEST_ATTR] = manifest
+    attrs[MANIFEST_DIGEST_ATTR] = canonical_json_sha256(manifest)
+
+
+def _core_attrs(tmp_path: Path, *, run_name: str = "epoch-core-v3") -> dict[str, Any]:
+    from fisheye.analysis_workflows.provider_analysis_offers import (
+        TemporalSelectionIdentity,
+    )
+    from tests.unit.fisheye.test_core_authority_roster import _bound_core_motion
+
+    bound = _bound_core_motion(tmp_path)
+    handle = bind_core_motion_track_source_handle(
+        bound,
+        consumer_id=CORE_EPOCH_BEHAVIOR_CONSUMER_ID,
+        required_capabilities=CORE_EPOCH_REQUIRED_CAPABILITIES,
+        track_id=7,
+    )
+    dependency = dict(core_motion_dependency_record(handle))
+    attrs = _attrs(run_name=run_name)
+    attrs["schema_version"] = CORE_SEMANTIC_SCHEMA_VERSION
+    attrs["method_version"] = CORE_SEMANTIC_METHOD_VERSION
+    attrs["recording_id"] = "recording-a"
+    parameters = {**attrs["parameters"], "track_id": 7}
+    attrs["parameters"] = parameters
+    epoch_record = {
+        "run": {"path": "analysis/stimulus_epoch_runs/epochs-v2"},
+        "source_timeline": {"recording_id": "recording-a"},
+        "source_timeline_digest": "1" * 64,
+        "recording_timing_authority": {"sha256": "2" * 64},
+        "selection_sha256": "3" * 64,
+    }
+    temporal = TemporalSelectionIdentity(
+        selection_id="stimulus_epoch_compatibility.v1",
+        run_path=epoch_record["run"]["path"],
+        recording_id="recording-a",
+        source_timeline_sha256=epoch_record["source_timeline_digest"],
+        resolved_sha256=epoch_record["selection_sha256"],
+        timing_authority_sha256=epoch_record["recording_timing_authority"]["sha256"],
+    )
+    sources = {
+        "epoch_binding_mode": SEMANTIC_EPOCH_BINDING_MODE,
+        "epoch_selection": {"record": epoch_record, "sha256": "3" * 64},
+        "core_motion": dependency,
+        "swim_bouts": {
+            "run_path": dependency["swim_bout_run_path"],
+            "payload_sha256": dependency["swim_bout_source_binding_sha256"],
+            "source_track_motion_manifest_sha256": dependency["motion_manifest_sha256"],
+            "track_id": dependency["track_id"],
+        },
+        "protocol_semantic_selection": _semantic(),
+    }
+    offer = {
+        "schema_id": "palette.core_epoch_behavior_summary.analysis_offer",
+        "schema_version": 1,
+        "analysis_class_id": ANALYSIS_CLASS_ID,
+        "analysis_class_version": ANALYSIS_CLASS_VERSION,
+        "computation_id": METHOD_ID,
+        "computation_version": CORE_SEMANTIC_METHOD_VERSION,
+        "scientific_readiness": "ready",
+        "temporal_selection_sha256": temporal.sha256,
+        "core_motion_dependency": dependency,
+    }
+    manifest = deepcopy(attrs[MANIFEST_ATTR])
+    scientific = dict(manifest["scientific_schema"])
+    scientific["schema_version"] = CORE_SEMANTIC_SCHEMA_VERSION
+    manifest["scientific_schema"] = scientific
+    manifest["method_version"] = CORE_SEMANTIC_METHOD_VERSION
+    manifest["recording_id"] = "recording-a"
+    manifest["parameters"] = parameters
+    attrs[MANIFEST_ATTR] = manifest
+    _redigest(attrs, sources=sources, offer=offer)
+    return attrs
+
+
+def test_metadata_validation_preserves_exact_semantic_v2_binding() -> None:
     attrs = _attrs()
 
     binding = validate_provider_epoch_behavior_summary_metadata(
@@ -206,6 +309,154 @@ def test_metadata_validation_admits_only_exact_semantic_v2_binding() -> None:
         CHASER_WINDOW_ROLES
     )
     assert binding["array_declaration_count"] == 1
+    assert set(binding) == {
+        "run_path",
+        "manifest_sha256",
+        "payload_digest",
+        "source_protocol_semantic_selection",
+        "source_provider_motion",
+        "source_swim_bouts",
+        "parameters",
+        "dimensions",
+        "array_declaration_count",
+    }
+
+
+def test_metadata_validation_admits_exact_core_semantic_v3_binding(
+    tmp_path: Path,
+) -> None:
+    attrs = _core_attrs(tmp_path)
+
+    binding = validate_provider_epoch_behavior_summary_metadata(
+        attrs,
+        run_path=f"{PARENT_PATH}/epoch-core-v3",
+        run_name="epoch-core-v3",
+        expected_recording_id="recording-a",
+        expected_semantic_selection=_semantic(),
+    )
+
+    assert binding["run_path"] == f"{PARENT_PATH}/epoch-core-v3"
+    assert binding["summary_profile"] == "core_semantic_v3"
+    assert binding["source_core_motion"]["track_id"] == 7
+    assert binding["source_provider_motion"] is None
+
+
+def test_metadata_validation_rejects_core_offer_source_substitution(
+    tmp_path: Path,
+) -> None:
+    attrs = _core_attrs(tmp_path)
+    offer = deepcopy(attrs["analysis_offer"])
+    dependency = deepcopy(offer["core_motion_dependency"])
+    dependency["motion_run_path"] = "analysis/track_kinematics_runs/offline/other"
+    dependency_body = {
+        key: value for key, value in dependency.items() if key != "record_sha256"
+    }
+    dependency["record_sha256"] = canonical_json_sha256(dependency_body)
+    offer["core_motion_dependency"] = dependency
+    _redigest(attrs, offer=offer)
+
+    with pytest.raises(
+        ProviderEpochBehaviorSummarySourceError,
+        match="differs from its source binding",
+    ):
+        validate_provider_epoch_behavior_summary_metadata(
+            attrs,
+            run_path=f"{PARENT_PATH}/epoch-core-v3",
+            run_name="epoch-core-v3",
+        )
+
+
+def test_metadata_validation_rejects_stale_core_motion_dependency(
+    tmp_path: Path,
+) -> None:
+    attrs = _core_attrs(tmp_path)
+    sources = deepcopy(attrs["source_refs"])
+    dependency = deepcopy(sources["core_motion"])
+    dependency["record_sha256"] = "0" * 64
+    sources["core_motion"] = dependency
+    offer = {**deepcopy(attrs["analysis_offer"]), "core_motion_dependency": dependency}
+    _redigest(attrs, sources=sources, offer=offer)
+
+    with pytest.raises(
+        ProviderEpochBehaviorSummarySourceError,
+        match="core motion dependency",
+    ):
+        validate_provider_epoch_behavior_summary_metadata(
+            attrs,
+            run_path=f"{PARENT_PATH}/epoch-core-v3",
+            run_name="epoch-core-v3",
+        )
+
+
+def test_metadata_validation_rejects_legacy_offer_on_core_semantic_v3(
+    tmp_path: Path,
+) -> None:
+    attrs = _core_attrs(tmp_path)
+    _redigest(
+        attrs,
+        offer={
+            "selector_eligible": False,
+            "readiness": {"scientific": "ready"},
+        },
+    )
+
+    with pytest.raises(
+        ProviderEpochBehaviorSummarySourceError,
+        match="core analysis offer",
+    ):
+        validate_provider_epoch_behavior_summary_metadata(
+            attrs,
+            run_path=f"{PARENT_PATH}/epoch-core-v3",
+            run_name="epoch-core-v3",
+        )
+
+
+def test_metadata_validation_rejects_another_core_consumer_receipt(
+    tmp_path: Path,
+) -> None:
+    attrs = _core_attrs(tmp_path)
+    sources = deepcopy(attrs["source_refs"])
+    dependency = deepcopy(sources["core_motion"])
+    receipt = dependency["core_authority_consumption_receipt"]
+    receipt["consumer_id"] = "goodbatbadbat.another_consumer_v1"
+    receipt_body = {
+        key: value for key, value in receipt.items() if key != "record_sha256"
+    }
+    receipt["record_sha256"] = canonical_json_sha256(receipt_body)
+    dependency_body = {
+        key: value for key, value in dependency.items() if key != "record_sha256"
+    }
+    dependency["record_sha256"] = canonical_json_sha256(dependency_body)
+    sources["core_motion"] = dependency
+    offer = {**deepcopy(attrs["analysis_offer"]), "core_motion_dependency": dependency}
+    _redigest(attrs, sources=sources, offer=offer)
+
+    with pytest.raises(
+        ProviderEpochBehaviorSummarySourceError,
+        match="core consumer receipt is incompatible",
+    ):
+        validate_provider_epoch_behavior_summary_metadata(
+            attrs,
+            run_path=f"{PARENT_PATH}/epoch-core-v3",
+            run_name="epoch-core-v3",
+        )
+
+
+def test_metadata_validation_rejects_core_dependency_from_another_archive(
+    tmp_path: Path,
+) -> None:
+    attrs = _core_attrs(tmp_path)
+
+    with pytest.raises(
+        ProviderEpochBehaviorSummarySourceError,
+        match="belongs to another archive",
+    ):
+        validate_provider_epoch_behavior_summary_metadata(
+            attrs,
+            run_path=f"{PARENT_PATH}/epoch-core-v3",
+            run_name="epoch-core-v3",
+            expected_analysis_zarr=tmp_path / "other.zarr",
+        )
 
 
 def test_metadata_validation_rejects_raw_speed_even_when_redigested() -> None:
@@ -250,6 +501,46 @@ def test_metadata_discovery_requires_one_unambiguous_exact_child() -> None:
         )
         is None
     )
+
+
+def test_semantic_v2_discovery_does_not_mix_core_semantic_v3(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import apps.marimo.components.chaser_exact_epoch_behavior_discovery as discovery
+
+    parent = _Group(
+        {
+            "epoch-v2": _Group(attrs=_attrs()),
+            "epoch-core-v3": _Group(
+                attrs={
+                    "schema_version": CORE_SEMANTIC_SCHEMA_VERSION,
+                    "method_version": CORE_SEMANTIC_METHOD_VERSION,
+                }
+            ),
+        }
+    )
+    root = _Group({PARENT_PATH: parent})
+    validated: list[str] = []
+
+    def validate(*_args: object, run_path: str, **_kwargs: object) -> dict[str, str]:
+        validated.append(run_path)
+        return {"run_path": run_path}
+
+    monkeypatch.setattr(
+        discovery,
+        "validate_provider_epoch_behavior_summary_metadata",
+        validate,
+    )
+
+    binding = discovery.compatible_epoch_behavior_binding(
+        root,
+        recording_id="recording-1",
+        spatial_sources={"protocol_semantic_selection": _semantic()},
+    )
+
+    assert binding is not None
+    assert binding["run_path"] == f"{PARENT_PATH}/epoch-v2"
+    assert validated == [f"{PARENT_PATH}/epoch-v2"]
 
 
 def test_semantic_plan_rejects_raw_speed_before_source_loading(tmp_path: Path) -> None:
@@ -322,4 +613,54 @@ def test_targeted_loader_reconstructs_logical_fixed_byte_column(
 
     np.testing.assert_array_equal(handle.array(path), logical)
     assert handle.array(path).dtype == logical.dtype
+    assert handle.verified_array_paths == (path,)
+
+
+def test_targeted_loader_accepts_exact_core_semantic_v3(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "recording-a.zarr"
+    archive.mkdir()
+    receipt_path = tmp_path / "receipt.json"
+    path = "per_epoch_fish/window_id"
+    logical = np.asarray([0, 1, 2], dtype=np.int32)
+    attrs = _core_attrs(tmp_path)
+    manifest = deepcopy(attrs[MANIFEST_ATTR])
+    body = {
+        **{key: value for key, value in manifest.items() if key != "payload_digest"},
+        "array_declarations": [
+            {
+                "path": path,
+                "dtype": logical.dtype.str,
+                "shape": list(logical.shape),
+                "content_sha256": array_values_sha256(logical),
+            }
+        ],
+    }
+    manifest = {**body, "payload_digest": canonical_json_sha256(body)}
+    attrs[MANIFEST_ATTR] = manifest
+    attrs[MANIFEST_DIGEST_ATTR] = canonical_json_sha256(manifest)
+    run = _Group({path: _Array(logical)}, attrs=attrs)
+
+    monkeypatch.setattr(subject, "open_zarr_root", lambda *_args, **_kwargs: run)
+    monkeypatch.setattr(
+        subject,
+        "read_exact_immutable_child_validation_receipt",
+        lambda *_args, **_kwargs: {
+            "record_sha256": "a" * 64,
+            "direct_metadata_inventory": {"inventory_sha256": "b" * 64},
+        },
+    )
+
+    handle = load_provider_epoch_behavior_summary_source_handle(
+        archive,
+        run_name="epoch-core-v3",
+        expected_recording_id="recording-a",
+        direct_validation_receipt=receipt_path,
+        required_array_paths=(path,),
+    )
+
+    np.testing.assert_array_equal(handle.array(path), logical)
+    assert handle.manifest["scientific_schema"]["schema_version"] == 3
     assert handle.verified_array_paths == (path,)

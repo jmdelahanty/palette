@@ -1,0 +1,226 @@
+"""Stray-piece detection, removal, and hole fill in the shipped mask editor."""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import numpy as np
+import pytest
+from scipy import ndimage
+
+SCRIPT = (
+    Path(__file__).resolve().parents[3]
+    / "src/fisheye/labeling/static/js/subject_mask_editor.js"
+)
+
+# Loads the editor in a minimal browser stand-in (as the binary-view test
+# does) and runs the JSON commands read from stdin against it.
+HARNESS = r"""
+const fs=require("fs"),vm=require("vm");
+const nodes=new Map(),frames=[],errors=[],requests=[],listeners={};
+const press=(key,mods={})=>{for(const fn of listeners.keydown||[])fn({key,target:{tagName:"canvas"},preventDefault(){},ctrlKey:false,metaKey:false,altKey:false,shiftKey:false,...mods});};
+function surface(){const t={width:0,height:0};const ctx=new Proxy({},{get:(o,k)=>o[k]||(()=>{})});
+  return Object.assign(t,{getContext:()=>ctx,style:{},addEventListener(){}});}
+function getNode(id){if(!nodes.has(id))nodes.set(id,Object.assign(surface(),{innerHTML:"",textContent:"",value:"overlay",
+  disabled:false,dataset:{},classes:new Set(),classList:{toggle(c,on){const n=nodes.get(id);(on===undefined?!n.classes.has(c):on)?n.classes.add(c):n.classes.delete(c);}}}));return nodes.get(id);}
+const input=JSON.parse(fs.readFileSync(0,"utf8"));
+const [h,w]=input.shape;
+let response={ok:true,roi_idx:0,frame_idx:0,mask_area_px:0,
+  roi_image:{shape:[h,w],pixels:Buffer.alloc(h*w,70).toString("base64")},
+  mask:{shape:[h,w],pixels:Buffer.from(input.mask).toString("base64")},
+  state:input.state||{position:0,total:1,component_review_completion_guard:{ready:true}}};
+const confirms=[];
+const viewport={imageWidth:w,imageHeight:h,view:{scale:1,offsetX:0,offsetY:0},hasImage:()=>true,setImageData(){},
+  drawImage(){},drawCanvas(){},imageToCanvas:(x,y)=>[x,y],pointerEvent:e=>e,canvasPoint:e=>[e.x,e.y],
+  canvasToImage:(x,y)=>[x,y],beginPan:()=>false,panMove:()=>false,endPan(){},fit(){}};
+const context=vm.createContext({console,Number,Math,JSON,Uint8Array,Int32Array,
+  window:{PALETTE_SUBJECT_MASK_SESSION_ID:"test",addEventListener(type,fn){(listeners[type]=listeners[type]||[]).push(fn);},requestAnimationFrame:fn=>frames.push(fn),
+    confirm:(msg)=>{confirms.push(msg);return input.confirm!==false;}},
+  document:{getElementById:getNode,createElement:surface,querySelectorAll:()=>[]},
+  ImageData:class{constructor(a,b){this.width=a;this.height=b;this.data=new Uint8Array(a*b*4);}},
+  atob:v=>Buffer.from(v,"base64").toString("binary"),btoa:v=>Buffer.from(v,"binary").toString("base64"),
+  clearOperatorSupport(){},showOperatorSupport:e=>errors.push(e.message),readApiPayload:async r=>r.body,
+  createImageCanvasViewport:()=>viewport,
+  fetch:async(url,options={})=>{requests.push({url,...options});return {ok:true,body:response};}});
+const run=code=>vm.runInContext(code,context);
+const flush=()=>{while(frames.length)frames.shift()();};
+const maskBytes=()=>Array.from(Buffer.from(run("encodeMaskPayload().pixels"),"base64"));
+vm.runInContext(fs.readFileSync(process.argv[1],"utf8"),context);
+(async()=>{
+  await new Promise(r=>setImmediate(r));flush();
+  const out={};
+  for(const step of input.steps){
+    if(step.run)await run(step.run);
+    if(step.select!==undefined){getNode("review-state").value=step.select;run("reviewSelectChanged()");}
+    if(step.press)press(step.press.key,step.press.mods||{});
+    flush();
+    out[step.name]={mask:maskBytes(),pieces:getNode("mask-pieces").textContent,
+      warn:getNode("mask-pieces").classes.has("warn"),removeDisabled:getNode("remove-stray-button").disabled,
+      undoDisabled:getNode("undo-bulk-button").disabled,status:getNode("status").textContent,
+      reviewValue:getNode("review-state").value,reviewCurrent:getNode("review-current").textContent,
+      reviewButtonDisabled:getNode("set-review-button").disabled,
+      navRequests:requests.filter(r=>r.url.endsWith("/nav")).length,
+      reviewRequests:requests.filter(r=>r.url.endsWith("/review-status")).length,
+      confirms:confirms.length,
+      unloadBlocked:(()=>{let blocked=false;for(const fn of listeners.beforeunload||[])fn({preventDefault(){blocked=true;}});return blocked;})()};
+  }
+  if(input.pure)out.pure=run(input.pure);
+  out.errors=errors;
+  process.stdout.write(JSON.stringify(out));
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+
+
+def _node():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required for the mask editor regression")
+    return node
+
+
+def _run(mask: np.ndarray, steps, pure=None, state=None, confirm=True):
+    payload = {"shape": list(mask.shape), "mask": mask.astype(np.uint8).ravel().tolist(),
+               "steps": steps, "pure": pure, "state": state, "confirm": confirm}
+    result = subprocess.run(
+        [_node(), "-e", HARNESS, str(SCRIPT)], input=json.dumps(payload),
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = json.loads(result.stdout)
+    assert out["errors"] == []
+    return out
+
+
+def _as_mask(values, shape):
+    return np.asarray(values, dtype=np.uint8).reshape(shape)
+
+
+def test_piece_count_and_hole_fill_match_the_server_definitions():
+    rng = np.random.default_rng(7)
+    for trial in range(6):
+        mask = (rng.random((23, 31)) < 0.45).astype(np.uint8)
+        labels, count = ndimage.label(mask, structure=np.ones((3, 3)))
+        seed = tuple(int(v) for v in np.argwhere(labels == np.bincount(labels.ravel())[1:].argmax() + 1)[0])
+        pure = (
+            "(()=>{const info=maskPieces(mask,maskWidth,maskHeight);"
+            "const filled=mask.slice();"
+            f"const n=fillPieceHoles(filled,maskWidth,maskHeight,{seed[1]},{seed[0]});"
+            "return {count:info.count,sizes:info.sizes.slice(1),filled:Array.from(filled),n};})()"
+        )
+        out = _run(mask, [], pure=pure)["pure"]
+        assert out["count"] == count
+        assert sorted(out["sizes"]) == sorted(np.bincount(labels.ravel())[1:].tolist())
+        piece = labels == labels[seed]
+        expected = mask.astype(bool) | ndimage.binary_fill_holes(piece)
+        np.testing.assert_array_equal(_as_mask(out["filled"], mask.shape).astype(bool), expected)
+        assert out["n"] == int(expected.sum() - mask.astype(bool).sum())
+
+
+def test_stray_pixel_is_reported_removed_and_undone():
+    mask = np.zeros((40, 50), np.uint8)
+    mask[10:30, 15:35] = 1
+    mask[2, 47] = 1  # A one-pixel stray piece far from the body.
+    mask[37, 3] = 1
+    out = _run(mask, [
+        {"name": "loaded"},
+        {"name": "removed", "run": "removeStrayPiecesAction()"},
+        {"name": "undone", "run": "undoBulkEdit()"},
+    ])
+    assert out["loaded"]["warn"] and out["loaded"]["pieces"].startswith("2 stray pieces")
+    assert out["loaded"]["removeDisabled"] is False and out["loaded"]["undoDisabled"] is True
+    body = mask.copy(); body[2, 47] = 0; body[37, 3] = 0
+    np.testing.assert_array_equal(_as_mask(out["removed"]["mask"], mask.shape), body)
+    assert out["removed"]["pieces"] == "Mask is one piece." and out["removed"]["removeDisabled"] is True
+    assert out["removed"]["undoDisabled"] is False
+    np.testing.assert_array_equal(_as_mask(out["undone"]["mask"], mask.shape), mask)
+    assert out["undone"]["undoDisabled"] is True
+
+
+def test_fill_holes_tool_fills_only_the_clicked_piece():
+    mask = np.zeros((30, 40), np.uint8)
+    mask[5:20, 5:20] = 1
+    mask[9:14, 9:14] = 0  # Hole in the body.
+    mask[22:28, 30:38] = 1
+    mask[24:26, 33:35] = 0  # Hole in a separate piece: left alone.
+    out = _run(mask, [
+        {"name": "miss", "run": "setTool('fill'); beginCanvasEdit({x:1,y:1,preventDefault(){}})"},
+        {"name": "filled", "run": "beginCanvasEdit({x:6,y:6,preventDefault(){}})"},
+        {"name": "undone", "run": "undoBulkEdit()"},
+    ])
+    np.testing.assert_array_equal(_as_mask(out["miss"]["mask"], mask.shape), mask)
+    assert "Click on a mask piece" in out["miss"]["status"]
+    expected = mask.copy(); expected[9:14, 9:14] = 1
+    np.testing.assert_array_equal(_as_mask(out["filled"]["mask"], mask.shape), expected)
+    assert "Filled 25 px" in out["filled"]["status"]
+    np.testing.assert_array_equal(_as_mask(out["undone"]["mask"], mask.shape), mask)
+
+
+def test_browser_shortcuts_are_not_editor_hotkeys():
+    """Ctrl/Cmd/Alt + key belongs to the browser (e.g. Ctrl+R reloads)."""
+    mask = np.zeros((20, 20), np.uint8)
+    mask[5:15, 5:15] = 1
+    mask[1, 18] = 1  # One stray pixel.
+    out = _run(mask, [
+        {"name": "ctrl_r", "press": {"key": "r", "mods": {"ctrlKey": True}}},
+        {"name": "cmd_r", "press": {"key": "r", "mods": {"metaKey": True}}},
+        {"name": "alt_r", "press": {"key": "r", "mods": {"altKey": True}}},
+        {"name": "r", "press": {"key": "r"}},
+        {"name": "ctrl_z", "press": {"key": "z", "mods": {"ctrlKey": True}}},
+    ])
+    for name in ("ctrl_r", "cmd_r", "alt_r"):
+        np.testing.assert_array_equal(_as_mask(out[name]["mask"], mask.shape), mask, err_msg=name)
+    removed = mask.copy(); removed[1, 18] = 0
+    np.testing.assert_array_equal(_as_mask(out["r"]["mask"], mask.shape), removed)
+    np.testing.assert_array_equal(_as_mask(out["ctrl_z"]["mask"], mask.shape), mask)
+
+
+@pytest.mark.parametrize("name", ["detect_editor.js", "keypoint_editor.js", "video_detect_editor.js", "subject_mask_editor.js"])
+def test_every_editor_ignores_modified_keys_before_any_hotkey(name):
+    source = (SCRIPT.parent / name).read_text()
+    start = source.rindex('window.addEventListener("keydown"')
+    handler = source[start:]
+    guard = handler.index("event.ctrlKey || event.metaKey || event.altKey")
+    first_hotkey = handler.index('event.key === "')
+    busy = handler.find("foregroundBusy")
+    assert guard < first_hotkey
+    assert busy == -1 or guard < busy
+
+
+def _state(review="needs_review"):
+    return {"position": 1, "total": 5, "component_review_status": {"state": review},
+            "component_review_completion_guard": {"ready": True}}
+
+
+def test_review_control_shows_the_saved_state_and_never_preselects_approval():
+    mask = np.zeros((10, 10), np.uint8)
+    out = _run(mask, [
+        {"name": "loaded"},
+        {"name": "same", "run": "setReviewStatus()"},
+        {"name": "picked", "select": "approved"},
+    ], state=_state("needs_review"))
+    assert out["loaded"]["reviewValue"] == "needs_review"
+    assert out["loaded"]["reviewCurrent"] == "Current: needs_review"
+    assert out["loaded"]["reviewButtonDisabled"] is True
+    assert out["same"]["reviewRequests"] == 0 and "already needs_review" in out["same"]["status"]
+    assert out["picked"]["reviewValue"] == "approved"
+    assert out["picked"]["reviewButtonDisabled"] is False
+
+
+@pytest.mark.parametrize("answer", [False, True])
+def test_leaving_a_row_with_unsaved_pixels_asks_first(answer):
+    mask = np.zeros((10, 10), np.uint8)
+    mask[3:6, 3:6] = 1
+    out = _run(mask, [
+        {"name": "clean_next", "run": "nav(1)"},
+        {"name": "painted", "run": "brushSize=1; tool='paint'; paintAt({x:8,y:8,shiftKey:false})"},
+        {"name": "dirty_next", "run": "nav(1)"},
+    ], state=_state(), confirm=answer)
+    assert out["clean_next"]["confirms"] == 0 and out["clean_next"]["navRequests"] == 1
+    assert out["painted"]["unloadBlocked"] is True
+    assert out["dirty_next"]["confirms"] == 1
+    assert out["dirty_next"]["navRequests"] == (2 if answer else 1)
+    if not answer:
+        assert "Stayed on this ROI" in out["dirty_next"]["status"]

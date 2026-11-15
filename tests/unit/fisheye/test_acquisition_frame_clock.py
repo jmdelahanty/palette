@@ -12,6 +12,8 @@ from fisheye.shared.acquisition_frame_clock import (
     AcquisitionFrameClockError,
     import_acquisition_frame_clock,
     load_acquisition_frame_clock_source,
+    parse_acquisition_frame_clock_csv,
+    require_nominal_frame_timing,
     resolve_acquisition_frame_clock,
 )
 
@@ -291,3 +293,84 @@ def test_acquisition_frame_clock_resolver_detects_array_tampering(tmp_path: Path
 
     with pytest.raises(AcquisitionFrameClockError, match="bound digest"):
         resolve_acquisition_frame_clock(root)
+
+
+def _published_clock_root(tmp_path: Path, *, camera_ms: list[int]) -> zarr.Group:
+    recording = tmp_path / "recording"
+    video = recording / "cams" / "Cam2010093_recording.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"video")
+    with video.with_name(f"{video.stem}_meta.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        handle.write("recording_frame_id,timestamp,timestamp_sys\n")
+        for index, ms in enumerate(camera_ms):
+            handle.write(f"{index + 1},{ms * 1_000_000},{2_000_000_000 + ms * 1_000_000}\n")
+    root = zarr.open_group(
+        str(recording / "zarr" / "recording_analysis.zarr"),
+        mode="w",
+        zarr_format=3,
+    )
+    resolved = import_acquisition_frame_clock(
+        root,
+        recording_dir=recording,
+        camera_id="2010093",
+        video_path=video,
+        expected_frame_count=len(camera_ms),
+    )
+    assert resolved is not None
+    return root
+
+
+def test_nominal_frame_timing_accepts_a_clock_at_the_nominal_rate(tmp_path: Path) -> None:
+    root = _published_clock_root(tmp_path, camera_ms=[0, 10, 20, 30, 40])
+
+    evidence = require_nominal_frame_timing(root, nominal_fps=100.0)
+
+    assert evidence is not None
+    assert evidence["max_abs_deviation_s"] == pytest.approx(0.0)
+    assert evidence["tolerance_s"] == pytest.approx(0.005)
+    assert evidence["acquisition_frame_clock_sha256"] == (
+        resolve_acquisition_frame_clock(root).record_sha256
+    )
+
+
+def test_nominal_frame_timing_rejects_a_wrong_nominal_rate(tmp_path: Path) -> None:
+    root = _published_clock_root(tmp_path, camera_ms=[0, 10, 20, 30, 40])
+
+    with pytest.raises(AcquisitionFrameClockError, match="disagrees with the published"):
+        require_nominal_frame_timing(root, nominal_fps=50.0)
+
+
+def test_nominal_frame_timing_rejects_a_stall_without_a_frame_id_gap(
+    tmp_path: Path,
+) -> None:
+    # Contiguous frame ids and monotonic stamps publish fine, but one interval
+    # is 40 ms at 100 fps, so frame / fps would be 30 ms off afterwards.
+    root = _published_clock_root(tmp_path, camera_ms=[0, 10, 20, 60, 70, 80])
+
+    with pytest.raises(AcquisitionFrameClockError, match="max deviation 0.0300 s"):
+        require_nominal_frame_timing(root, nominal_fps=100.0)
+
+
+def test_nominal_frame_timing_is_skipped_without_a_published_clock(
+    tmp_path: Path,
+) -> None:
+    root = zarr.open_group(str(tmp_path / "bare.zarr"), mode="w", zarr_format=3)
+
+    assert require_nominal_frame_timing(root, nominal_fps=100.0) is None
+
+
+def test_clock_csv_parser_marks_empty_timestamps_invalid(tmp_path: Path) -> None:
+    path = tmp_path / "Cam1_meta.csv"
+    path.write_text(
+        "frame_id,timestamp,timestamp_sys\n1,100,1100\n2,,1200\n3,300,\n",
+        encoding="utf-8",
+    )
+
+    parsed = parse_acquisition_frame_clock_csv(path)
+
+    assert parsed.frame_field == "frame_id"
+    np.testing.assert_array_equal(parsed.recording_frame_id, [1, 2, 3])
+    np.testing.assert_array_equal(parsed.camera_timestamp_valid, [True, False, True])
+    np.testing.assert_array_equal(parsed.system_timestamp_valid, [True, True, False])

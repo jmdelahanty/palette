@@ -43,7 +43,7 @@ def _authority(provider_id: str) -> ProviderSourceAuthority:
         scale_authority_id="scale-v1",
         timing_authority_id="camera-time-v1",
         row_axis_authority_id="camera-rows-v1",
-        row_axis_authority_digest="camera-rows-digest",
+        row_axis_authority_digest="e" * 64,
     )
 
 
@@ -54,7 +54,7 @@ def _result(*, body: bool = True, timestamps: bool = True, chasers: int = 2):
         acquisition_frame_id=np.asarray([10, 11, 12], dtype=np.int64),
         track_sample_id=np.asarray([20, 21, 22], dtype=np.int64),
         row_axis_authority_id="camera-rows-v1",
-        row_axis_authority_digest="camera-rows-digest",
+        row_axis_authority_digest="e" * 64,
         timestamp_ns=(
             np.asarray([100, 200, 300], dtype=np.int64) if timestamps else None
         ),
@@ -236,6 +236,120 @@ def _context(**replacements: object) -> ChaserRelativeFramePublicationContext:
     return ChaserRelativeFramePublicationContext(**values)
 
 
+def _core_intersection_context(
+    *,
+    temporal_row_axis_sha256: str = "e" * 64,
+    fish_row_axis_sha256: str = "e" * 64,
+    controller_timing_sha256: str = "f" * 64,
+) -> ChaserRelativeFramePublicationContext:
+    projection = _proxy_projection_record(
+        unique_acquisition_frame_count=4,
+        selected_acquisition_frame_count=4,
+    )
+    roster_sha256 = "1" * 64
+    motion_run_path = "analysis/track_kinematics_runs/offline/motion-a"
+    motion_manifest_sha256 = "2" * 64
+    receipt_body = {
+        "schema_id": "palette.core_behavior.authority_consumption_receipt",
+        "schema_version": 1,
+        "consumer_id": "palette.chaser.core_relative_frame.v1",
+        "recording_id": "recording-1",
+        "analysis_zarr": "/recordings/recording-1/analysis.zarr",
+        "core_authority_roster_sha256": roster_sha256,
+        "required_capabilities": [
+            "cross_grain_join_authority",
+            "kinematics_samples",
+            "subject_body_frame_samples",
+        ],
+        "capability_binding_digests": {},
+        "selected_track_id": 7,
+    }
+    receipt = {
+        **receipt_body,
+        "record_sha256": canonical_json_sha256(receipt_body),
+    }
+    fish_projection_body = {
+        "schema_id": "palette.chaser_relative_frame.core_fish_position_projection",
+        "schema_version": 1,
+        "recording_id": "recording-1",
+        "projection_id": "core_motion_on_exact_chaser_carrier_v1",
+        "core_authority_roster_sha256": roster_sha256,
+        "source_core_motion_run_path": motion_run_path,
+        "source_core_motion_manifest_sha256": motion_manifest_sha256,
+        "source_chaser_run_path": "analysis/chaser_input_provenance_proxy_runs/proxy_v1",
+        "source_chaser_manifest_sha256": "d" * 64,
+        "source_chaser_profile_sha256": "3" * 64,
+        "row_axis_authority_id": "camera-rows-v1",
+        "row_axis_authority_sha256": fish_row_axis_sha256,
+        "physical_authority_sha256": "4" * 64,
+        "source": "core_positions_mm",
+        "formula": "positions_mm * pixels_per_mm",
+        "fallback": "prohibited",
+    }
+    fish_projection = {
+        **fish_projection_body,
+        "record_sha256": canonical_json_sha256(fish_projection_body),
+    }
+    core = {
+        "schema_id": "palette.chaser_relative_frame.core_authority_binding",
+        "schema_version": 1,
+        "recording_id": "recording-1",
+        "core_authority_roster_sha256": roster_sha256,
+        "core_authority_consumption_receipt": receipt,
+        "core_motion": {
+            "run_path": motion_run_path,
+            "source_manifest_sha256": motion_manifest_sha256,
+            "source_binding_sha256": "5" * 64,
+            "track_id": 7,
+            "row_axis_sha256": "e" * 64,
+        },
+        "core_subject_body_frame": {
+            "run_path": "analysis/subject_shape_runs/body-a",
+            "publication_manifest_sha256": "6" * 64,
+            "source_binding_sha256": "7" * 64,
+            "row_identity_sha256": "8" * 64,
+            "body_frame_record_sha256": "9" * 64,
+            "projection_record_sha256": "a" * 64,
+        },
+        "chaser_source": {
+            "run_path": "analysis/chaser_input_provenance_proxy_runs/proxy_v1",
+            "manifest_sha256": "d" * 64,
+            "verification_digest": "b" * 64,
+            "consumed_authority": "chaser_position",
+            "fish_position_authority": "not_used_core_roster_selected_instead",
+            "body_frame_authority": "not_used_core_roster_selected_instead",
+        },
+        "fish_pixel_projection": fish_projection,
+        "core_motion_facts_repeated": False,
+        "fallback": "prohibited",
+    }
+    temporal = {
+        "schema_id": "palette.chaser_relative_frame.core_temporal_selection",
+        "schema_version": 1,
+        "recording_id": "recording-1",
+        "selection_id": "core_track_chaser_frame_intersection_v1",
+        "row_axis_authority_id": "camera-rows-v1",
+        "row_axis_authority_sha256": temporal_row_axis_sha256,
+        "recording_timing_authority_sha256": "f" * 64,
+        "selected_frame_count": 3,
+        "selection": "source_chaser_frames_exactly_present_in_selected_core_track",
+        "fallback": "prohibited",
+    }
+    controller = _record(
+        "palette.controller_state",
+        recording_id="recording-1",
+        session_timestamp_authority={
+            "recording_timing_authority_sha256": controller_timing_sha256,
+        },
+    )
+    return _context(
+        temporal_selection_record=temporal,
+        acquisition_projection_record=projection,
+        controller_state_record=controller,
+        core_authority_record=core,
+    )
+
+
 def _result_bound_to_proxy(
     context: ChaserRelativeFramePublicationContext,
 ):
@@ -401,6 +515,45 @@ def test_proxy_projection_must_match_relative_frame_axes_and_complete_rows(
     )
     with pytest.raises(ChaserRelativeFrameStorageError, match="does not match"):
         prepare_chaser_relative_frame(_result_bound_to_proxy(context), context=context)
+
+
+def test_core_intersection_allows_only_complete_exact_proxy_subset() -> None:
+    context = _core_intersection_context()
+    result = replace(
+        _result_bound_to_proxy(context),
+        selection_membership=np.ones(3, dtype=bool),
+    )
+
+    prepared = prepare_chaser_relative_frame(result, context=context)
+
+    assert prepared.manifest["dimensions"]["n_frames"] == 3
+    temporal = prepared.manifest["context"]["temporal_selection"]["record"]
+    assert temporal["selected_frame_count"] == 3
+    assert temporal["selection_id"] == "core_track_chaser_frame_intersection_v1"
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        _core_intersection_context(temporal_row_axis_sha256="0" * 64),
+        _core_intersection_context(fish_row_axis_sha256="0" * 64),
+        _core_intersection_context(controller_timing_sha256="0" * 64),
+    ],
+    ids=("temporal-row-axis", "core-fish-row-axis", "controller-timing"),
+)
+def test_core_intersection_rejects_stale_cross_context_binding(
+    context: ChaserRelativeFramePublicationContext,
+) -> None:
+    result = replace(
+        _result_bound_to_proxy(context),
+        selection_membership=np.ones(3, dtype=bool),
+    )
+
+    with pytest.raises(
+        ChaserRelativeFrameStorageError,
+        match="temporal intersection context",
+    ):
+        prepare_chaser_relative_frame(result, context=context)
 
 
 def test_proxy_projection_rejects_unbound_chaser_authority() -> None:

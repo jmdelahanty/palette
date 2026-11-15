@@ -44,15 +44,39 @@
   `GIT_SSH_COMMAND='ssh -i /home/delahantyj@hhmi.org/.ssh/delahantyj-ws1-git-id_ed25519 -o IdentitiesOnly=yes' git -C /home/delahantyj@hhmi.org/gitrepos/palette push`
 - Do not rely on plain `git push` for Palette; it may fail with `Permission denied (publickey)` or sandbox DNS errors.
 - The `/groups` fast-forward must fail closed: do not use merge commits, rebase, reset, or dirty-checkout workarounds unless the user explicitly approves.
+- Before pushing a change to `src/**/*.py` or `scripts/**/*.py`, regenerate
+  the Zarr census and commit any changed `docs/diagnostics/zarr_*` files:
+  `scripts/py -m fisheye.diagnostics.zarr_storage_census --write`.
+  CI's `generated artifacts` job fails on a stale census and then skips every
+  test shard.
+- `scripts/git-hooks/pre-push` enforces this once enabled. It checks the
+  pushed commit (~25 s) only when the branch changes census inputs relative to
+  `origin/main`; otherwise it exits immediately. On a stale census it
+  regenerates the files into the working tree (when the pushed commit is
+  `HEAD`) and refuses the push; it never commits. Bypass one push with
+  `PALETTE_SKIP_PRE_PUSH=1`.
+- Enabling the hook is a workstation config change that needs user approval:
+  `git config core.hooksPath scripts/git-hooks`. Keep the path relative so
+  each worktree runs its own branch's hook. An absolute path pins every
+  worktree to one checkout, and if that checkout's branch predates the hook,
+  git silently runs no hook at all.
 
 ## Required CI and Integration Rule
 
-<!-- required-ci-integration-contract:v1 -->
+<!-- required-ci-integration-contract:v2 -->
 
 - A branch must not be merged, integrated into another merge candidate,
   fast-forwarded into the shared `/groups` checkout, used to activate a
   production selector/publication, or described as complete or merge-ready
   unless every required CI check for that change has completed successfully.
+- After a merge to `main`, the resulting integration is validated by either a
+  successful full CI run on the exact integrated commit or the successful
+  `main-integration` same-tree gate. The same-tree gate is sufficient only when
+  it proves that the merge's first parent is an ancestor of its exact green PR
+  head, the landed tree is identical to both that head and the attested tested
+  PR tree, the PR targeted the exact first parent on `main`, and the active
+  strict required-check ruleset has no bypass actors. Any mismatch or failure
+  requires a successful manual full CI run on the current exact `main` commit.
 - Failed, cancelled, timed-out, or accidentally skipped required checks are
   blocking. A check skipped because an earlier gate failed is unrun evidence,
   not a successful result. Do not dismiss a blocking result as pre-existing or
@@ -68,6 +92,25 @@
   evidence when the task requires it, but it must remain selector-ineligible,
   must not alter production authority, and must be reported as not merge-ready
   until the required CI is green.
+- Deploying a change to the user's live labeling server (which they are
+  actively labeling on) before its CI is green is tiered by what the change
+  can damage:
+  - **Tier 1, presentation-only:** the change touches only static assets or
+    user-visible strings, and does not change which requests the browser
+    sends, their payloads, or when a write-capable control is enabled. It may
+    be deployed after the focused tests for the changed files pass, through
+    the self-checking cutover (commit-pinned checkout, no Apply or request in
+    flight, every store table fingerprinted before and after, automatic
+    rollback), and reported as not merge-ready until the required CI is green.
+  - **Tier 2, everything else:** any server-side code change other than a
+    string literal, and any change that writes, migrates, or changes the
+    format of data (Apply and save paths, publication, successor or schema
+    formats, registry, detection or mask authority). Wait for green required
+    CI, plus a real-storage measurement or replay when performance or layout
+    is affected. A server rollback does not undo written data.
+  - When unsure which tier applies, use Tier 2.
+  - The PR body and the deployment report must state the tier and a one-line
+    reason, so a misclassification is visible afterwards.
 
 ## Collaborative Development and Contract Preservation
 

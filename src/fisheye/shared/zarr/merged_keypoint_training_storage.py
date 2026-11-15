@@ -25,7 +25,10 @@ from fisheye.shared.zarr.array_factory import (
 )
 from fisheye.shared.zarr.storage_intent import AccessPattern, StoragePlan, WriteMode
 from fisheye.shared.zarr.storage_planner import plan_storage
-from fisheye.shared.zarr.storage_profiles import TRAINING_IMMUTABLE_V1, StorageProfile
+from fisheye.shared.zarr.storage_profiles import (
+    TRAINING_RANDOM_ROW_IMMUTABLE_V1,
+    StorageProfile,
+)
 
 SCHEMA_ID = "palette.merged_keypoint_training"
 SCHEMA_VERSION = 3
@@ -75,7 +78,7 @@ def plan_merged_keypoint_training_arrays(
     keypoint_shape: tuple[int, int],
     n_sources: int,
     split_counts: Mapping[str, int],
-    profile: StorageProfile = TRAINING_IMMUTABLE_V1,
+    profile: StorageProfile = TRAINING_RANDOM_ROW_IMMUTABLE_V1,
 ) -> dict[str, PlannedTrainingArray]:
     if len(roi_shape) not in {2, 3}:
         raise ValueError(f"roi_shape must have rank 2 or 3, got {roi_shape!r}.")
@@ -331,10 +334,13 @@ def validate_merged_keypoint_training_storage(
 def storage_plan_manifest(
     plans: Mapping[str, PlannedTrainingArray],
 ) -> dict[str, object]:
+    profile_ids = {planned.plan.profile_id for planned in plans.values()}
+    if len(profile_ids) != 1:
+        raise ValueError("Merged keypoint training arrays must use one storage profile")
     return {
         "schema_id": SCHEMA_ID,
         "schema_version": SCHEMA_VERSION,
-        "profile_id": TRAINING_IMMUTABLE_V1.profile_id,
+        "profile_id": next(iter(profile_ids)),
         "arrays": {path: plans[path].as_manifest() for path in sorted(plans)},
         "variable_width_metadata_arrays": [
             "source_index/source_dataset_id",

@@ -11,6 +11,7 @@ import numpy as np
 import zarr
 
 from .mask_store import MaskStoreError, open_mask_store
+from .zarr_row_chunk_updates import update_rows_by_chunk
 
 COMPONENT_CONTOUR_SCHEMA_ID = "component_contours_v1"
 SAMPLED_COMPONENT_CONTOUR_SCHEMA_ID = "sampled_component_contours_v1"
@@ -422,6 +423,28 @@ def summarize_existing_component_contours(
     )
 
 
+def read_component_contours(component_group: zarr.Group, roi_count: int) -> list[np.ndarray | None] | None:
+    """Decode a component's packed contours per row; None when absent or malformed."""
+
+    contours = component_group.get("contours") if isinstance(component_group, zarr.Group) else None
+    if not isinstance(contours, zarr.Group) or not all(name in contours for name in ("ptr", "len", "points_xy")):
+        return None
+    ptr = np.asarray(contours["ptr"][:], dtype=np.int64)
+    length = np.asarray(contours["len"][:], dtype=np.int64)
+    points = np.asarray(contours["points_xy"][:], dtype=np.float32)
+    if ptr.shape != (int(roi_count),) or length.shape != (int(roi_count),) or points.ndim != 2 or points.shape[1] != 2:
+        return None
+    rows: list[np.ndarray | None] = []
+    for begin, count in zip(ptr.tolist(), length.tolist()):
+        if begin < 0 or count <= 0:
+            rows.append(None)
+            continue
+        if begin + count > points.shape[0]:
+            return None
+        rows.append(points[begin:begin + count].copy())
+    return rows
+
+
 def write_component_contours(
     component_group: zarr.Group,
     contours_by_row: Sequence[np.ndarray | None],
@@ -549,11 +572,15 @@ def _ensure_array(
 def _write_ascii_row(
     array: zarr.Array, row_index: int, value: str, *, width: int
 ) -> None:
+    array[int(row_index), :] = _encode_ascii_row(value, width=width)
+
+
+def _encode_ascii_row(value: str, *, width: int) -> np.ndarray:
     encoded = str(value).encode("utf-8", errors="replace")[: int(width)]
     row = np.zeros((int(width),), dtype=np.uint8)
     if encoded:
         row[: len(encoded)] = np.frombuffer(encoded, dtype=np.uint8)
-    array[int(row_index), :] = row
+    return row
 
 
 def ensure_component_row_update_tracking(
@@ -601,6 +628,7 @@ def mark_component_rows_updated(
     component: str,
     roi_count: int,
     reason: str,
+    chunked: bool = False,
 ) -> list[ComponentContourRowUpdateSummary]:
     """Bump row-local component revisions without refreshing derived payloads.
 
@@ -614,13 +642,18 @@ def mark_component_rows_updated(
     )
     now = _utc_now()
     summaries: list[ComponentContourRowUpdateSummary] = []
+    revisions: dict[int, int] = {}
     for raw_row in row_indices:
         row_idx = int(raw_row)
-        previous_revision = int(np.asarray(revision_arr[row_idx], dtype=np.int64))
+        previous_revision = revisions.get(row_idx)
+        if previous_revision is None:
+            previous_revision = int(np.asarray(revision_arr[row_idx], dtype=np.int64))
         row_revision = previous_revision + 1
-        revision_arr[row_idx] = np.int64(row_revision)
-        _write_ascii_row(updated_at_arr, row_idx, now, width=ROW_UPDATE_TIMESTAMP_WIDTH)
-        _write_ascii_row(reason_arr, row_idx, reason, width=ROW_UPDATE_REASON_WIDTH)
+        revisions[row_idx] = row_revision
+        if not chunked:
+            revision_arr[row_idx] = np.int64(row_revision)
+            _write_ascii_row(updated_at_arr, row_idx, now, width=ROW_UPDATE_TIMESTAMP_WIDTH)
+            _write_ascii_row(reason_arr, row_idx, reason, width=ROW_UPDATE_REASON_WIDTH)
         summaries.append(
             ComponentContourRowUpdateSummary(
                 component=str(component),
@@ -629,6 +662,18 @@ def mark_component_rows_updated(
                 row_revision=row_revision,
                 reason=str(reason),
             )
+        )
+
+    if chunked and summaries:
+        rows = [summary.row_index for summary in summaries]
+        update_rows_by_chunk(revision_arr, rows, [np.int64(summary.row_revision) for summary in summaries])
+        update_rows_by_chunk(
+            updated_at_arr, rows,
+            [_encode_ascii_row(now, width=ROW_UPDATE_TIMESTAMP_WIDTH)] * len(rows),
+        )
+        update_rows_by_chunk(
+            reason_arr, rows,
+            [_encode_ascii_row(reason, width=ROW_UPDATE_REASON_WIDTH)] * len(rows),
         )
 
     component_group.attrs["last_row_update_at_utc"] = now
@@ -892,8 +937,14 @@ def build_component_contours_from_masks(
     *,
     min_points: int = 2,
     read_chunk_size: int = 256,
+    rows: Sequence[int] | None = None,
+    existing: Sequence[np.ndarray | None] | None = None,
 ) -> tuple[list[np.ndarray | None], ComponentContourSummary]:
-    """Extract largest external contours for one refined mask component."""
+    """Extract largest external contours for one refined mask component.
+
+    With ``rows`` and ``existing`` (the stored contours), only those rows are
+    re-extracted; the others are taken from ``existing``.
+    """
 
     label_map = _label_index_map(refined_group)
     if component not in label_map:
@@ -933,21 +984,23 @@ def build_component_contours_from_masks(
         )
 
     chunk_size = max(1, int(read_chunk_size))
-    contours: list[np.ndarray | None] = [None] * int(roi_count)
-    contour_count = 0
-    point_count = 0
+    scoped = rows is not None and existing is not None and len(existing) == int(roi_count)
+    contours: list[np.ndarray | None] = list(existing) if scoped else [None] * int(roi_count)
+    wanted = {int(row) for row in rows} if scoped else None
     for start in range(0, int(roi_count), chunk_size):
         stop = min(int(roi_count), start + chunk_size)
+        if wanted is not None and not any(start <= row < stop for row in wanted):
+            continue
         masks = mask_store.read_dense(rows=slice(start, stop), channels=component_idx)[
             :, 0
         ]
         for offset, mask in enumerate(masks):
             row_idx = start + int(offset)
-            contour = extract_largest_external_contour(mask, min_points=min_points)
-            contours[row_idx] = contour
-            if contour is not None:
-                contour_count += 1
-                point_count += int(contour.shape[0])
+            if wanted is not None and row_idx not in wanted:
+                continue
+            contours[row_idx] = extract_largest_external_contour(mask, min_points=min_points)
+    contour_count = sum(1 for contour in contours if contour is not None)
+    point_count = sum(int(contour.shape[0]) for contour in contours if contour is not None)
     return contours, ComponentContourSummary(
         component=component,
         status="computed",
@@ -966,8 +1019,14 @@ def write_refined_subject_component_contours(
     min_points: int = 2,
     read_chunk_size: int = 256,
     overwrite: bool = False,
+    rows: Sequence[int] | None = None,
 ) -> list[ComponentContourSummary]:
-    """Write component contour caches for selected refined mask components."""
+    """Write component contour caches for selected refined mask components.
+
+    ``rows`` re-extracts only those rows and keeps every other row's stored
+    contour (a component without readable stored contours is rebuilt fully);
+    the packed arrays are rewritten exactly as a full rebuild writes them.
+    """
 
     try:
         mask_store = open_mask_store(
@@ -996,11 +1055,18 @@ def write_refined_subject_component_contours(
         if existing_summary is not None and not overwrite:
             summaries.append(existing_summary)
             continue
+        existing = (
+            read_component_contours(component_group, roi_count)
+            if rows is not None and isinstance(component_group, zarr.Group)
+            else None
+        )
         contours, summary = build_component_contours_from_masks(
             refined_group,
             component_name,
             min_points=min_points,
             read_chunk_size=read_chunk_size,
+            rows=rows if existing is not None else None,
+            existing=existing,
         )
         if summary.status != "computed":
             summaries.append(summary)

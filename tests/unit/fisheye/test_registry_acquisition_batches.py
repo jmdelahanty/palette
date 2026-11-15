@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from fisheye.registry.migrations import MIGRATION_METHODS
 from fisheye.registry.db import Registry
 from fisheye.registry.acquisition_batches import (
     ACQUISITION_BATCH_ASSIGNMENT_SCHEMA_ID,
@@ -18,6 +19,9 @@ from fisheye.registry.acquisition_batches import (
 )
 from fisheye.registry.query import _build_query, _parse_args
 
+
+
+LATEST_SCHEMA_VERSION = MIGRATION_METHODS[-1][0]
 
 def _register_recording(
     registry: Registry,
@@ -514,13 +518,13 @@ def test_batch_entity_and_assignment_provenance_is_exact(tmp_path: Path) -> None
         assert batch.schema_id == ACQUISITION_BATCH_SCHEMA_ID
         assert batch.batch_snapshot_id == "11111111-1111-4111-8111-111111111111"
         assert batch.created_at_utc == "2026-08-10T12:00:00+00:00"
-        assert batch.registry_schema_version == 73
+        assert batch.registry_schema_version == LATEST_SCHEMA_VERSION
         assert assignment.schema_id == ACQUISITION_BATCH_ASSIGNMENT_SCHEMA_ID
         assert assignment.assignment_revision == 1
         assert assignment.supersedes_assignment_snapshot_id is None
         assert assignment.assigned_at_utc == "2026-08-10T12:01:00+00:00"
         assert assignment.evidence == {"manifest_sha256": "b" * 64}
-        assert assignment.registry_schema_version == 73
+        assert assignment.registry_schema_version == LATEST_SCHEMA_VERSION
         assert row["dataset_id"] == dataset_id
         assert row["acquisition_batch_assignment_snapshot_id"] == (
             assignment.assignment_snapshot_id
@@ -535,8 +539,8 @@ def test_batch_entity_and_assignment_provenance_is_exact(tmp_path: Path) -> None
         assert row["acquisition_batch_supersedes_assignment_snapshot_id"] is None
         assert row["acquisition_batch_snapshot_id"] == batch.batch_snapshot_id
         assert row["acquisition_batch_schema_id"] == ACQUISITION_BATCH_SCHEMA_ID
-        assert row["acquisition_batch_creation_registry_schema_version"] == 73
-        assert row["acquisition_batch_assignment_registry_schema_version"] == 73
+        assert row["acquisition_batch_creation_registry_schema_version"] == LATEST_SCHEMA_VERSION
+        assert row["acquisition_batch_assignment_registry_schema_version"] == LATEST_SCHEMA_VERSION
     finally:
         registry.close()
 
@@ -580,7 +584,7 @@ def test_migration_preserves_existing_rows_as_unassigned(tmp_path: Path) -> None
         assert row["session_uuid"] == "legacy_acquisition_session"
         assert row["acquisition_batch_id"] is None
         assert row["acquisition_batch_identity_status"] == "missing"
-        assert reopened._current_schema_version() == 73
+        assert reopened._current_schema_version() == LATEST_SCHEMA_VERSION
         assert (
             reopened.conn.execute(
                 "SELECT COUNT(*) FROM recording_acquisition_batch_assignments;"

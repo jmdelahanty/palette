@@ -257,6 +257,34 @@ def test_scan_zarr_populates_acquisition_crop_video_view(tmp_path: Path) -> None
     assert int(crop["canonical_ledger_row_count"]) == 2
 
 
+def test_single_file_stream_without_ledger_stays_available_but_not_ready(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _write_recording_with_inventory(tmp_path)
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        registry.scan_zarr(zarr_path)
+        registry.conn.execute(
+            """
+            UPDATE acquisition_video_streams
+            SET canonical_ledger_status = NULL,
+                canonical_ledger_record_sha256 = NULL,
+                canonical_ledger_row_count = NULL
+            WHERE stream_key = 'crop';
+            """
+        )
+        crop = registry.conn.execute(
+            """
+            SELECT crop_stream_available, crop_stream_consumer_ready
+            FROM recording_crop_video_available_current;
+            """
+        ).fetchone()
+    finally:
+        registry.close()
+
+    assert tuple(crop) == (1, 0)
+
+
 def test_optional_inventory_warning_does_not_hide_complete_ledger(tmp_path: Path) -> None:
     zarr_path = _write_recording_with_inventory(tmp_path)
     root = zarr.open_group(str(zarr_path), mode="r+", use_consolidated=False)

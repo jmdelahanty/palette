@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -31,7 +31,18 @@ from fisheye.analysis.eye_angle_io import (
 from fisheye.analysis.swim_bout_io import (
     SwimBoutIOError,
     discover_swim_bout_candidates as discover_swim_bout_candidates_resolved,
+    load_exact_selector_ineligible_swim_bout_events,
+    load_exact_selector_ineligible_swim_bout_overlay_tables,
     load_swim_bout_tables,
+)
+from fisheye.analysis_workflows.provider_swim_bout_binding import (
+    PROVIDER_SWIM_BOUT_VALIDATION_PROFILE_CURRENT_STRICT_V1,
+    validate_provider_swim_bout_binding,
+)
+from fisheye.analysis_workflows.provider_track_motion_source_handle import (
+    ProviderTrackMotionSourceHandleError,
+    ReceiptBoundProviderTrackMotionSourceHandle,
+    load_receipt_bound_provider_track_motion_source_handle,
 )
 from fisheye.shared.zarr_io import open_zarr_root
 
@@ -41,6 +52,12 @@ DEFAULT_INTERACTIVE_ARTIFACT = "track_kinematics_summary_track_0_interactive"
 TRACK_KINEMATICS_VISUALIZATION_RUNS_PATH = (
     "analysis/track_kinematics_visualization_runs"
 )
+PROVIDER_TRACK_KINEMATICS_RUNS_PATH = "analysis/track_kinematics_runs/provider"
+SWIM_BOUT_RUNS_PATH = "analysis/swim_bout_runs"
+PROVIDER_TRACK_KINEMATICS_SPEC_SCHEMA_ID = (
+    "palette.explorer.provider_track_motion_verified_snapshot.v1"
+)
+PROVIDER_INTERACTIVE_ARTIFACT = "provider_motion_verified_snapshot"
 
 
 @dataclass(frozen=True)
@@ -86,6 +103,14 @@ class TrackKinematicsRunOption:
     label: str
     is_latest: bool
     attrs: Mapping[str, Any]
+    source_kind: str = "persisted_visualization"
+    provider_estimator_id: Optional[str] = None
+    provider_manifest_sha256: Optional[str] = None
+    provider_handle: Optional[ReceiptBoundProviderTrackMotionSourceHandle] = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -162,6 +187,79 @@ def _normalize_path(path: str) -> str:
 
 def _join_path(*parts: str) -> str:
     return "/".join(_normalize_path(part) for part in parts if _normalize_path(part))
+
+
+def _is_provider_track_motion_path(path: str) -> bool:
+    if type(path) is not str:
+        return False
+    parts = _normalize_path(path.strip()).split("/")
+    return parts[:3] == ["analysis", "track_kinematics_runs", "provider"]
+
+
+def _provider_track_rows(
+    provider: ReceiptBoundProviderTrackMotionSourceHandle,
+    *,
+    track_id: int,
+) -> slice:
+    ids = np.asarray(provider.track_ids, dtype=np.int64)
+    matches = np.flatnonzero(ids == int(track_id))
+    if matches.size != 1:
+        raise ValueError(
+            f"Provider-motion run {provider.run_name!r} does not contain exactly "
+            f"one track {int(track_id)}."
+        )
+    offsets = np.asarray(provider.track_row_offsets, dtype=np.int64)
+    index = int(matches[0])
+    if offsets.shape != (ids.shape[0] + 1,):
+        raise ValueError("Provider-motion track offsets are malformed.")
+    start, stop = int(offsets[index]), int(offsets[index + 1])
+    if start < 0 or stop <= start or stop > int(provider.row_count):
+        raise ValueError("Provider-motion track offsets are invalid.")
+    return slice(start, stop)
+
+
+def _provider_estimator_id(
+    provider: ReceiptBoundProviderTrackMotionSourceHandle,
+) -> str:
+    source = provider.source_authority_record
+    position = source.get("position_source") if isinstance(source, Mapping) else None
+    estimator = position.get("estimator_id") if isinstance(position, Mapping) else None
+    if type(estimator) is not str or not estimator.strip() or estimator != estimator.strip():
+        raise ValueError("Provider-motion source omits its exact position estimator ID.")
+    return estimator
+
+
+def _provider_handle_for_run(
+    zarr_path: Path | str,
+    run_path: str,
+    *,
+    provider_handle: ReceiptBoundProviderTrackMotionSourceHandle | None,
+) -> ReceiptBoundProviderTrackMotionSourceHandle:
+    archive = Path(zarr_path).expanduser().resolve()
+    if type(run_path) is not str or run_path != run_path.strip():
+        raise ValueError("Provider explorer run_path must be one exact string.")
+    normalized_run_path = _normalize_path(run_path)
+    if normalized_run_path != run_path:
+        raise ValueError("Provider explorer run_path must be canonical.")
+    if provider_handle is None:
+        return load_receipt_bound_provider_track_motion_source_handle(
+            archive,
+            normalized_run_path,
+            require_authoritative_timing=True,
+        )
+    if type(provider_handle) is not ReceiptBoundProviderTrackMotionSourceHandle:
+        raise ValueError("Provider explorer requires its receipt-minted source handle.")
+    if (
+        provider_handle.analysis_zarr_path != archive
+        or provider_handle.run_path != normalized_run_path
+        or provider_handle.selector_eligible is not False
+        or provider_handle.timing_is_authoritative is not True
+    ):
+        raise ValueError(
+            "Provider explorer handle belongs to another run or lacks current "
+            "selector-ineligible timing authority."
+        )
+    return provider_handle
 
 
 def _json_from_uint8_array(array: zarr.Array) -> Mapping[str, Any]:
@@ -995,12 +1093,118 @@ def load_eye_angle_timeseries_data(
     )
 
 
+def _provider_track_kinematics_run_options_from_parent(
+    zarr_path: Path | str,
+    provider_parent: zarr.Group,
+    *,
+    run_names: tuple[str, ...],
+) -> list[TrackKinematicsRunOption]:
+    options: list[TrackKinematicsRunOption] = []
+    for run_name in run_names:
+        run_path = _join_path(PROVIDER_TRACK_KINEMATICS_RUNS_PATH, run_name)
+        try:
+            provider = load_receipt_bound_provider_track_motion_source_handle(
+                zarr_path,
+                run_path,
+                require_authoritative_timing=True,
+            )
+            estimator_id = _provider_estimator_id(provider)
+            run_group = provider_parent[run_name]
+        except (
+            FileNotFoundError,
+            KeyError,
+            OSError,
+            ProviderTrackMotionSourceHandleError,
+            ValueError,
+        ):
+            continue
+        for track_id_value in np.asarray(provider.track_ids, dtype=np.int64):
+            track_id = int(track_id_value)
+            try:
+                _provider_track_rows(provider, track_id=track_id)
+            except ValueError:
+                continue
+            options.append(
+                TrackKinematicsRunOption(
+                    run_name=str(run_name),
+                    run_path=run_path,
+                    run_scope="provider",
+                    artifact_name=PROVIDER_INTERACTIVE_ARTIFACT,
+                    track_id=track_id,
+                    label=(
+                        f"provider/{run_name} | estimator {estimator_id} | "
+                        f"track {track_id} | selector-ineligible canary"
+                    ),
+                    is_latest=False,
+                    attrs=dict(run_group.attrs),
+                    source_kind="verified_provider_motion",
+                    provider_estimator_id=estimator_id,
+                    provider_manifest_sha256=provider.provider_manifest_sha256,
+                    provider_handle=provider,
+                )
+            )
+    return options
+
+
+def discover_provider_track_kinematics_run_options(
+    zarr_path: Path | str,
+    *,
+    requested_run_path: str | None = None,
+) -> list[TrackKinematicsRunOption]:
+    """Discover exact provider canaries without parsing archive-root metadata.
+
+    This direct-subtree path is only for receipt-admitted, selector-ineligible
+    provider runs.  Normal selector-visible track discovery retains its
+    existing recording-root publication reader.
+    """
+
+    archive = Path(zarr_path).expanduser().resolve()
+    parent_path = archive.joinpath(*PROVIDER_TRACK_KINEMATICS_RUNS_PATH.split("/"))
+    try:
+        parent = open_zarr_root(
+            parent_path,
+            mode="r",
+            use_consolidated=False,
+        )
+    except (FileNotFoundError, OSError, ValueError):
+        return []
+    if requested_run_path is None:
+        run_names = tuple(_group_keys(parent))
+    else:
+        normalized = _normalize_path(requested_run_path)
+        prefix = f"{PROVIDER_TRACK_KINEMATICS_RUNS_PATH}/"
+        run_name = normalized[len(prefix) :] if normalized.startswith(prefix) else ""
+        if (
+            requested_run_path != normalized
+            or not run_name
+            or "/" in run_name
+            or run_name not in parent
+        ):
+            return []
+        run_names = (run_name,)
+    options = _provider_track_kinematics_run_options_from_parent(
+        archive,
+        parent,
+        run_names=run_names,
+    )
+    return sorted(options, key=lambda item: (item.run_name, item.track_id))
+
+
 def discover_track_kinematics_run_options(
     zarr_path: Path | str,
     *,
     artifact_name: str = DEFAULT_INTERACTIVE_ARTIFACT,
+    requested_run_path: str | None = None,
 ) -> list[TrackKinematicsRunOption]:
-    """Return track-kinematics runs that have a persisted interactive plot spec."""
+    """Return verified legacy plot artifacts and exact provider-motion canaries."""
+
+    if requested_run_path is not None and _is_provider_track_motion_path(
+        requested_run_path
+    ):
+        return discover_provider_track_kinematics_run_options(
+            zarr_path,
+            requested_run_path=requested_run_path,
+        )
 
     root = open_zarr_root(Path(zarr_path), mode="r")
     parent = root.get("analysis/track_kinematics_runs")
@@ -1009,6 +1213,8 @@ def discover_track_kinematics_run_options(
 
     options: list[TrackKinematicsRunOption] = []
     for scope in _group_keys(parent):
+        if scope == "provider":
+            continue
         scope_group = parent[scope]
         latest = scope_group.attrs.get("latest")
         for run_name in _group_keys(scope_group):
@@ -1056,7 +1262,141 @@ def discover_track_kinematics_run_options(
                 )
             )
 
+    provider_parent = parent.get("provider")
+    if isinstance(provider_parent, zarr.Group):
+        options.extend(
+            _provider_track_kinematics_run_options_from_parent(
+                zarr_path,
+                provider_parent,
+                run_names=tuple(_group_keys(provider_parent)),
+            )
+        )
+
     return sorted(options, key=lambda item: (not item.is_latest, item.run_scope, item.run_name))
+
+
+def _discover_provider_swim_bout_run_options(
+    zarr_path: Path | str,
+    *,
+    track_run_path: str,
+    track_id: int,
+    provider_handle: ReceiptBoundProviderTrackMotionSourceHandle | None = None,
+) -> list[SwimBoutRunOption]:
+    try:
+        provider = _provider_handle_for_run(
+            zarr_path,
+            track_run_path,
+            provider_handle=provider_handle,
+        )
+        rows = _provider_track_rows(provider, track_id=int(track_id))
+    except (TypeError, ValueError):
+        return []
+    parent_path = Path(zarr_path).expanduser().resolve().joinpath(
+        *SWIM_BOUT_RUNS_PATH.split("/")
+    )
+    try:
+        parent = open_zarr_root(
+            parent_path,
+            mode="r",
+            use_consolidated=False,
+        )
+    except (FileNotFoundError, OSError, ValueError):
+        return []
+
+    options: list[SwimBoutRunOption] = []
+    for run_name in _group_keys(parent):
+        run_group = parent[run_name]
+        run_attrs = dict(run_group.attrs)
+        if (
+            run_attrs.get("source_track_kinematics_scope") != "provider"
+            or run_attrs.get("source_track_kinematics_run") != provider.run_name
+            or _safe_int(run_attrs.get("track_id")) != int(track_id)
+        ):
+            continue
+        try:
+            tables = load_exact_selector_ineligible_swim_bout_events(
+                None,
+                run_name=str(run_name),
+                swim_bout_parent=parent,
+            )
+            validate_provider_swim_bout_binding(
+                tables,
+                provider=provider,
+                track_id=int(track_id),
+                rows=rows,
+                validation_profile=(
+                    PROVIDER_SWIM_BOUT_VALIDATION_PROFILE_CURRENT_STRICT_V1
+                ),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        candidate = tables.candidate
+        default_level = candidate.default_speed_level or ""
+        if not default_level:
+            continue
+        n_bouts_by_level = {
+            signal.speed_level: signal.n_bouts for signal in candidate.signals
+        }
+        method = candidate.detection_method
+        layout = str(candidate.attrs.get("layout") or "compact_tabular_v2")
+        threshold = _safe_float(candidate.attrs.get("threshold_mm"))
+        exponential_tau_s = _safe_float(candidate.attrs.get("exponential_tau_s"))
+        exponential_source_level = candidate.attrs.get("exponential_source_level")
+        exponential_source_level = (
+            str(exponential_source_level)
+            if exponential_source_level is not None
+            else None
+        )
+        ordered_signals = [
+            signal for signal in candidate.signals if signal.speed_level == default_level
+        ] + [
+            signal for signal in candidate.signals if signal.speed_level != default_level
+        ]
+        for signal in ordered_signals:
+            level = signal.speed_level
+            signal_source = exponential_source_level or signal.source_level
+            speed_level = level.replace("speed_", "", 1)
+            label = _swim_option_label(
+                run_name=candidate.run_name,
+                speed_level=speed_level,
+                is_default_level=level == default_level,
+                detection_method=method,
+                threshold_mm=threshold,
+                exponential_tau_s=exponential_tau_s,
+                exponential_source_level=signal_source,
+                count=n_bouts_by_level[level],
+                is_latest=False,
+            )
+            options.append(
+                SwimBoutRunOption(
+                    run_name=candidate.run_name,
+                    label=f"{label} | selector-ineligible canary",
+                    layout=layout,
+                    candidate_id=int(candidate.candidate_id),
+                    signal_id=int(signal.signal_id),
+                    signal_role=signal.role,
+                    default_level=default_level,
+                    speed_level=speed_level,
+                    source_track_kinematics_run=candidate.source_track_kinematics_run,
+                    track_id=candidate.track_id,
+                    detection_method=method,
+                    threshold_mm=threshold,
+                    exponential_tau_s=exponential_tau_s,
+                    exponential_source_level=signal_source,
+                    n_bouts_by_level=n_bouts_by_level,
+                    is_latest=False,
+                )
+            )
+
+    level_order = {"filtered": 0, "exponential": 1, "smoothed": 2, "raw": 3, "averaged": 4}
+    return sorted(
+        options,
+        key=lambda item: (
+            item.run_name,
+            item.speed_level != item.default_level.replace("speed_", "", 1),
+            level_order.get(item.speed_level, 99),
+        ),
+    )
 
 
 def discover_swim_bout_run_options(
@@ -1065,8 +1405,17 @@ def discover_swim_bout_run_options(
     track_run_path: str,
     track_id: int,
     legacy_compatibility: bool = False,
+    provider_handle: ReceiptBoundProviderTrackMotionSourceHandle | None = None,
 ) -> list[SwimBoutRunOption]:
     """Return swim-bout runs derived from the selected track-kinematics run."""
+
+    if _is_provider_track_motion_path(track_run_path):
+        return _discover_provider_swim_bout_run_options(
+            zarr_path,
+            track_run_path=track_run_path,
+            track_id=track_id,
+            provider_handle=provider_handle,
+        )
 
     root = open_zarr_root(Path(zarr_path), mode="r")
     track_run_name = _normalize_path(track_run_path).split("/")[-1]
@@ -1160,6 +1509,10 @@ def discover_bout_kinematics_run_options(
     """Return bout-kinematics runs derived from the selected bout candidate."""
 
     if swim_bout_run is None or not speed_level:
+        return []
+    if _is_provider_track_motion_path(track_run_path):
+        # Provider-aware admission in this slice stops at swim bouts.  The
+        # legacy bout-kinematics reader does not validate provider lineage.
         return []
 
     root = open_zarr_root(Path(zarr_path), mode="r")
@@ -1371,6 +1724,13 @@ def _load_global_swim_bout_payload(
         except (TypeError, ValueError):
             return _empty_swim_bout_payload()
 
+    return _swim_bout_tables_to_payload(swim_payload)
+
+
+def _swim_bout_tables_to_payload(swim_payload: Any) -> _SwimBoutPayload:
+    """Normalize one already-admitted swim-bout table selection for the UI."""
+
+    candidate = swim_payload.candidate
     records = swim_payload.bouts
     peak_events = swim_payload.peak_events
     fps_value = swim_payload.run_attrs.get("fps")
@@ -1397,6 +1757,55 @@ def _load_global_swim_bout_payload(
         label=label,
         source=swim_payload.level_path,
     )
+
+
+def _load_provider_swim_bout_payload(
+    swim_bout_parent: zarr.Group | None,
+    *,
+    provider: ReceiptBoundProviderTrackMotionSourceHandle,
+    rows: slice,
+    authoritative_frame_indices: np.ndarray,
+    track_id: int,
+    requested_run: Optional[str],
+    candidate_id: Optional[int],
+    signal_id: Optional[int],
+    speed_level: Optional[str],
+) -> _SwimBoutPayload:
+    """Load one exact provider-bound selector-ineligible bout signal."""
+
+    if requested_run is None or requested_run.lower() == "none":
+        return _empty_swim_bout_payload()
+    if swim_bout_parent is None:
+        raise ValueError("The exact provider swim-bout parent is unavailable.")
+    default_tables = load_exact_selector_ineligible_swim_bout_events(
+        None,
+        run_name=requested_run,
+        swim_bout_parent=swim_bout_parent,
+    )
+    validate_provider_swim_bout_binding(
+        default_tables,
+        provider=provider,
+        track_id=track_id,
+        rows=rows,
+        validation_profile=(
+            PROVIDER_SWIM_BOUT_VALIDATION_PROFILE_CURRENT_STRICT_V1
+        ),
+    )
+    selected_tables = load_exact_selector_ineligible_swim_bout_overlay_tables(
+        None,
+        run_name=requested_run,
+        candidate_id=candidate_id,
+        signal_id=signal_id,
+        speed_level=speed_level,
+        swim_bout_parent=swim_bout_parent,
+        authoritative_frame_indices=authoritative_frame_indices,
+    )
+    if selected_tables.candidate.candidate_id != default_tables.candidate.candidate_id:
+        raise ValueError(
+            "Provider explorer only accepts signals from the strictly validated "
+            "default swim-bout candidate."
+        )
+    return _swim_bout_tables_to_payload(selected_tables)
 
 
 def _load_swim_bout_payload(
@@ -1652,16 +2061,297 @@ def _verified_validity_spans(
     )
 
 
+_PROVIDER_INTERACTIVE_SERIES = (
+    "speed_raw_px",
+    "speed_filtered_px",
+    "speed_smoothed_px",
+    "speed_averaged_px",
+    "speed_raw_mm",
+    "speed_filtered_mm",
+    "speed_smoothed_mm",
+    "speed_averaged_mm",
+    "acceleration_px",
+    "smoothed_acceleration_px",
+    "acceleration_mm",
+    "smoothed_acceleration_mm",
+    "frame_path_distance_raw_px",
+    "frame_path_distance_filtered_px",
+    "frame_path_distance_smoothed_px",
+    "cumulative_path_distance_px",
+    "frame_path_distance_raw_mm",
+    "frame_path_distance_filtered_mm",
+    "frame_path_distance_smoothed_mm",
+    "cumulative_path_distance_mm",
+    "delta_heading_degrees",
+    "angular_velocity_raw_deg_s",
+    "angular_speed_raw_deg_s",
+    "smoothed_heading_degrees",
+    "delta_heading_smoothed_degrees",
+    "angular_velocity_smoothed_deg_s",
+    "angular_speed_smoothed_deg_s",
+)
+
+
+def _provider_interactive_series(
+    provider: ReceiptBoundProviderTrackMotionSourceHandle,
+    *,
+    rows: slice,
+) -> dict[str, np.ndarray]:
+    return {
+        name: np.asarray(provider.array_slice(name, rows), dtype=np.float64)
+        for name in _PROVIDER_INTERACTIVE_SERIES
+        if provider.has_array(name)
+    }
+
+
+def _provider_validity_spans(
+    provider: ReceiptBoundProviderTrackMotionSourceHandle,
+    *,
+    rows: slice,
+    time_seconds: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, Optional[str]]:
+    invalid_rows: list[tuple[float, float, str]] = []
+    computation = provider.computation_record
+    transition_map = computation.get("transition_reason_codes", {})
+    linear_map = computation.get("linear_sample_reason_codes", {})
+    angular_map = computation.get("angular_sample_reason_codes", {})
+    transition_valid = np.asarray(
+        provider.array_slice("transition_valid", rows), dtype=bool
+    )
+    transition_reason = np.asarray(
+        provider.array_slice("transition_reason_code", rows), dtype=np.int64
+    )
+    linear_valid = np.asarray(
+        provider.array_slice("linear_sample_valid", rows), dtype=bool
+    )
+    linear_reason = np.asarray(
+        provider.array_slice("linear_sample_reason_code", rows), dtype=np.int64
+    )
+    angular_valid = np.asarray(
+        provider.array_slice("angular_sample_valid", rows), dtype=bool
+    )
+    angular_reason = np.asarray(
+        provider.array_slice("angular_sample_reason_code", rows), dtype=np.int64
+    )
+    expected = (int(time_seconds.shape[0]),)
+    for values in (
+        transition_valid,
+        transition_reason,
+        linear_valid,
+        linear_reason,
+        angular_valid,
+        angular_reason,
+    ):
+        if values.shape != expected:
+            raise ValueError(
+                "Provider-motion independent validity arrays disagree with the "
+                "selected track."
+            )
+
+    for index in range(1, expected[0]):
+        if bool(transition_valid[index]):
+            continue
+        start = float(time_seconds[index - 1])
+        stop = float(time_seconds[index])
+        if not (np.isfinite(start) and np.isfinite(stop)):
+            continue
+        if stop < start:
+            start, stop = stop, start
+        if stop <= start:
+            continue
+        reason = _reason_name(
+            transition_map,
+            transition_reason[index],
+            prefix="transition",
+        )
+        if reason != "first_sample":
+            invalid_rows.append((start, stop, f"transition:{reason}"))
+
+    for validity, reasons, label, mapping in (
+        (linear_valid, linear_reason, "linear", linear_map),
+        (angular_valid, angular_reason, "angular", angular_map),
+    ):
+        for index, valid in enumerate(validity):
+            if bool(valid):
+                continue
+            interval = _row_interval(time_seconds, index)
+            if interval is None:
+                continue
+            reason = _reason_name(mapping, reasons[index], prefix=label)
+            invalid_rows.append((interval[0], interval[1], f"{label}:{reason}"))
+
+    if not invalid_rows:
+        return _empty_spans(), _empty_labels(), None
+    return (
+        np.asarray(
+            [(start, stop) for start, stop, _ in invalid_rows],
+            dtype=np.float64,
+        ),
+        np.asarray([label for _, _, label in invalid_rows], dtype=object),
+        "provider_track_independent_validity",
+    )
+
+
+def _load_provider_track_kinematics_interactive_data(
+    zarr_path: Path | str,
+    *,
+    run_path: str,
+    track_id: Optional[int],
+    swim_bout_run: Optional[str],
+    swim_bout_candidate_id: Optional[int],
+    swim_bout_signal_id: Optional[int],
+    speed_level: Optional[str],
+    provider_handle: ReceiptBoundProviderTrackMotionSourceHandle | None,
+) -> TrackKinematicsInteractiveData:
+    if isinstance(track_id, bool) or not isinstance(track_id, (int, np.integer)):
+        raise ValueError("Exact provider-motion exploration requires one track_id.")
+    selected_track_id = int(track_id)
+    archive = Path(zarr_path).expanduser().resolve()
+    provider = _provider_handle_for_run(
+        archive,
+        run_path,
+        provider_handle=provider_handle,
+    )
+    rows = _provider_track_rows(provider, track_id=selected_track_id)
+    estimator_id = _provider_estimator_id(provider)
+    time_seconds = np.asarray(
+        provider.array_slice("time_seconds", rows), dtype=np.float64
+    )
+    frame_indices = np.asarray(
+        provider.array_slice("source_acquisition_frame_index", rows),
+        dtype=np.int64,
+    )
+    if provider.has_array("positions_mm"):
+        position_unit = "mm"
+        positions = np.asarray(
+            provider.array_slice("positions_mm", rows), dtype=np.float64
+        )
+    else:
+        position_unit = "px"
+        positions = np.asarray(
+            provider.array_slice("positions_px", rows), dtype=np.float64
+        )
+    position_valid = np.asarray(
+        provider.array_slice("linear_sample_valid", rows), dtype=bool
+    )
+    if positions.shape != (time_seconds.shape[0], 2) or position_valid.shape != (
+        time_seconds.shape[0],
+    ):
+        raise ValueError("Provider-motion positions disagree with the selected track.")
+    positions = np.array(positions, copy=True)
+    positions[~position_valid] = np.nan
+
+    swim_bout_parent: zarr.Group | None = None
+    if swim_bout_run is not None and swim_bout_run.lower() != "none":
+        parent_path = archive.joinpath(*SWIM_BOUT_RUNS_PATH.split("/"))
+        try:
+            swim_bout_parent = open_zarr_root(
+                parent_path,
+                mode="r",
+                use_consolidated=False,
+            )
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            raise ValueError(
+                "The exact provider swim-bout parent cannot be opened."
+            ) from exc
+
+    swim_bout_payload = _load_provider_swim_bout_payload(
+        swim_bout_parent,
+        provider=provider,
+        rows=rows,
+        authoritative_frame_indices=frame_indices,
+        track_id=selected_track_id,
+        requested_run=swim_bout_run,
+        candidate_id=swim_bout_candidate_id,
+        signal_id=swim_bout_signal_id,
+        speed_level=speed_level,
+    )
+    series = _provider_interactive_series(provider, rows=rows)
+    series.update(swim_bout_payload.series)
+    validity_spans, validity_labels, validity_source = _provider_validity_spans(
+        provider,
+        rows=rows,
+        time_seconds=time_seconds,
+    )
+    normalized_run_path = _normalize_path(run_path)
+    source_paths = {
+        name: _join_path(normalized_run_path, name)
+        for name in provider.available_arrays
+        if not name.startswith("per_second/")
+    }
+    spec: dict[str, Any] = {
+        "schema_id": PROVIDER_TRACK_KINEMATICS_SPEC_SCHEMA_ID,
+        "schema_version": 1,
+        "source_mode": "verified_provider_motion",
+        "persisted_visualization_artifact": False,
+        "run_name": provider.run_name,
+        "run_path": normalized_run_path,
+        "track_id": selected_track_id,
+        "position_estimator_id": estimator_id,
+        "provider_manifest_sha256": provider.provider_manifest_sha256,
+        "provider_verification_digest": provider.verification_digest,
+        "timing_is_authoritative": provider.timing_is_authoritative,
+        "source_paths": source_paths,
+    }
+    attrs: dict[str, Any] = {
+        "renderer": "verified_provider_motion_snapshot",
+        "source_kind": "verified_provider_motion",
+        "stage_selector_eligible": False,
+        "position_estimator_id": estimator_id,
+        "provider_manifest_sha256": provider.provider_manifest_sha256,
+    }
+
+    provider.assert_current()
+
+    return TrackKinematicsInteractiveData(
+        zarr_path=archive,
+        run_path=normalized_run_path,
+        artifact_name=PROVIDER_INTERACTIVE_ARTIFACT,
+        spec=spec,
+        attrs=attrs,
+        source_paths=source_paths,
+        time_seconds=time_seconds,
+        frame_indices=frame_indices,
+        series=series,
+        positions=positions,
+        position_unit=position_unit,
+        swim_bouts=swim_bout_payload.spans,
+        swim_bout_records=swim_bout_payload.records,
+        inter_bout_intervals=swim_bout_payload.inter_bout_intervals,
+        swim_bout_label=swim_bout_payload.label,
+        swim_bout_source=swim_bout_payload.source,
+        validity_spans=validity_spans,
+        validity_labels=validity_labels,
+        validity_source=validity_source,
+    )
+
+
 def load_track_kinematics_interactive_data(
     zarr_path: Path | str,
     *,
     run_path: str,
     artifact_name: str = DEFAULT_INTERACTIVE_ARTIFACT,
+    track_id: Optional[int] = None,
     swim_bout_run: Optional[str] = None,
+    swim_bout_candidate_id: Optional[int] = None,
+    swim_bout_signal_id: Optional[int] = None,
     speed_level: Optional[str] = None,
     swim_bout_legacy_compatibility: bool = False,
+    provider_handle: ReceiptBoundProviderTrackMotionSourceHandle | None = None,
 ) -> TrackKinematicsInteractiveData:
-    """Load a persisted track-kinematics interactive spec and source arrays."""
+    """Load one verified persisted artifact or exact provider-motion snapshot."""
+
+    if _is_provider_track_motion_path(run_path):
+        return _load_provider_track_kinematics_interactive_data(
+            zarr_path,
+            run_path=run_path,
+            track_id=track_id,
+            swim_bout_run=swim_bout_run,
+            swim_bout_candidate_id=swim_bout_candidate_id,
+            swim_bout_signal_id=swim_bout_signal_id,
+            speed_level=speed_level,
+            provider_handle=provider_handle,
+        )
 
     archive = Path(zarr_path)
     root = open_zarr_root(archive, mode="r")

@@ -65,6 +65,11 @@ from .keypoint_failure_review import (
     _set_roi_value_if_changed,
 )
 from .keypoint_review import _update_postprocess_summary
+from .recovered_keypoint_review import (
+    is_recovered_roi_review,
+    record_point_edits,
+    validate_points_inside_crop,
+)
 
 
 def _coerce_status_scalar(value: object) -> object:
@@ -128,7 +133,7 @@ class ReviewSession:
     failures: np.ndarray
     frame_indices: np.ndarray
     roi_images: zarr.Array
-    roi_coordinates_full: zarr.Array
+    roi_coordinates_full: Optional[zarr.Array]
 
     source_refined_row_ids: Optional[np.ndarray]
     source_detect_row_index: Optional[np.ndarray]
@@ -173,6 +178,7 @@ class ReviewSession:
     delta_editor: str = "unknown"
     instance_keys: Optional[np.ndarray] = None
     delta_overlay: Optional[ResolvedKeypointDeltaOverlay] = None
+    recovered_roi_only: bool = False
 
 
 def _coerce_ints(values: Optional[Sequence[object]]) -> list[int]:
@@ -406,6 +412,8 @@ def _resolve_session_geometry(
     summary = (
         summary_raw.get("refine", summary_raw) if isinstance(summary_raw, dict) else {}
     )
+    if refined.attrs.get("recovered_review_qc") is not None:
+        summary = dict(refined.attrs["recovered_review_qc"])
 
     min_triangle_angle, min_triangle_area, max_triangle_area = (
         _resolve_review_geometry_defaults(refined.attrs)
@@ -415,7 +423,8 @@ def _resolve_session_geometry(
     max_area_value = summary.get("max_triangle_area")
     if max_area_value is None:
         # Default from review heuristics schema; this value may be None for 3pt schemas.
-        max_triangle_area = max_triangle_area
+        if "recovered_review_qc" in refined.attrs:
+            max_triangle_area = None
     else:
         max_triangle_area = float(max_area_value)
 
@@ -731,7 +740,8 @@ def resolve_review_session(
         raise RuntimeError("Crop run is missing frame_indices.")
     if "roi_images" not in crop:
         raise RuntimeError("Crop run is missing roi_images.")
-    if "roi_coordinates_full" not in crop:
+    recovered_roi_only = is_recovered_roi_review(root, refined, crop)
+    if "roi_coordinates_full" not in crop and not recovered_roi_only:
         raise RuntimeError("Crop run is missing roi_coordinates_full.")
 
     if "keypoints_roi" not in refined:
@@ -739,7 +749,7 @@ def resolve_review_session(
 
     frame_indices = np.asarray(crop["frame_indices"][:], dtype=np.int64)
     roi_images = crop["roi_images"]
-    roi_coordinates_full = crop["roi_coordinates_full"]
+    roi_coordinates_full = crop.get("roi_coordinates_full")
 
     total_rois = int(frame_indices.shape[0])
     source_refined_row_ids, source_detect_row_index = load_row_identity_arrays(
@@ -919,8 +929,10 @@ def resolve_review_session(
             policy=manual_qc_policy,
         )
 
-    full_h, full_w = _resolve_full_frame_dimensions(root)
-    norm_factor = np.array([full_w, full_h], dtype=np.float64)
+    norm_factor = np.full(2, np.nan, dtype=np.float64)
+    if not recovered_roi_only:
+        full_h, full_w = _resolve_full_frame_dimensions(root)
+        norm_factor = np.array([full_w, full_h], dtype=np.float64)
 
     return ReviewSession(
         zarr_path=zarr_path,
@@ -972,6 +984,7 @@ def resolve_review_session(
         delta_editor=str(editor or "unknown"),
         instance_keys=instance_keys,
         delta_overlay=delta_overlay,
+        recovered_roi_only=recovered_roi_only,
     )
 
 
@@ -1014,6 +1027,7 @@ def load_roi_payload(session: ReviewSession, position: int) -> Mapping[str, obje
         "frame_idx": frame_idx,
         "labels": list(session.keypoint_labels),
         "points": [_json_point(point) for point in points],
+        "frame_index_domain": session.crop.attrs.get("frame_index_domain"),
         "reason": reason,
         "status": status,
         "roi_image": image_payload,
@@ -1134,6 +1148,8 @@ def save_roi_correction(
 
     roi_idx = int(session.failures[position])
     delta_write: Optional[Mapping[str, object]] = None
+    if session.recovered_roi_only:
+        validate_points_inside_crop(points_arr, session.roi_images.shape[1:])
     if session.immutable_base:
         delta_write = _append_immutable_keypoint_delta(
             session,
@@ -1160,15 +1176,24 @@ def save_roi_correction(
     frame_idx = int(session.frame_indices[roi_idx])
     changed = False
 
+    if session.recovered_roi_only:
+        # Fail closed if an interrupted save leaves only some fields written.
+        session.refined["training_eligible"][roi_idx] = False
+        _set_roi_value_if_changed(session.usable_arr, roi_idx, False)
+        record_point_edits(
+            session.refined, roi_idx, np.asarray(session.kp_roi_arr[roi_idx]), points_arr
+        )
+
     changed |= _set_roi_value_if_changed(session.kp_roi_arr, roi_idx, points_arr)
 
-    full_points = points_arr + np.asarray(
-        session.roi_coordinates_full[roi_idx], dtype=np.float64
-    )
-    changed |= _set_roi_value_if_changed(session.kp_img_arr, roi_idx, full_points)
-    changed |= _set_roi_value_if_changed(
-        session.kp_norm_arr, roi_idx, full_points / session.norm_factor
-    )
+    if session.roi_coordinates_full is not None:
+        full_points = points_arr + np.asarray(
+            session.roi_coordinates_full[roi_idx], dtype=np.float64
+        )
+        changed |= _set_roi_value_if_changed(session.kp_img_arr, roi_idx, full_points)
+        changed |= _set_roi_value_if_changed(
+            session.kp_norm_arr, roi_idx, full_points / session.norm_factor
+        )
 
     heading_val = compute_heading_from_attrs(
         session.refined.attrs,
@@ -1303,6 +1328,9 @@ def save_roi_correction(
             )
         )
 
+    if session.recovered_roi_only:
+        session.refined["training_eligible"][roi_idx] = bool(usable)
+
     return {
         "roi_idx": roi_idx,
         "position": int(position),
@@ -1384,6 +1412,12 @@ def _clear_keypoint_solution(
 
     frame_idx = int(session.frame_indices[idx])
     changed = False
+    if session.recovered_roi_only:
+        session.refined["training_eligible"][idx] = False
+        record_point_edits(
+            session.refined, idx, np.asarray(session.kp_roi_arr[idx]),
+            _nan_like_row(session.kp_roi_arr, idx),
+        )
 
     changed |= _set_roi_value_if_changed(
         session.kp_roi_arr, idx, _nan_like_row(session.kp_roi_arr, idx)
@@ -1650,6 +1684,11 @@ def apply_review_status(
     reviewer: Optional[str] = None,
     notes: Optional[str] = None,
 ) -> dict[str, object]:
+    if session.recovered_roi_only:
+        raise RuntimeError(
+            "Recovered crop-only annotations cannot use recording authority approval. "
+            "Save or reject individual rows; export and registry approval are separate steps."
+        )
     if session.immutable_base:
         raise RuntimeError(
             "An immutable refined-keypoint base plus review deltas cannot be approved in place. Freeze and compact the delta generation into a new validated immutable snapshot first."

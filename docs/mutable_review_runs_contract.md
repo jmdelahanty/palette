@@ -18,8 +18,9 @@ Current code has pieces of this model, but not the full machinery:
   observation rows from assignment/identity interpretation.
 - `refined_detect_runs/<run>/instances` is already the canonical curated detect
   surface.
-- the browser labeling workflow currently uses a SQLite task/control plane and
-  does not yet perform server-owned Zarr row patches on every save.
+- the browser labeling workflow uses a SQLite task/control plane; mutable and
+  recovered keypoint browser Save writes a local checkpoint, and explicit
+  Apply performs the server-owned canonical Zarr row writes.
 - no general `edit_revision`, `mutable`, `locked`, or append-only Zarr edit-log
   contract is implemented across these run families yet.
 
@@ -141,6 +142,51 @@ application:
   clear message or require a successful apply first
 - retrying an apply after a timeout must be idempotent, using a stable apply ID
   or equivalent event key so the same session patch is not applied twice
+
+#### Maintained keypoint browser behavior
+
+For mutable and recovered keypoint review, browser Save persists a versioned
+row checkpoint in the labeling SQLite sidecar. The response reports `saved`
+and `applied` separately and overlays the saved row in the browser. Save does
+not mutate canonical keypoint arrays, training eligibility, review status,
+downstream stale markers, selectors, or registry projections.
+
+Apply selects at most 1,000 checkpoints in the store's deterministic order.
+The UI reports the total pending count separately from the selected batch
+count. Each checkpoint binds the task/user/recording, normalized archive and
+run/source identities, stable row identity, ordered landmark schema, effective
+QC and derived-metric contract, and the complete coupled base-row state. A
+persisted row digest makes state polling proportional to compact descriptors;
+Apply still loads and revalidates every full claimed checkpoint under the
+archive mutation lock before its first canonical write.
+The applied SQLite receipt retains the full checkpoint metadata for compatible
+restart recovery and durable row-level audit readback; this intentionally
+duplicates bounded batch metadata in this version of the contract.
+
+Canonical keypoint arrays do not have a generation-style atomic publication
+boundary. Apply therefore serializes physical writers, records the original
+revision and deterministic intended row state before writing, and retains an
+owned `applying` checkpoint plus recovery metadata after any uncertain write.
+A same-ID retry may converge only fields proven to be the stored base, the
+stored intended value, or a declared intermediate of the recovered-row writer.
+It also idempotently completes downstream stale publication. Canonical row
+finalization leaves a durable applied receipt pending until the audit event and
+registry refresh finish; a same-ID retry completes those effects after a
+process restart. Review approval and task completion remain blocked throughout
+that recovery. The global edit revision is context: an unchanged row
+checkpoint remains valid after a different row advances that revision.
+
+Approval and task completion reject active, applying, recovery-required, or
+pending-effect keypoint checkpoints. Training export and other ordinary
+readers continue to see the last applied labels; unapplied overlays are
+browser-session state.
+Previously applied labels remain canonical while a newer checkpoint waits.
+
+Immutable-base keypoint browser sessions retain the existing direct sparse
+delta writer and report `immutable_delta_direct_v1`; they do not expose Apply.
+Direct backend and desktop callers also retain their established write APIs.
+This exception is explicit compatibility behavior rather than a mutable
+checkpoint publication claim.
 
 ### 3. Direct In-Place Row Edits
 

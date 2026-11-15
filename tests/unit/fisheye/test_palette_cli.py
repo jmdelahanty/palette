@@ -83,6 +83,26 @@ def test_plan_mid_pipeline_recommends_frontier(tmp_path, capsys) -> None:
     assert "crop" in keypoints["blocked_by"]
 
 
+def test_plan_reports_tracks_as_track_kinematics_precondition(
+    tmp_path,
+    capsys,
+) -> None:
+    zarr_path = tmp_path / "tracking_precondition_analysis.zarr"
+    root = _open_tmp_store(zarr_path)
+    _complete_run(root, "refined_keypoints_runs", "refined_keypoints_001")
+
+    rc, payload = _run_json(capsys, "plan", str(zarr_path))
+
+    assert rc == palette.EXIT_OK
+    track_kinematics = next(
+        stage
+        for stage in payload["stages"]
+        if stage["stage"] == "track_kinematics"
+    )
+    assert track_kinematics["state"] == "blocked"
+    assert track_kinematics["blocked_by"] == ["tracks"]
+
+
 def test_plan_hint_for_path_with_space_is_shell_quoted(tmp_path, capsys) -> None:
     zarr_path = tmp_path / "recording with space" / "space training.zarr"
     zarr_path.parent.mkdir(parents=True)

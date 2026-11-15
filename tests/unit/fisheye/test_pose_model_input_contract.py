@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +13,7 @@ from fisheye.shared.pose_model_input_contract import (
     build_empirical_pose_runtime_profile,
     build_historical_pose_model_input_contract,
     build_pose_model_input_contract_v2,
+    build_runtime_receipt_pose_model_input_contract,
     load_pose_model_input_contract,
     validate_pose_runtime_compatibility,
 )
@@ -127,6 +129,88 @@ def _v2_document(root: Path) -> dict[str, object]:
     )
 
 
+def _runtime_receipt_package(tmp_path: Path) -> tuple[Path, Path]:
+    root, weights = _package(tmp_path)
+    manifest_path = root / "inputs" / "training.manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("imgsz")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    (root / "training_report.yaml").write_text(
+        """training_params:
+  imgsz: 256
+  rect: false
+kpt_shape: [2, 3]
+training_history:
+  ultralytics_version: 8.3.214
+  source_zarr_metadata:
+    training.zarr:
+      crop_info:
+        roi_size: [256, 256]
+""",
+        encoding="utf-8",
+    )
+    transform = {
+        "name": "identity",
+        "native_shape_hw": [256, 256],
+        "model_shape_hw": [256, 256],
+        "pad_top": 0,
+        "pad_bottom": 0,
+        "pad_left": 0,
+        "pad_right": 0,
+        "coordinate_mapping": "native_xy = model_xy - [pad_left, pad_top]",
+    }
+    split = {
+        "schema_id": "palette.pose_training_preprocessing_runtime.v2",
+        "augmentation_enabled": False,
+        "channel_transform": "luma_repeat_three",
+        "normalization": "uint8_div_255",
+        "padding_value_uint8": 0,
+        "model_input_shape_hw": [256, 256],
+        "sources": {"training.zarr": transform},
+    }
+    payload = {
+        "status": "verified",
+        "training_manifest": {
+            "path": "/durable/training.manifest.json",
+            "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        },
+        "model_input_shape_hw": [256, 256],
+        "preprocessing_contract": {
+            "spatial_transform": "auto",
+            "padding_value_uint8": 0,
+            "channel_transform": "luma_repeat_three",
+            "normalization": "uint8_div_255",
+            "interpolation": "none",
+        },
+        "effective_arguments": {
+            "status": "exact_match",
+            "effective": {
+                "imgsz": 256,
+                "rect": False,
+                "multi_scale": False,
+                "augment": False,
+            },
+        },
+        "datasets": {"train": split, "val": split},
+        "first_batch": {
+            "status": "verified",
+            "raw_dtype": "uint8",
+            "normalized_dtype": "float32",
+            "raw_shape_nchw": [8, 3, 256, 256],
+            "normalized_shape_nchw": [8, 3, 256, 256],
+        },
+    }
+    receipt = {
+        "schema_id": "palette.pose_training_runtime_receipt.v2",
+        "payload": payload,
+        "payload_sha256": mod.canonical_json_sha256(payload),
+    }
+    (root / "pose_training_runtime_receipt.json").write_text(
+        json.dumps(receipt), encoding="utf-8"
+    )
+    return root, weights
+
+
 def test_historical_contract_derives_scale_matched_runtime_plan(tmp_path: Path) -> None:
     root, weights = _package(tmp_path)
     document = _document(root)
@@ -163,6 +247,75 @@ def test_historical_contract_derives_scale_matched_runtime_plan(tmp_path: Path) 
         "pad_right": 82,
         "coordinate_mapping": "native_xy = model_xy - [pad_left, pad_top]",
     }
+
+
+def test_runtime_receipt_contract_accepts_manifest_without_imgsz(
+    tmp_path: Path,
+) -> None:
+    root, weights = _runtime_receipt_package(tmp_path)
+    with patch.object(mod.importlib.metadata, "version", return_value="8.3.214"):
+        document = build_runtime_receipt_pose_model_input_contract(
+            set_id=SET_ID,
+            run_id=RUN_ID,
+            model_package_root=root,
+            weights_relative_path=Path("weights/best.pt"),
+            training_manifest_relative_path=Path("inputs/training.manifest.json"),
+            training_report_relative_path=Path("training_report.yaml"),
+            training_args_relative_path=Path("args.yaml"),
+            training_runtime_receipt_relative_path=Path(
+                "pose_training_runtime_receipt.json"
+            ),
+            model_stride=32,
+        )
+    contract = root / "pose_model_input_contract.json"
+    contract.write_text(json.dumps(document), encoding="utf-8")
+    binding = load_pose_model_input_contract(
+        contract,
+        model_path=weights,
+        expected_set_id=SET_ID,
+        expected_run_id=RUN_ID,
+        expected_model_sha256=document["payload"]["model"]["weights"]["sha256"],
+    )
+    plan = binding.plan_for_native_shape((256, 256))
+
+    assert binding.schema_version == 3
+    assert binding.training_source_shape_hw == (256, 256)
+    assert plan.input_mode == "tensor"
+    assert plan.transform.is_identity
+    assert plan.classification == (
+        "training_runtime_receipt_verified_exact_native_identity"
+    )
+
+
+def test_runtime_receipt_contract_rejects_tampered_receipt(tmp_path: Path) -> None:
+    root, weights = _runtime_receipt_package(tmp_path)
+    with patch.object(mod.importlib.metadata, "version", return_value="8.3.214"):
+        document = build_runtime_receipt_pose_model_input_contract(
+            set_id=SET_ID,
+            run_id=RUN_ID,
+            model_package_root=root,
+            weights_relative_path=Path("weights/best.pt"),
+            training_manifest_relative_path=Path("inputs/training.manifest.json"),
+            training_report_relative_path=Path("training_report.yaml"),
+            training_args_relative_path=Path("args.yaml"),
+            training_runtime_receipt_relative_path=Path(
+                "pose_training_runtime_receipt.json"
+            ),
+            model_stride=32,
+        )
+    contract = root / "pose_model_input_contract.json"
+    contract.write_text(json.dumps(document), encoding="utf-8")
+    receipt = root / "pose_training_runtime_receipt.json"
+    receipt.write_text(receipt.read_text(encoding="utf-8") + " ", encoding="utf-8")
+
+    with pytest.raises(PoseModelInputContractError, match="digest changed"):
+        load_pose_model_input_contract(
+            contract,
+            model_path=weights,
+            expected_set_id=SET_ID,
+            expected_run_id=RUN_ID,
+            expected_model_sha256=document["payload"]["model"]["weights"]["sha256"],
+        )
 
 
 def test_contract_rejects_tampered_evidence_and_digest(tmp_path: Path) -> None:

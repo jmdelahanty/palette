@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+from fisheye.shared.heading_convention import heading_degrees
 
 
 class ChaserRelativeFrameError(ValueError):
@@ -944,11 +945,8 @@ def compute_chaser_relative_frame(
             body_source_present & body.axis_valid & ~axis_finite
         ] = "body_frame_nonfinite"
         body_reason[body_valid] = "valid"
-        body_heading[body_valid] = np.rad2deg(
-            np.arctan2(
-                -body_forward[body_valid, 1],
-                body_forward[body_valid, 0],
-            )
+        body_heading[body_valid] = heading_degrees(
+            body_forward[body_valid, 0], body_forward[body_valid, 1]
         )
         for row in range(1, n):
             if base_transition_reason[row] != "valid":

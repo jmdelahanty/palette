@@ -1,9 +1,8 @@
 {
-  "direct_read_count": 58,
+  "direct_read_count": 57,
   "entries": {
     "src/fisheye/analysis/chaser_epoch_behavior_summary.py::build_chaser_epoch_behavior_summary_result::72500c1082fc713ec396": 1,
     "src/fisheye/analysis/chaser_gaze_tracking.py::build_chaser_gaze_tracking_result::4fa701f35cc552a07348": 1,
-    "src/fisheye/analysis/chaser_phase_analysis.py::ChaserPhaseAnalyzer._load_zarr_detection_data::e1cd6e54538e6d3442f8": 1,
     "src/fisheye/analysis/chaser_quadrant_occupancy.py::build_chaser_quadrant_occupancy_result::908fe5d91ed615daf3e7": 1,
     "src/fisheye/analysis/compute_speed.py::find_fps::3833c498b9399505de9c": 1,
     "src/fisheye/analysis/compute_speed.py::find_fps::b090d84ab50dec5bbb11": 1,

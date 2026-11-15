@@ -652,6 +652,51 @@ making a selector-ineligible prerequisite silently consumable. No source
 selector, scientific Zarr, registry, shared checkout, or production publication
 was changed by this audit.
 
+### Positive-canary strict-boundary correction checkpoint (2026-09-06)
+
+The first GoodBatBadBat positive canary exposed three distinct authority kinds
+that the original core-bound adapter had compared at the wrong level. The
+sealed roster legitimately selected a complete selector-ineligible
+subject-shape candidate, but the reopen path always called the eligible loader.
+The corrected path dispatches only from the roster's exact boolean lifecycle
+snapshot and uses the existing owner-bound completed-ineligible loader; it does
+not try the eligible loader, discover another run, or fall back after failure.
+The eligible production path remains unchanged.
+
+The roster's acquisition-camera-frame record is a temporal acquisition-domain
+authority, while the chaser coordinate policy names a spatial source-camera
+pixel-frame authority. The latter embeds the former by exact record reference
+and digest. The adapter now reopens the body-origin canonical coordinate
+descriptor through the existing pixel-frame validator and proves that complete
+typed bridge, including recording, camera, source extent, and video-metadata
+identity. Camera-name equality alone is insufficient. Similarly, core motion
+binds a compact physical-authority envelope whose digest is distinct from the
+physical-frame calibration digest named by the chaser scale policy. The
+adapter now validates the envelope digest, its exact physical- and pixel-frame
+pointers, and the exact reciprocal relationship between `mm_per_pixel` and
+`pixels_per_unit`; numerical-scale similarity alone is insufficient.
+
+The live source also corrected one overly broad sentence in the 2026-09-05
+foundation checkpoint above. The declared temporal policy has always been
+`core_track_chaser_frame_intersection_v1`: every **emitted** chaser frame must
+resolve exactly one row of the selected core track, not every frame in the
+input-provenance proxy. The inspected proxy contained 149,946 unique frames;
+148,699 had exact core-track matches and 1,247 did not. The corrected adapter
+selects that deterministic exact intersection, carries the selected core-row
+indices, and records a digest-bound temporal-selection context. It never
+interpolates, carries forward, chooses a neighboring frame, substitutes another
+motion source, or repeats a core-motion fact. An empty intersection blocks.
+Generic proxy-relative publications retain their original exact-count rule;
+the subset rule is available only when the core receipt, motion row axis, fish
+projection, computed row axis, and controller timing form one closed binding.
+
+After these corrections, the ordinary public CLI completed a read-only real
+Zarr dry run with status `planned_no_writes`, selecting 148,699 frames and
+297,398 frame/chaser rows. The intended output path remained absent. This is
+local boundary evidence only; required CI, an exact-commit deployment, the
+replacement selector-ineligible chaser run, composite export, and unpatched
+reader canary remain required before the positive canary is complete.
+
 ## Composition contract
 
 ### 1. One reusable core authority roster

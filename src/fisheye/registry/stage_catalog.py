@@ -213,12 +213,13 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         id="tracks",
         aliases=("track",),
         depends_on=("arena_assignment",),
+        invalidates=("track_kinematics",),
         artifact_families=("tracks",),
         description="Track-level subject identity output.",
     ),
     StageSpec(
         id="track_kinematics",
-        depends_on=("refined_keypoints",),
+        depends_on=("refined_keypoints", "tracks"),
         invalidates=(
             "swim_bouts",
             "track_kinematics_visualization",

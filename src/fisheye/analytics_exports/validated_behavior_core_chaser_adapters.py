@@ -27,7 +27,10 @@ from fisheye.analysis_workflows.validated_behavior_source_admission import (
 )
 from fisheye.analysis_workflows.validated_behavior_cohort_adapters import sha256_file
 
-from .validated_behavior_adapters import build_phase_c_compact_row_extractors
+from .validated_behavior_adapters import (
+    _project_semantic_epoch_rows,
+    build_phase_c_compact_row_extractors,
+)
 from .validated_behavior_cohort import ValidatedBehaviorBatchSource
 from .validated_behavior_core_behavior_adapters import (
     build_core_behavior_row_extractors,
@@ -95,6 +98,7 @@ class _CompositeRoutingContext:
         self.bundle_member = bundle_member
         self.bundle_binding = bundle_binding
         self.bundle = bundle
+        self._semantic_epoch_source: Mapping[str, Any] | None = None
 
     def core_plan(self) -> dict[str, Any]:
         plan = _plain(self.plan)
@@ -174,6 +178,109 @@ class _CompositeRoutingContext:
             "bundle": _plain(self.bundle_binding),
             "capabilities": capabilities,
             "member_sha256": self.bundle_member["member_sha256"],
+        }
+
+    def semantic_epoch_source_binding(self) -> Mapping[str, Any]:
+        """Project one exact composite semantic publication for Phase-C rows."""
+
+        if self._semantic_epoch_source is not None:
+            return self._semantic_epoch_source
+        source_bindings = _mapping(
+            self.bundle.get("source_bindings"), field="composite source bindings"
+        )
+        binding = _mapping(
+            source_bindings.get("semantic_epochs"),
+            field="composite semantic-epoch binding",
+        )
+        if binding.get("binding_type") != "exact_protocol_semantic_selection_v1":
+            _fail("Composite has an unsupported semantic-epoch source binding.")
+        source = _mapping(
+            binding.get("source"), field="composite semantic-epoch source"
+        )
+        seal = _mapping(binding.get("sealed_by"), field="composite semantic-epoch seal")
+        if set(seal) != {
+            "run_path",
+            "manifest_sha256",
+            "payload_digest",
+            "receipt_path",
+            "receipt_sha256",
+        }:
+            _fail("Composite semantic-epoch seal field set is inexact.")
+        child = _mapping(
+            _mapping(
+                self.bundle.get("scientific_child_bindings"),
+                field="composite scientific child bindings",
+            ).get("semantic_epochs"),
+            field="composite semantic-epoch child",
+        )
+        if _plain(child) != _plain(seal):
+            _fail("Composite semantic-epoch child differs from its source seal.")
+
+        run_name = str(source.get("run_name"))
+        run_path = str(seal.get("run_path"))
+        receipt_path = Path(str(seal.get("receipt_path"))).expanduser().resolve()
+
+        from fisheye.analysis_workflows.protocol_semantic_chaser_selection_publication import (
+            load_protocol_semantic_chaser_selection_source_handle,
+        )
+
+        handle = load_protocol_semantic_chaser_selection_source_handle(
+            self.bundle["analysis_zarr"],
+            run_name=run_name,
+            expected_recording_id=str(self.bundle["recording_id"]),
+            direct_validation_receipt=receipt_path,
+        )
+        metadata = _mapping(
+            handle.metadata_equivalence,
+            field="semantic source metadata evidence",
+        )
+        if (
+            Path(handle.analysis_zarr).expanduser().resolve()
+            != Path(str(self.bundle["analysis_zarr"])).expanduser().resolve()
+            or handle.run_path != run_path
+            or handle.recording_id != self.bundle["recording_id"]
+            or handle.manifest_sha256 != seal.get("manifest_sha256")
+            or handle.manifest.get("payload_digest") != seal.get("payload_digest")
+            or _plain(handle.manifest) != _plain(source)
+        ):
+            _fail(
+                "Current semantic publication differs from the sealed composite source."
+            )
+        if (
+            metadata.get("receipt_sha256") != seal.get("receipt_sha256")
+            or Path(str(metadata.get("receipt_path"))).expanduser().resolve()
+            != receipt_path
+        ):
+            _fail("Current semantic receipt differs from the composite seal.")
+        projected = _mapping(
+            handle.source_binding(), field="projected semantic source binding"
+        )
+        if (
+            projected.get("run_path") != run_path
+            or projected.get("manifest_sha256") != seal.get("manifest_sha256")
+            or projected.get("selection_identity_sha256")
+            != source.get("selection_identity_sha256")
+        ):
+            _fail("Projected semantic source identity differs from its publication.")
+        self._semantic_epoch_source = projected
+        return self._semantic_epoch_source
+
+    def semantic_epoch_common(self) -> dict[str, Any]:
+        child = _mapping(
+            self.bundle["scientific_child_bindings"].get("semantic_epochs"),
+            field="composite semantic-epoch child",
+        )
+        return {
+            "export_run_id": str(self.plan["export_run_id"]),
+            "recording_id": str(self.bundle["recording_id"]),
+            "membership_member_sha256": str(self.membership_member["member_sha256"]),
+            "bundle_set_member_sha256": str(self.bundle_member["member_sha256"]),
+            "bundle_record_sha256": str(self.bundle["record_sha256"]),
+            "source_child_key": "semantic_epochs",
+            "source_run_path": str(child["run_path"]),
+            "source_manifest_sha256": str(child["manifest_sha256"]),
+            "source_payload_sha256": str(child["payload_digest"]),
+            "source_receipt_sha256": str(child["receipt_sha256"]),
         }
 
     @property
@@ -312,6 +419,15 @@ def _with_core_body_join(value: Any) -> Any:
     return projected_rows, reason
 
 
+def _composite_semantic_epochs(
+    context: _CompositeRoutingContext,
+) -> tuple[list[dict[str, Any]], str | None]:
+    return _project_semantic_epoch_rows(
+        common=context.semantic_epoch_common(),
+        source=context.semantic_epoch_source_binding(),
+    )
+
+
 def build_core_chaser_row_extractors() -> Mapping[str, Callable[..., Any]]:
     """Compose existing projectors behind one composite routing boundary."""
 
@@ -335,7 +451,11 @@ def build_core_chaser_row_extractors() -> Mapping[str, Callable[..., Any]]:
                 f"Chaser extension {table_name!r} must have exactly one installed "
                 "projector."
             )
-        routes[table_name] = ("chaser", owners[0][table_name])
+        routes[table_name] = (
+            ("composite", _composite_semantic_epochs)
+            if table_name == "semantic_epochs"
+            else ("chaser", owners[0][table_name])
+        )
 
     def wrap(
         table_name: str,
@@ -354,6 +474,8 @@ def build_core_chaser_row_extractors() -> Mapping[str, Callable[..., Any]]:
                     membership_member,
                     context.core_bundle_member(),
                 )
+            elif owner == "composite":
+                result = extractor(context)
             else:
                 result = extractor(
                     plan,

@@ -85,6 +85,7 @@ import re
 from hashlib import sha256
 from dataclasses import asdict
 from datetime import datetime, timezone
+import sys
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -135,6 +136,7 @@ from fisheye.shared.protocol_semantic_contract import (
     PALETTE_PROTOCOL_RECIPE_SCHEMA_VERSION,
     PALETTE_PROTOCOL_SNAPSHOT_SCHEMA_ID,
     PALETTE_PROTOCOL_SNAPSHOT_SCHEMA_VERSION,
+    ProtocolSemanticContractError,
     ProtocolSemanticSnapshot,
     ProtocolStepIdentity,
     read_protocol_semantic_snapshot,
@@ -319,8 +321,21 @@ def _find_default_h5_for_zarr_path(zarr_path: Path) -> Optional[Path]:
         return candidates[0]
 
 
+def _h5_items(mapping: Any) -> list[tuple[str, Any]]:
+    """Read an h5py group or attribute mapping into a list before writing Zarr.
+
+    h5py's ``items()`` iterator holds h5py's global lock (``phil``) for as long
+    as the loop runs. A Zarr call inside that loop blocks this thread on Zarr's
+    event-loop thread; if a garbage collection there frees an h5py object, the
+    object's dealloc waits for ``phil`` and both threads deadlock (CI shard
+    hangs, 2026-10-07). Materializing first releases ``phil`` before any Zarr I/O.
+    """
+
+    return list(mapping.items())
+
+
 def _copy_h5_attrs_to_zarr_attrs(src: h5py.Group | h5py.Dataset, dst: zarr.Group) -> None:
-    for attr_name, attr_value in src.attrs.items():
+    for attr_name, attr_value in _h5_items(src.attrs):
         dst.attrs[attr_name] = _normalize_attr_value(attr_value)
 
 
@@ -364,7 +379,7 @@ def _copy_h5_group_to_zarr_mirror(src: h5py.Group, dst: zarr.Group) -> None:
     for leftover in existing_children - source_children:
         del dst[leftover]
 
-    for child_name, child in src.items():
+    for child_name, child in _h5_items(src):
         if isinstance(child, h5py.Group):
             if child_name in dst and not isinstance(dst[child_name], zarr.Group):
                 del dst[child_name]
@@ -1588,10 +1603,10 @@ def _infer_camera_fps(metadata: np.ndarray) -> Optional[float]:
 def _copy_h5_tree(src: h5py.Group, dst: zarr.Group) -> None:
     """Copy an H5 group tree into Zarr, preserving attrs and simple datasets."""
 
-    for attr_name, attr_value in src.attrs.items():
+    for attr_name, attr_value in _h5_items(src.attrs):
         dst.attrs[attr_name] = _json_safe_value(_normalize_attr_value(attr_value))
 
-    for name, node in src.items():
+    for name, node in _h5_items(src):
         if isinstance(node, h5py.Group):
             child = dst.require_group(name)
             _copy_h5_tree(node, child)
@@ -3014,9 +3029,18 @@ def import_stimulus_to_zarr(
     verbose: bool,
     repair_chaser_gaps: bool = True,
     metadata_and_calibration_only: bool = False,
+    source_profile: str | None = None,
+    finalization_receipt: Path | None = None,
 ) -> str:
     """Main import routine."""
     console = Console() if verbose else None
+
+    if source_profile not in (None, "unified_experimental_h5_v1"):
+        raise ValueError(f"Unsupported explicit stimulus source profile: {source_profile!r}.")
+    if finalization_receipt is not None and source_profile is None:
+        raise ValueError("An external finalization receipt requires an explicit source profile.")
+    if source_profile is not None and (stimulus_h5 is None or metadata_and_calibration_only):
+        raise ValueError("Native unified import requires an explicit H5 and does not support metadata-only fallback.")
 
     resolved_h5: Optional[Path] = stimulus_h5
     if resolved_h5 is None:
@@ -3033,6 +3057,17 @@ def import_stimulus_to_zarr(
     # Keep this exact read-only handle alive through the final publication
     # recheck. No path reopen or cached preflight evidence is accepted.
     with h5py.File(resolved_h5.expanduser().resolve(), "r") as h5:
+        if source_profile == "unified_experimental_h5_v1":
+            from fisheye.analysis.unified_stimulus_import import import_unified_from_open_h5
+
+            return import_unified_from_open_h5(
+                h5, source_h5=resolved_h5, zarr_path=zarr_path, run_name=run_name,
+                overwrite=overwrite, finalization_receipt=finalization_receipt,
+            )
+        from fisheye.shared.unified_h5 import declared_unified_profile
+
+        if declared_unified_profile(h5) is not None:
+            raise ValueError("Native stimulus H5 requires explicit source_profile selection; legacy fallback is forbidden.")
         protocol_semantic_snapshot = read_protocol_semantic_snapshot(h5)
         protocol_execution_index = (
             read_protocol_execution_index(
@@ -3090,6 +3125,7 @@ def _import_stimulus_from_open_h5(
             root,
             subject_meta,
             source_h5_path=resolved_h5,
+            translator="h5_attributes",
         )
         publish_experiment_setup(
             root,
@@ -3659,6 +3695,10 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("zarr_path", type=Path, help="Path to the Palette Zarr archive to update.")
     parser.add_argument("--run-name", help="Optional run name inside analysis/stimulus_runs/.")
+    parser.add_argument("--source-profile", choices=("unified_experimental_h5_v1",),
+                        help="Explicit native experimental profile; produces only a selector-ineligible candidate.")
+    parser.add_argument("--finalization-receipt", type=Path,
+                        help="External exact-H5 finalization receipt required by the native unified profile.")
     parser.add_argument(
         "--overwrite",
         action="store_true",
@@ -3685,8 +3725,24 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+# Exit status for a deterministic refusal of this input: intake
+# (fisheye.intake.importing._deterministic) treats a stimulus child's exit 2
+# as a refusal (exit 65) and any other failure as possibly transient.
+EXIT_CONTRACT_REFUSAL = 2
+
+
 def main(argv: Optional[Iterable[str]] = None) -> None:
     args = parse_args(argv)
+    try:
+        _run(args)
+    except ProtocolSemanticContractError as exc:
+        # The H5's protocol contract is incomplete, stale, or uses a stimulus
+        # mode this checkout doesn't know: retrying the same input can't pass.
+        print(f"stimulus protocol contract refused: {exc}", file=sys.stderr)
+        raise SystemExit(EXIT_CONTRACT_REFUSAL) from exc
+
+
+def _run(args: argparse.Namespace) -> None:
     import_stimulus_to_zarr(
         stimulus_h5=args.stimulus_h5,
         zarr_path=args.zarr_path,
@@ -3695,6 +3751,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         verbose=not args.quiet,
         repair_chaser_gaps=not args.skip_chaser_repair,
         metadata_and_calibration_only=bool(args.metadata_and_calibration_only),
+        source_profile=args.source_profile,
+        finalization_receipt=args.finalization_receipt,
     )
 
 

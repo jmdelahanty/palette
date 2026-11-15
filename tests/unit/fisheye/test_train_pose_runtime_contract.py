@@ -137,7 +137,7 @@ def test_pose_runtime_batch_receipt_captures_actual_tensor_contract(tmp_path) ->
     receipt_path = _write_pose_runtime_receipt(state)
     assert receipt_path is not None
     document = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert document["schema_id"] == "palette.pose_training_runtime_receipt.v1"
+    assert document["schema_id"] == "palette.pose_training_runtime_receipt.v2"
     assert document["payload"]["first_batch"]["raw_dtype"] == "uint8"
     assert len(document["payload_sha256"]) == 64
 

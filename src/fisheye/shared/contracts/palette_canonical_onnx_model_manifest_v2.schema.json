@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "palette.canonical_onnx_model_manifest.v2",
+  "title": "Palette canonical ONNX model manifest (version 2)",
+  "description": "Written beside a promoted model's ONNX by fisheye.utils.promote_registered_model for pose and detect. Adopts agent-contracts orange-palette/digest_form_v1: every sha256 / *_sha256 field is a sha256:<64 lowercase hex> token, and payload_sha256 is the token of the payload's canonical_json_utf8_sort_keys_compact_v1 text. Relative paths are inside the model package. pose_model_input_contract is required for pose and absent for detect.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "schema_version",
+    "canonicalization",
+    "payload_sha256",
+    "payload"
+  ],
+  "properties": {
+    "schema_id": {
+      "const": "palette.canonical_onnx_model_manifest"
+    },
+    "schema_version": {
+      "const": 2
+    },
+    "canonicalization": {
+      "const": "canonical_json_utf8_sort_keys_compact_v1"
+    },
+    "payload_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "run_id",
+        "set_id",
+        "task",
+        "weights",
+        "onnx",
+        "source_export_manifest"
+      ],
+      "properties": {
+        "status": {
+          "const": "complete"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "set_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task": {
+          "enum": [
+            "pose",
+            "detect"
+          ]
+        },
+        "weights": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relative_path",
+            "sha256"
+          ],
+          "properties": {
+            "relative_path": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        },
+        "onnx": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relative_path",
+            "sha256"
+          ],
+          "properties": {
+            "relative_path": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        },
+        "source_export_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relative_path",
+            "sha256"
+          ],
+          "properties": {
+            "relative_path": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        },
+        "pose_model_input_contract": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relative_path",
+            "sha256",
+            "payload_sha256"
+          ],
+          "properties": {
+            "relative_path": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "payload_sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "task": {
+                "const": "pose"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "pose_model_input_contract"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "pose_model_input_contract"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

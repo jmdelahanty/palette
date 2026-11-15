@@ -309,6 +309,7 @@ def prepare_subject_position_input(
         software_sha256=canonical_json_sha256(software),
         coordinate_record=coordinate,
         coordinate_sha256=canonical_json_sha256(coordinate),
+        float32_quantization=result.float32_quantization,
     )
 
 

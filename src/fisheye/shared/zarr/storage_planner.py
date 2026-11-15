@@ -114,6 +114,8 @@ def _should_shard(intent: ArrayIntent, profile: StorageProfile, chunk_count: int
         return profile.shard_immutable
     if intent.write_mode is WriteMode.APPEND_ONLY:
         return profile.shard_owned_appends and intent.whole_shard_writes
+    if intent.write_mode is WriteMode.RANDOM_UPDATE:
+        return profile.shard_serialized_random_updates
     return False
 
 
@@ -136,6 +138,8 @@ def _allocate_shard_multipliers(
 
 
 def _write_ownership(intent: ArrayIntent, sharded: bool) -> str:
+    if sharded and intent.write_mode is WriteMode.RANDOM_UPDATE:
+        return "serialized_whole_shard_rewrite_single_writer"
     if sharded:
         return "whole_shard_single_writer"
     if intent.write_mode is WriteMode.RANDOM_UPDATE:
@@ -195,7 +199,9 @@ def plan_storage(intent: ArrayIntent, profile: StorageProfile) -> StoragePlan:
             shard_nbytes = chunk_nbytes * chunks_per_shard
             shard_byte_budget_satisfied = shard_nbytes <= profile.max_shard_bytes
             rationale.append(
-                "immutable or explicitly shard-owned multi-chunk array uses "
+                "serialized single-writer random updates rewrite one owned shard"
+                if intent.write_mode is WriteMode.RANDOM_UPDATE
+                else "immutable or explicitly shard-owned multi-chunk array uses "
                 "indexed outer sharding"
             )
             rationale.append(

@@ -7,12 +7,15 @@ from .availability import (
 )
 from .contracts import (
     ANALYSIS_WORKFLOW_SCHEMA_ID,
+    ANALYSIS_WORKFLOW_LEGACY_SCHEMA_VERSION,
     ANALYSIS_WORKFLOW_SCHEMA_VERSION,
+    ANALYSIS_WORKFLOW_SUPPORTED_SCHEMA_VERSIONS,
     AnalysisWorkflow,
     TemporalPolicy,
     WorkflowNode,
     default_core_behavior_profile_path,
     load_analysis_workflow,
+    provider_motion_core_behavior_profile_path,
 )
 from .dag import NodePlan, WorkflowPlan, plan_analysis_workflow
 from .execution import (
@@ -35,7 +38,9 @@ from .execution_profiles import (
 
 __all__ = [
     "ANALYSIS_WORKFLOW_SCHEMA_ID",
+    "ANALYSIS_WORKFLOW_LEGACY_SCHEMA_VERSION",
     "ANALYSIS_WORKFLOW_SCHEMA_VERSION",
+    "ANALYSIS_WORKFLOW_SUPPORTED_SCHEMA_VERSIONS",
     "EXECUTION_SCHEMA_ID",
     "EXECUTION_LEGACY_SCHEMA_VERSION",
     "EXECUTION_SCHEMA_VERSION",
@@ -59,5 +64,6 @@ __all__ = [
     "discover_stage_availability",
     "load_analysis_workflow",
     "plan_analysis_workflow",
+    "provider_motion_core_behavior_profile_path",
     "stage_run_relative_path",
 ]

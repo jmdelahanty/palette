@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "palette.canonical_onnx_model_manifest.v1",
+  "title": "Palette canonical ONNX model manifest (version 1)",
+  "description": "Written beside a promoted model's ONNX by fisheye.utils.promote_registered_pose_model (pose only). Digests are bare lowercase hex; payload_digest is the SHA-256 of the payload's canonical JSON (sorted keys, compact, UTF-8). Superseded for new promotions by version 2 (agent-contracts orange-palette/digest_form_v1); version 1 manifests stay valid.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "schema_version",
+    "payload_digest",
+    "payload"
+  ],
+  "properties": {
+    "schema_id": {
+      "const": "palette.canonical_onnx_model_manifest"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "payload_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "run_id",
+        "set_id",
+        "task",
+        "weights",
+        "onnx",
+        "source_export_manifest",
+        "pose_model_input_contract"
+      ],
+      "properties": {
+        "status": {
+          "const": "complete"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "set_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task": {
+          "const": "pose"
+        },
+        "weights": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relative_path",
+            "sha256"
+          ],
+          "properties": {
+            "relative_path": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "onnx": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relative_path",
+            "sha256"
+          ],
+          "properties": {
+            "relative_path": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "source_export_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relative_path",
+            "sha256"
+          ],
+          "properties": {
+            "relative_path": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "pose_model_input_contract": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relative_path",
+            "sha256",
+            "payload_digest"
+          ],
+          "properties": {
+            "relative_path": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "payload_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      }
+    }
+  }
+}

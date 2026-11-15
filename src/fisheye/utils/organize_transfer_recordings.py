@@ -1,0 +1,1646 @@
+"""Inventory-complete parent organization for the opt-in Citrus transfer v2.
+
+Original acquisition artifacts are immutable evidence, including unfamiliar
+session context. Every staged member gets explicit durable destinations; source
+retirement is a separate verified transaction step, never an incidental glob.
+Legacy organizer/default identity and serialization contracts are unchanged.
+"""
+
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import errno
+import fcntl
+import json
+import os
+import re
+from pathlib import Path
+import shutil
+import stat
+import tempfile
+
+import h5py
+
+from fisheye.shared.json_safety import write_json_atomic
+
+from fisheye.shared.recording_geometry import (
+    RECORDING_GEOMETRY_BUNDLE_RELATIVE_PATH,
+    verify_recording_geometry_bundle,
+)
+from fisheye.shared.recording_geometry_bundle import (
+    iter_recording_geometry_bundle_files,
+)
+from fisheye.shared.zebrobot_subject_reference import validate_subject_references
+from fisheye.shared.recording_manifest_context import (
+    PRODUCER_CONTEXT_SOURCE,
+    validate_recording_manifest_context,
+)
+from fisheye.shared.recording_preflight import default_preflight_payload
+from fisheye.shared.recording_transfer_snapshot import (
+    MARKER_NAME,
+    SEALER_ATTESTED_SUFFIXES,
+    SNAPSHOT_PATH,
+    TRANSFER_PARENT_LAYOUTS,
+    TransferSnapshotError,
+    file_ref,
+    plan_parent_recordings,
+    require,
+    strict_json,
+    verify_transfer_snapshot,
+)
+from fisheye.shared import recording_transfer_snapshot as _transfer_snapshot
+from fisheye.shared.source_recording_identity import (
+    SOURCE_RECORDING_ID_MAPPING_PROFILE,
+    SourceRecordingIdentity,
+)
+from fisheye.shared.type_conversions import normalize_attr
+from fisheye.shared.unified_h5 import PROFILE as UNIFIED_H5_PROFILE
+from fisheye.shared.unified_h5 import declared_unified_profile
+from fisheye.shared.unified_h5.common import MAX_JSON_BYTES
+from fisheye.shared.unified_h5.correspondence import read_acquisition_binding
+from fisheye.shared.unified_h5.schema import read_json
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+from fisheye.utils.organize_recordings import _recording_geometry_bundle_source
+
+PLAN_SCHEMA_ID = "palette.transfer_parent_organization_plan.v2"
+ARTIFACT_SCHEMA_ID = "orange_transfer_parent_v1"
+INDEX_DIRECTORY = "derived/recording_frame_index"
+INDEX_MANIFEST_NAME = "recording_frame_index_manifest.json"
+# Orange's finalized observation collection is the path authority for each
+# unified H5 and its external receipt (agent-contracts admission v2 delivery).
+# Per-parent sync-sample (keyframe) assessment of every materialized video.
+VIDEO_SYNC_ASSESSMENT = "derived/video_sync_assessment.json"
+# Folder names are readable (<acquisition session>_Cam<serial>); the hashed
+# recording_id stays the identity in the manifest, Zarr and registry.
+_SAFE_FOLDER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}")
+UNIFIED_COLLECTION_PATH = "recording_observation_bindings/finalized_collection.json"
+UNIFIED_RECEIPT_DIRECTORY = "recording_observation_bindings/receipts"
+UNIFIED_CONTEXT_FIELDS = ("recording_type", "recording_subtype", "behavior_mode")
+UNIFIED_CLAIMS_PATH = "/metadata/recording_association/claims_json"
+# /metadata/session attrs projected into the manifest, under the same names the
+# legacy organizer read from H5 root attrs. The Citrus per-Arena session_uuid is
+# recorded as citrus_session_uuid; session_uuid is the acquisition session.
+UNIFIED_SESSION_CONTEXT_KEYS = (
+    "session_start_iso8601_utc",
+    "rig_id",
+    "arena_id",
+    "canvas_name",
+    "protocol_name_from_definition",
+    "loaded_protocol_filepath",
+    "stimulus_output_width",
+    "stimulus_output_height",
+    "active_ipc_source",
+    "hostname",
+    "software_version",
+    "citrus_experiment_id",
+)
+
+
+def _strict_json_file(path: Path) -> dict:
+    raw = path.read_bytes()
+    require(len(raw) <= MAX_JSON_BYTES, f"JSON too large: {path.name}")
+    value = json.loads(raw)
+    require(isinstance(value, dict), f"JSON object required: {path.name}")
+    return value
+
+
+def _unified_h5_context(
+    source: Path, relative: str, inventory, parent_contexts: dict[str, dict]
+) -> tuple[str, dict, str]:
+    """Camera, manifest context and receipt path for one unified H5.
+
+    Identity comes from the validated acquisition binding. The receipt path
+    comes from the finalized observation collection's entry for this H5, and
+    the H5's own observation_context_id and the receipt must agree with it
+    (admission later checks the receipt's byte digest of the H5).
+    """
+
+    with h5py.File(source / relative, "r") as h5:
+        require(
+            declared_unified_profile(h5) == UNIFIED_H5_PROFILE,
+            f"unsupported unified H5 profile: {relative}",
+        )
+        binding = read_acquisition_binding(h5)
+        claims = read_json(h5, UNIFIED_CLAIMS_PATH)
+        attrs = h5["/metadata/session"].attrs
+        context = {
+            key: normalize_attr(attrs[key])
+            for key in UNIFIED_SESSION_CONTEXT_KEYS
+            if key in attrs
+        }
+        context["citrus_session_uuid"] = normalize_attr(attrs["session_uuid"])
+        declared = {key: normalize_attr(attrs[key]) for key in UNIFIED_CONTEXT_FIELDS if key in attrs}
+    require(
+        binding.camera_serial in parent_contexts,
+        f"H5 camera has no producer recording context: {relative}",
+    )
+    expected = {
+        key: parent_contexts[binding.camera_serial][key]
+        for key in UNIFIED_CONTEXT_FIELDS
+        if key in parent_contexts[binding.camera_serial]
+    }
+    # The profile leaves these attributes optional, but every one the H5 declares
+    # must equal the producer's, and a subtype-free context has no H5 subtype.
+    for key, value in declared.items():
+        require(
+            key in expected and value == expected[key],
+            f"H5 {key}={value!r} differs from the producer's "
+            f"{expected.get(key, '<not specified>')!r}: {relative}",
+        )
+    require(
+        claims.get("recording_id") == binding.acquisition_session_id,
+        f"H5 association claims and acquisition binding disagree: {relative}",
+    )
+    require(UNIFIED_COLLECTION_PATH in inventory, "finalized observation collection missing from transfer")
+    # Orange may supersede revision 1 (finalized_collection.r<N>.json, e.g. the
+    # Citrus receipt v2 upgrade); the snapshot admission proved the chain, and
+    # the head revision names the current receipts.
+    revision, head_path = _head_collection(inventory)
+    collection = _strict_json_file(source / head_path)
+    require(
+        collection.get("schema_id") == "orange.recording.observation_binding_finalization"
+        and collection.get("schema_version") == (1 if revision == 1 else 2)
+        and collection.get("revision", 1) == revision
+        and collection.get("status") == "finalized"
+        and collection.get("binding_status") == "bound"
+        and collection.get("recording_id") == binding.acquisition_session_id,
+        "finalized observation collection is not finalized, bound, and this acquisition's",
+    )
+    entries = [
+        entry
+        for entry in collection.get("observation_contexts") or []
+        if isinstance(entry, dict)
+        and (entry.get("citrus_h5") or {}).get("relative_path") == relative
+    ]
+    require(len(entries) == 1, f"H5 is not listed exactly once in the finalized collection: {relative}")
+    entry = entries[0]
+    observation = entry.get("observation_context_id")
+    require(
+        entry.get("status") == "bound" and observation == claims.get("observation_context_id"),
+        f"collection and H5 observation context disagree: {relative}",
+    )
+    receipt = (entry.get("finalized_receipt") or {}).get("relative_path")
+    require(
+        isinstance(receipt, str)
+        and receipt.startswith(UNIFIED_RECEIPT_DIRECTORY + "/")
+        and receipt in inventory,
+        f"unified H5 finalization receipt missing from transfer: {receipt}",
+    )
+    contract = _strict_json_file(source / receipt).get("contract", {})
+    require(
+        contract.get("observation_context_id") == observation
+        and contract.get("h5_artifact") == entry["citrus_h5"],
+        f"receipt does not name this H5: {receipt}",
+    )
+    context.update(
+        session_uuid=binding.acquisition_session_id,
+        camera_id=binding.camera_serial,
+        observation_context_id=observation,
+    )
+    return binding.camera_serial, context, receipt
+
+
+def _head_collection(inventory: dict) -> tuple[int, str]:
+    """(revision, path) of the newest finalized observation collection."""
+
+    revisions = {1: UNIFIED_COLLECTION_PATH}
+    for relative in inventory:
+        match = re.fullmatch(
+            r"recording_observation_bindings/finalized_collection\.r([1-9][0-9]*)\.json",
+            relative,
+        )
+        if match is not None:
+            revisions[int(match.group(1))] = relative
+    head = max(revisions)
+    return head, revisions[head]
+
+
+def _camera_h5_context(
+    source: Path, relative: str, inventory: dict, contexts: dict
+) -> tuple[str, dict, str]:
+    """Camera, context and receipt for one H5 in a new transfer-v2 delivery.
+
+    New transfer-v2 deliveries carry a sealed unified H5 or no H5 at all
+    (intake single-writer decision 1, 2026-10-07). A legacy (non-unified)
+    stimulus H5 is refused here, while planning and before any write, so it
+    can never reach the legacy stimulus/subject import. Reading, validating
+    and migrating legacy archives that already exist is unaffected.
+    """
+
+    with h5py.File(source / relative, "r") as h5:
+        unified = declared_unified_profile(h5) is not None
+    require(
+        unified,
+        "legacy (non-unified) H5 is refused for new transfer-v2 intake; a new "
+        f"recording needs a sealed unified H5 or no H5: {relative}",
+    )
+    return _unified_h5_context(source, relative, inventory, contexts)
+
+
+def _separate_destination(source: Path, destination: Path) -> Path:
+    candidate = Path(destination).absolute()
+    require(
+        not any(path.is_symlink() for path in (candidate, *candidate.parents)),
+        "organization destination contains a symlink",
+    )
+    candidate = candidate.resolve()
+    require(
+        candidate != source
+        and source not in candidate.parents
+        and candidate not in source.parents,
+        "organization destination must be separate from the staging source tree",
+    )
+    require(
+        not candidate.exists() or candidate.is_dir(),
+        "organization destination is not a directory",
+    )
+    return candidate
+
+
+def producer_manifest_context(recording_context: dict) -> dict:
+    """Manifest fields for one producer-declared parent context, never filled.
+
+    An omitted subtype (context v2) stays absent: it means "not specified".
+    """
+    context = {
+        "context_source": PRODUCER_CONTEXT_SOURCE,
+        "recording_context_schema_version": recording_context["schema_version"],
+        "artifact_schema_id": ARTIFACT_SCHEMA_ID,
+        **{
+            key: recording_context[key]
+            for key in (
+                "recording_type", "recording_subtype", "behavior_mode",
+                "recording_intent", "data_origin",
+            )
+            if key in recording_context
+        },
+    }
+    validate_recording_manifest_context(context)
+    return context
+
+
+def build_transfer_organization_plan(
+    recording_dir: Path,
+    *,
+    destination_root: Path,
+) -> dict:
+    """Assign all inventory/control bytes to exact camera parents, without writes.
+
+    Scientific context is the producer's per-camera declaration in the
+    transfer snapshot, not an operator input and not guessed from H5 presence
+    or video names. H5 camera/session mapping uses the existing producer-context
+    reader. Other session context is preserved for every parent, never dropped
+    or relabeled as camera-specific evidence. Source retention is not implied.
+    """
+    current = verify_transfer_snapshot(recording_dir)
+    parents = plan_parent_recordings(current)
+    contexts = {parent.camera_id: parent.recording_context for parent in parents}
+    manifest_contexts = {
+        camera: producer_manifest_context(context) for camera, context in contexts.items()
+    }
+    source = current.root
+    destination = _separate_destination(source, destination_root)
+    inventory = {item["path"]: dict(item) for item in current.snapshot["inventory"]}
+    for control in (MARKER_NAME, SNAPSHOT_PATH):
+        require(control not in inventory, "transfer control overlaps payload inventory")
+        inventory[control] = file_ref(source, control)
+    # Citrus excludes its namespace controls from scientific payload inventory.
+    # Preserve every regular control byte through an explicit organization-plan
+    # binding as well; the copied lock is historical context, not a live lease.
+    source_files, _ = _source_members(source)
+    for relative in sorted(set(source_files) - set(inventory)):
+        require(relative.startswith("_citrus_transfer/"), "unplanned source artifact")
+        inventory[relative] = file_ref(source, relative)
+    session = strict_json(source / "recording_session.json")
+    # Orange's sealed per-camera Zebrobot references (absent in older sessions).
+    subject_references = (
+        validate_subject_references(
+            session["subject_references"], [parent.camera_id for parent in parents]
+        )
+        if "subject_references" in session
+        else {}
+    )
+
+    # Explicit producer refs, not filenames, own camera artifacts. All other
+    # payload members stay durable session context unless the H5 owner binds
+    # them to one exact camera. No partial camera snapshot is manufactured.
+    camera_owners: dict[str, tuple[str, str]] = {}
+    for source_parent in current.snapshot["parents"]:
+        camera = source_parent["parent_key"]["camera_serial"]
+        for clip in source_parent["clips"]:
+            for output in clip["outputs"]:
+                refs = [
+                    output[field]
+                    for field in ("video", "metadata", "container_finalization")
+                ]
+                refs.extend(sidecar["artifact"] for sidecar in output["sidecars"])
+                for artifact in refs:
+                    relative = artifact["path"]
+                    owner = camera_owners.setdefault(
+                        relative, (camera, "camera_output")
+                    )
+                    require(
+                        owner == (camera, "camera_output"),
+                        "conflicting camera artifact ownership",
+                    )
+
+    by_camera = {parent.camera_id: parent for parent in parents}
+    h5_by_camera: dict[str, str] = {}
+    receipt_by_camera: dict[str, str] = {}
+    producer_context: dict[str, dict] = {}
+    for relative in inventory:
+        if Path(relative).suffix.lower() not in (".h5", ".hdf5"):
+            continue
+        camera, metadata, receipt = _camera_h5_context(
+            source, relative, inventory, contexts
+        )
+        require(
+            camera in by_camera and "error" not in metadata,
+            f"H5 lacks a readable exact camera binding: {relative}",
+        )
+        declared_session = metadata.get("session_uuid")
+        require(
+            declared_session is None
+            or declared_session == by_camera[camera].session_uuid,
+            f"H5 session identity differs from its transfer: {relative}",
+        )
+        require(
+            camera not in h5_by_camera,
+            f"multiple H5 sources for one parent camera: {camera}",
+        )
+        require(
+            relative not in camera_owners,
+            "H5 overlaps a declared camera media artifact",
+        )
+        camera_owners[relative] = (camera, "camera_h5")
+        h5_by_camera[camera] = relative
+        receipt_by_camera[camera] = receipt
+        producer_context[camera] = dict(metadata)
+
+    # Sealer 3.1.0 (snapshot v3): receipt-v2-declared Citrus artifacts, such as
+    # the stimulus video, belong to the camera whose H5 shares their Citrus
+    # session (the sealer requires citrus/<citrus_session_uuid>_<protocol>.h5).
+    for row in current.snapshot.get("citrus_artifacts", []):
+        relative = row["path"]
+        owners = [
+            camera
+            for camera, h5 in h5_by_camera.items()
+            if h5.startswith(f"citrus/{row['citrus_session_uuid']}_")
+        ]
+        require(
+            len(owners) == 1,
+            f"Citrus artifact has no single H5 camera owner: {relative}",
+        )
+        owner = camera_owners.setdefault(relative, (owners[0], "camera_citrus_artifact"))
+        require(
+            owner == (owners[0], "camera_citrus_artifact"),
+            f"Citrus artifact has conflicting ownership: {relative}",
+        )
+
+    # Orange's realtime-products declaration (2026-10-08 on) names each camera's
+    # own event logs, perf and diagnostic CSVs; they go only to that camera.
+    for camera, relative in _declared_realtime_product_files(
+        session, [parent.camera_id for parent in parents]
+    ):
+        require(relative in inventory, f"declared realtime product is not delivered: {relative}")
+        owner = camera_owners.setdefault(relative, (camera, "camera_realtime_product"))
+        # A declared file may already be this camera's own clip output (Orange
+        # declares the crop metadata CSV under crop_files); it keeps its output
+        # placement. Any other owner, or another camera, is a contradiction.
+        require(
+            owner in ((camera, "camera_realtime_product"), (camera, "camera_output")),
+            f"realtime product file has conflicting ownership: {relative}",
+        )
+
+    geometry_source = _recording_geometry_bundle_source(source)
+    geometry_files: set[str] = set()
+    geometry = None
+    if geometry_source is not None:
+        checked = verify_recording_geometry_bundle(
+            geometry_source, require_snapshot_pointer=False, verify_all_assets=True
+        )
+        geometry_files = {
+            path.relative_to(source).as_posix()
+            for path in iter_recording_geometry_bundle_files(geometry_source)
+        }
+        require(
+            geometry_files <= set(inventory),
+            "geometry member is not in the transfer inventory",
+        )
+        require(
+            not geometry_files.intersection(camera_owners),
+            "geometry and camera ownership conflict",
+        )
+        geometry = {
+            "schema_id": "palette.recording_geometry_bundle.v1",
+            "relative_path": RECORDING_GEOMETRY_BUNDLE_RELATIVE_PATH.as_posix(),
+            "source_root": str(geometry_source),
+            "contract_sha256": checked.contract_sha256,
+            "manifest_sha256": checked.manifest_sha256,
+            "manifest_file_count": checked.manifest_file_count,
+            "materialized_asset_status": checked.materialized_asset_status.value,
+            "snapshot_pointer_status": checked.snapshot_pointer_status,
+            "verification_status": "verified",
+        }
+
+    records = []
+    folder_names: set[str] = set()
+    for parent in parents:
+        identity = SourceRecordingIdentity(
+            parent.recording_id,
+            parent.session_uuid,
+            parent.camera_id,
+            SOURCE_RECORDING_ID_MAPPING_PROFILE,
+        )
+        record = {
+            "identity": identity.manifest_fields(),
+            "recording_name": (name := _readable_folder_name(parent, folder_names)),
+            "destination_dir": str(destination / name),
+            "recording_layout": parent.recording_layout,
+            # Producer label, preserved as given (single_video vs rolling_clips);
+            # Palette stores every transfer-v2 parent as a clip collection.
+            "acquisition_recording_layout": parent.recording_layout,
+            "total_frames": parent.total_frames,
+            "clip_count": len(parent.clips),
+            "output_kinds": sorted(
+                output.output_kind for output in parent.clips[0].outputs
+            ),
+            "context": manifest_contexts[parent.camera_id],
+            "context_source": PRODUCER_CONTEXT_SOURCE,
+            # H5 metadata never supplies scientific context the producer omitted.
+            "producer_context": {
+                key: value
+                for key, value in producer_context.get(parent.camera_id, {}).items()
+                if key not in UNIFIED_CONTEXT_FIELDS
+            },
+            "h5_relative_path": (
+                f"raw/acquisition/{h5_by_camera[parent.camera_id]}"
+                if parent.camera_id in h5_by_camera
+                else None
+            ),
+            "h5_finalization_receipt_relative_path": (
+                f"raw/acquisition/{receipt_by_camera[parent.camera_id]}"
+                if parent.camera_id in receipt_by_camera
+                else None
+            ),
+            "recording_geometry_bundle": geometry,
+            "zebrobot_subject_reference": subject_references.get(parent.camera_id),
+        }
+        records.append(record)
+
+    files = []
+    targets_seen: set[tuple[str, str]] = set()
+    for relative, artifact in sorted(inventory.items()):
+        camera, role = camera_owners.get(relative, (None, "session_context"))
+        selected = parents if camera is None else (by_camera[camera],)
+        if relative in geometry_files:
+            role = "geometry_bundle"
+            prefix = RECORDING_GEOMETRY_BUNDLE_RELATIVE_PATH.as_posix()
+        elif role == "camera_output":
+            prefix = "cams/acquisition"
+        else:
+            prefix = "raw/acquisition"
+        targets = []
+        for parent in selected:
+            target = f"{prefix}/{relative}"
+            if relative == "ptp_sync_summary.json" and role == "session_context":
+                # The clock owner has an established canonical summary locator.
+                # Preserve these original bytes, not a new inferred clock claim.
+                target = "raw/ptp_sync_summary.json"
+            key = (parent.recording_id, target)
+            require(key not in targets_seen, "duplicate organized destination")
+            targets_seen.add(key)
+            targets.append(
+                {"recording_id": parent.recording_id, "relative_path": target}
+            )
+        files.append(
+            {
+                "source": artifact,
+                "role": role,
+                "camera_id": camera,
+                "destinations": targets,
+            }
+        )
+    require(len(files) == len(inventory), "organization omitted source files")
+    plan = {
+        "schema_id": PLAN_SCHEMA_ID,
+        "source_dir": str(source),
+        "destination_root": str(destination),
+        "snapshot_id": current.snapshot_id,
+        "transfer_attempt_id": current.attempt_id,
+        **({"transfer_sealer": current.sealer} if current.sealer is not None else {}),
+        "recording_layout": current.recording_layout,
+        "recording_payload_kind": current.recording_payload_kind,
+        "acquisition_session_id": current.snapshot["acquisition_session_id"],
+        "orange_producer": session.get("producer"),
+        "parents": records,
+        "files": files,
+        "status": "organization_planned",
+        "import_complete": False,
+        "staging_finalized": False,
+    }
+    return {**plan, "plan_sha256": canonical_json_sha256(plan)}
+
+
+DIRECTORY_IDENTITY_SCHEMA_ID = "palette.transfer_directory_identity.v2"
+_NFS_FILESYSTEM_TYPES = frozenset({"nfs", "nfs4"})
+
+
+def _mountinfo_text() -> str:
+    return Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+
+
+def _unescape_mountinfo(value: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+
+def _mount_of(path: Path) -> dict | None:
+    """The deepest mount containing canonical ``path``, or None."""
+    matches = []
+    for line in _mountinfo_text().splitlines():
+        before, separator, after = line.partition(" - ")
+        fields, trailing = before.split(), after.split()
+        if not separator or len(fields) < 5 or len(trailing) < 2:
+            continue
+        mount_point = Path(_unescape_mountinfo(fields[4]))
+        if mount_point == path or mount_point in path.parents:
+            major, _, minor = fields[2].partition(":")
+            matches.append(
+                {
+                    "mount_point": mount_point,
+                    "device": os.makedev(int(major), int(minor)),
+                    "fstype": trailing[0],
+                    "source": _unescape_mountinfo(trailing[1]),
+                }
+            )
+    return max(matches, key=lambda item: len(item["mount_point"].parts), default=None)
+
+
+def _directory_stat(path: Path) -> os.stat_result:
+    require(
+        not any(p.is_symlink() for p in (path, *path.parents)),
+        "directory contains a symlink",
+    )
+    current = path.lstat()
+    require(stat.S_ISDIR(current.st_mode), "expected a real directory")
+    return current
+
+
+def _filesystem_identity(path: Path, current: os.stat_result) -> dict:
+    mount = _mount_of(path)
+    if mount is not None and mount["fstype"] in _NFS_FILESYSTEM_TYPES:
+        # NFS st_dev is assigned per client host (98 on a batch node, 51 on
+        # ws1, 78 on login1 for one inode), so the export names the filesystem.
+        # The mount must own the directory's device, so an automount trigger or
+        # a stale parent mount is never mistaken for it.
+        require(
+            mount["device"] == current.st_dev,
+            f"NFS mount of {path} does not own its device",
+        )
+        return {"kind": "nfs_export", "fstype": mount["fstype"], "source": mount["source"]}
+    return {"kind": "local_device", "st_dev": current.st_dev}
+
+
+def _directory_identity(path: Path) -> dict:
+    current = _directory_stat(path)
+    return {
+        "schema_id": DIRECTORY_IDENTITY_SCHEMA_ID,
+        "filesystem": _filesystem_identity(path, current),
+        "st_ino": current.st_ino,
+    }
+
+
+def _require_directory(path: Path, expected: dict | list[int]) -> None:
+    """Refuse unless ``path`` is still the recorded directory.
+
+    A v1 record ``[st_dev, st_ino]`` (written before the versioned form) is
+    accepted on the recording host's device, or on an NFS export when the inode
+    matches: only the per-host st_dev is ignored. ``path`` is always the
+    plan-bound canonical path the record was written for (the plan is digest
+    bound in the same state), and symlinks are refused, so the path is unchanged.
+    """
+    if isinstance(expected, list):
+        current = _directory_stat(path)
+        require(
+            str(path.resolve()) == str(path)
+            and len(expected) == 2
+            and current.st_ino == expected[1]
+            and (
+                current.st_dev == expected[0]
+                or _filesystem_identity(path, current)["kind"] == "nfs_export"
+            ),
+            f"directory ownership lost: {path}",
+        )
+        return
+    require(_directory_identity(path) == expected, f"directory ownership lost: {path}")
+
+
+def _state_directory(plan: dict) -> Path:
+    return (
+        Path(plan["destination_root"])
+        / ".transfer_intake"
+        / plan["snapshot_id"].removeprefix("sha256:")
+    )
+
+
+def _validate_plan(plan: dict, *, live_source: bool) -> None:
+    unsigned = {key: value for key, value in plan.items() if key != "plan_sha256"}
+    require(plan.get("schema_id") == PLAN_SCHEMA_ID, "invalid organization plan schema")
+    require(
+        canonical_json_sha256(unsigned) == plan.get("plan_sha256"),
+        "organization plan digest differs",
+    )
+    source = Path(plan["source_dir"])
+    destination = Path(plan["destination_root"])
+    require(
+        str(source.resolve()) == str(source)
+        and str(destination.resolve()) == str(destination),
+        "organization plan paths must be canonical absolute paths",
+    )
+    # A completed delivery's empty staging folder may since have been removed
+    # (register_completed_imports does so after registration); every
+    # live-source use and every not-yet-complete stage still requires it.
+    if live_source or os.path.lexists(source):
+        _directory_identity(source)
+    _separate_destination(source, destination)
+    if live_source:
+        rebuilt = build_transfer_organization_plan(
+            Path(plan["source_dir"]),
+            destination_root=Path(plan["destination_root"]),
+        )
+        require(rebuilt == plan, "organization plan differs from live source")
+
+
+def _fsync_regular_file(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        require(
+            stat.S_ISREG(os.fstat(descriptor).st_mode),
+            "durability target is not regular",
+        )
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_directory(path: Path) -> None:
+    current = _directory_stat(path)
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(descriptor)
+        require(
+            (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino),
+            "durability directory changed",
+        )
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _device(path: Path) -> int:
+    return os.stat(path).st_dev
+
+
+def _same_filesystem_ancestors(directory: Path) -> list[Path]:
+    """``directory`` and its parents up to the filesystem boundary.
+
+    Intake cannot create a mount point, and fsync of an automount root such
+    as /groups returns EINVAL, so durability barriers stop at the boundary.
+    """
+
+    device = _device(directory)
+    chain = []
+    for path in (directory, *directory.parents):
+        if _device(path) != device:
+            break
+        chain.append(path)
+    return chain
+
+
+def _sync_directory_chain(directory: Path) -> None:
+    # mkdir(parents=True) may have introduced any of these entries.
+    for path in _same_filesystem_ancestors(directory):
+        _fsync_directory(path)
+
+
+@contextmanager
+def _coordinator_lock(plan: dict, *, kind: str):
+    directory = _state_directory(plan)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    lock_directory_identity = _directory_identity(directory.parent)
+    lock_path = directory.with_suffix(kind)
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_stat = os.fstat(handle.fileno())
+        require(stat.S_ISREG(lock_stat.st_mode), "coordinator lock is not regular")
+
+        def verify_lock():
+            _require_directory(directory.parent, lock_directory_identity)
+            current = lock_path.lstat()
+            require(
+                (current.st_dev, current.st_ino)
+                == (lock_stat.st_dev, lock_stat.st_ino),
+                "coordinator lock ownership lost",
+            )
+
+        verify_lock()
+        yield verify_lock, handle.fileno()
+        verify_lock()
+        # Close, never explicit LOCK_UN: an inherited writer descriptor must
+        # retain the lease if its supervisor exits before the writer does.
+
+
+@contextmanager
+def transfer_parent_workflow_lock(plan: dict):
+    """Exclude a second cooperating importer for the entire prepare/import/retire."""
+    _validate_plan(plan, live_source=False)
+    with _coordinator_lock(plan, kind=".workflow.lock") as verify:
+        yield verify
+
+
+@contextmanager
+def _organization_state(plan: dict):
+    """Short recovery-state transaction, separate from the encompassing lease."""
+    directory = _state_directory(plan)
+    with _coordinator_lock(plan, kind=".lock") as (verify_lock, _lock_fd):
+        if directory.exists():
+            state = strict_json(directory / "organization_state.json")
+            require(state.get("plan") == plan, "existing coordinator has another plan")
+            _require_directory(directory, state["state_directory_identity"])
+        else:
+            directory.mkdir(exist_ok=False)
+            state = {
+                "schema_id": "palette.transfer_organization_state.v2",
+                "plan": plan,
+                "state_directory_identity": _directory_identity(directory),
+                "source_directory_identity": _directory_identity(
+                    Path(plan["source_dir"])
+                ),
+                "parent_directory_identities": {},
+                "status": "reserved",
+                "import_complete": False,
+                "staging_finalized": False,
+            }
+            write_json_atomic(
+                directory / "organization_state.json", state, overwrite=False
+            )
+            _sync_directory_chain(directory)
+
+        def save():
+            _require_directory(directory, state["state_directory_identity"])
+            verify_lock()
+            write_json_atomic(directory / "organization_state.json", state)
+            _sync_directory_chain(directory)
+
+        yield state, save
+
+
+_WRITE_BITS = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+
+
+def _make_sealed_media_read_only(path: Path) -> None:
+    """Clear every write bit on an organized video/H5 copy (audit H1).
+
+    A hard-linked copy shares its inode with the staged file, so the staged
+    name becomes read-only too; retirement unlinks it, which needs only
+    directory write permission.
+    """
+
+    if Path(path).suffix.lower() not in SEALER_ATTESTED_SUFFIXES:
+        return
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode), f"not a regular artifact: {path}")
+    if info.st_mode & _WRITE_BITS:
+        os.chmod(path, stat.S_IMODE(info.st_mode) & ~_WRITE_BITS)
+
+
+class _SealedSourceIdentity:
+    """Proves a large sealed video/H5 copy is the staged file, without hashing.
+
+    For a marker v3 delivery sealed by citrus-recording-transfer >= 2.0.1
+    (``transfer_sealer`` in the plan; sealer_reads_storage) the sealer hashed
+    every staged file before writing the marker, and Palette's snapshot check
+    accepts a large video/H5 file of the sealed size modified no later than the
+    marker. A hard-linked copy is that same file. While the staged file is
+    present, a copy is proven when it has the staged file's device, inode, size
+    and mtime and the staged file passes that check against the staged marker
+    (whose bytes must still be the sealed marker's). After the staged name was
+    retired, the copy must have the inode, size and mtime that retirement
+    recorded for it. An organized copy must also have no write bits (it was
+    made read-only when organized). Anything else, including a writable or
+    cross-filesystem copy, is hashed in full.
+    """
+
+    def __init__(self, plan: dict, state: dict | None):
+        # Only a sealer that hashed storage (citrus-recording-transfer >= 2.0.1).
+        self.enabled = _transfer_snapshot.sealer_reads_storage(plan.get("transfer_sealer"))
+        self.source = Path(plan["source_dir"])
+        self.retired = ((state or {}).get("retirement_files") or {}) if self.enabled else {}
+        self.marker_mtime_ns = self._staged_marker_mtime(plan) if self.enabled else None
+
+    def _staged_marker_mtime(self, plan: dict) -> int | None:
+        sealed = next(
+            (item["source"] for item in plan["files"] if item["source"]["path"] == MARKER_NAME),
+            None,
+        )
+        marker = self.source / MARKER_NAME
+        if sealed is None or marker.is_symlink() or not marker.is_file():
+            return None
+        actual = file_ref(self.source, MARKER_NAME)
+        if (actual["sha256"], actual["size_bytes"]) != (sealed["sha256"], sealed["size_bytes"]):
+            return None
+        return marker.lstat().st_mtime_ns
+
+    def proves(self, path: Path, expected: dict) -> bool:
+        if not (
+            self.enabled
+            and expected["size_bytes"] >= _transfer_snapshot.SEALER_ATTESTED_MIN_BYTES
+            and Path(expected["path"]).suffix.lower() in SEALER_ATTESTED_SUFFIXES
+        ):
+            return False
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size != expected["size_bytes"]:
+            return False
+        staged_path = self.source / expected["path"]
+        if path != staged_path and info.st_mode & _WRITE_BITS:
+            return False
+        if self.marker_mtime_ns is not None:
+            try:
+                staged = staged_path.lstat()
+            except FileNotFoundError:
+                staged = None
+            if staged is not None:
+                return (
+                    stat.S_ISREG(staged.st_mode)
+                    and staged.st_size == expected["size_bytes"]
+                    and staged.st_mtime_ns <= self.marker_mtime_ns
+                    and (staged.st_dev, staged.st_ino, staged.st_mtime_ns)
+                    == (info.st_dev, info.st_ino, info.st_mtime_ns)
+                )
+        recorded = self.retired.get(expected["path"])
+        return recorded is not None and list(recorded[1:]) == [
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+        ]
+
+
+def _matches_file(
+    root: Path,
+    relative: str,
+    expected: dict,
+    identity: _SealedSourceIdentity | None = None,
+) -> None:
+    path = root / relative
+    require(
+        not any(p.is_symlink() for p in (path, *path.parents)),
+        "artifact path contains a symlink",
+    )
+    if identity is not None and identity.proves(path, expected):
+        return
+    actual = file_ref(root, relative)
+    require(
+        (actual["sha256"], actual["size_bytes"])
+        == (expected["sha256"], expected["size_bytes"]),
+        f"organized/source artifact differs: {path}",
+    )
+
+
+def _materialize_file(
+    source: Path,
+    destination: Path,
+    expected: dict,
+    identity: _SealedSourceIdentity | None = None,
+) -> None:
+    """Atomic no-clobber link, or bounded copy across filesystems."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _directory_identity(destination.parent)
+    if destination.exists() or destination.is_symlink():
+        _matches_file(destination.parent, destination.name, expected, identity)
+        _make_sealed_media_read_only(destination)
+        return
+    _matches_file(source.parent, source.name, expected, identity)
+    try:
+        os.link(source, destination, follow_symlinks=False)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        # A unique temporary belongs to this invocation only. Never overwrite
+        # or remove a pre-existing destination on failure or retry.
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=destination.parent, suffix=".intake-partial", delete=False
+            ) as output:
+                temporary = Path(output.name)
+                with source.open("rb") as input_file:
+                    shutil.copyfileobj(input_file, output, length=4 * 1024 * 1024)
+                output.flush()
+                os.fsync(output.fileno())
+            _matches_file(temporary.parent, temporary.name, expected)
+            os.link(temporary, destination, follow_symlinks=False)
+        finally:
+            if temporary is not None:
+                temporary.unlink()
+    # Before the final check, so a linked copy can be proven by identity.
+    _make_sealed_media_read_only(destination)
+    _matches_file(destination.parent, destination.name, expected, identity)
+
+
+def _verify_materialized_files(
+    plan: dict, state: dict, *, recording_ids: frozenset[str] | None = None
+) -> None:
+    """Check every organized copy, or only the copies of the named parents.
+
+    A scoped check is a per-parent builder's own-source recheck; the whole
+    delivery is still verified before and after the per-parent work and at
+    every retirement step.
+    """
+    for parent in plan["parents"]:
+        key = parent["identity"]["recording_id"]
+        if recording_ids is not None and key not in recording_ids:
+            continue
+        _require_directory(
+            _parent_directory(plan, key), state["parent_directory_identities"][key]
+        )
+    identity = _SealedSourceIdentity(plan, state)
+    for item in plan["files"]:
+        for target in item["destinations"]:
+            if recording_ids is not None and target["recording_id"] not in recording_ids:
+                continue
+            _matches_file(
+                _parent_directory(plan, target["recording_id"]),
+                target["relative_path"],
+                item["source"],
+                identity,
+            )
+
+
+def _flush_parent_publications(plan: dict, state: dict) -> None:
+    """Make payloads, import products and all directory entries durable first.
+
+    Receipt validation proves content, not persistence across power loss. This
+    barrier is required even for hardlinks and on a partial-retirement retry.
+    Only the exact owned parent trees are traversed; symlinks are refused.
+    """
+    directories = set()
+    for parent in plan["parents"]:
+        root = Path(parent["destination_dir"])
+        _require_directory(
+            root,
+            state["parent_directory_identities"][parent["identity"]["recording_id"]],
+        )
+        for directory, names, filenames in os.walk(root, followlinks=False):
+            current = Path(directory)
+            _directory_identity(current)
+            directories.add(current)
+            for name in names:
+                _directory_identity(current / name)
+            for name in filenames:
+                _fsync_regular_file(current / name)
+        directories.update(_same_filesystem_ancestors(root))
+    for directory in sorted(directories, key=lambda p: len(p.parts), reverse=True):
+        _fsync_directory(directory)
+
+
+def materialize_transfer_organization(plan: dict) -> dict:
+    """Preserve the entire source inventory in exact owned parent directories.
+
+    This does not admit a recording or retire staging. Retry verifies the same
+    source generation, reservation identities and all already-written bytes.
+    Final parents are reserved before index/receipt creation: persisted absolute
+    paths and live-file fingerprints must never be invalidated by later rename.
+    """
+    _validate_plan(plan, live_source=True)
+    with _organization_state(plan) as (state, save):
+        require(
+            state["status"] in {"reserved", "materialized"},
+            "organization is already past materialization",
+        )
+        source = Path(plan["source_dir"])
+        _require_directory(source, state["source_directory_identity"])
+        for parent in plan["parents"]:
+            key = parent["identity"]["recording_id"]
+            directory = Path(parent["destination_dir"])
+            expected = state["parent_directory_identities"].get(key)
+            if expected is None:
+                directory.mkdir(exist_ok=False)
+                state["parent_directory_identities"][key] = _directory_identity(
+                    directory
+                )
+                save()
+            else:
+                _require_directory(directory, expected)
+        identity = _SealedSourceIdentity(plan, state)
+        for item in plan["files"]:
+            for target in item["destinations"]:
+                parent = _parent_directory(plan, target["recording_id"])
+                _require_directory(
+                    parent, state["parent_directory_identities"][target["recording_id"]]
+                )
+                _materialize_file(
+                    source / item["source"]["path"],
+                    parent / target["relative_path"],
+                    item["source"],
+                    identity,
+                )
+        _validate_plan(plan, live_source=True)
+        _verify_materialized_files(plan, state)
+        state["status"] = "materialized"
+        save()
+        return state
+
+
+def resolve_materialized_parent_sources(
+    plan: dict, *, camera_id: str
+) -> tuple[Path, dict[str, str]]:
+    """Read and verify the organizer's exact source-to-parent path projection."""
+    _validate_plan(plan, live_source=True)
+    directory = _state_directory(plan)
+    state = strict_json(directory / "organization_state.json")
+    require(state.get("plan") == plan, "organization state has another plan")
+    _require_directory(directory, state["state_directory_identity"])
+    require(state["status"] == "materialized", "parent sources are not materialized")
+    parents = [p for p in plan["parents"] if p["identity"]["camera_id"] == camera_id]
+    require(len(parents) == 1, "camera does not select one organized parent")
+    parent = parents[0]
+    # The builder rechecks its own parent's copies; the whole delivery was
+    # verified when materialized and is verified again after every builder.
+    _verify_materialized_files(
+        plan, state, recording_ids=frozenset({parent["identity"]["recording_id"]})
+    )
+    mapping = {
+        item["source"]["path"]: target["relative_path"]
+        for item in plan["files"]
+        for target in item["destinations"]
+        if target["recording_id"] == parent["identity"]["recording_id"]
+    }
+    return Path(parent["destination_dir"]), mapping
+
+
+def _verify_parent_index(plan: dict, parent: dict) -> dict:
+    directory = Path(parent["destination_dir"]) / INDEX_DIRECTORY
+    manifest = strict_json(directory / "recording_frame_index_manifest.json")
+    binding = manifest.get("source_transfer", {})
+    require(
+        manifest.get("status") == "ok"
+        and manifest.get("dry_run") is False
+        and manifest.get("row_count") == parent["total_frames"]
+        and manifest.get("camera_serials") == [parent["identity"]["camera_id"]]
+        and binding.get("organization_plan_sha256") == plan["plan_sha256"]
+        and binding.get("snapshot_id") == plan["snapshot_id"]
+        and binding.get("recording_id") == parent["identity"]["recording_id"]
+        and binding.get("organized_recording_root") == parent["destination_dir"],
+        "parent index does not bind its exact organization plan",
+    )
+    for filename, field in (
+        ("recording_frame_index.parquet", "parquet_sha256"),
+        ("recording_clip_index.json", "recording_clip_index_sha256"),
+    ):
+        actual = file_ref(directory, filename)
+        require(
+            actual["sha256"] == manifest.get(field),
+            "parent index payload digest differs",
+        )
+    projections = manifest.get("projected_clip_manifests")
+    require(
+        isinstance(projections, list) and len(projections) == parent["clip_count"],
+        "parent index projection inventory differs",
+    )
+    for artifact in projections:
+        require(
+            file_ref(directory, artifact["path"]) == artifact,
+            "parent clip projection digest differs",
+        )
+    return manifest
+
+
+def _declared_realtime_product_files(
+    session: Mapping[str, Any], cameras: list[str]
+) -> list[tuple[str, str]]:
+    """(camera, recording-relative path) of each file Orange declares per camera.
+
+    Covers the detection and pose files, crop_files and acquisition_files of
+    ``realtime_products``; empty when the session predates the declaration.
+    """
+
+    from fisheye.shared.orange_realtime_products import (
+        PRODUCTS,
+        RealtimeProductsError,
+        realtime_products_declaration,
+    )
+
+    try:
+        block = realtime_products_declaration(session, cameras=cameras)
+    except RealtimeProductsError as exc:
+        raise TransferSnapshotError(str(exc)) from exc
+    if block is None:
+        return []
+    declared = []
+    for camera, products in sorted(block["cameras"].items()):
+        groups = [products[name]["files"] for name in PRODUCTS]
+        groups += [products["crop_files"], products["acquisition_files"]]
+        for group in groups:
+            declared.extend((camera, item["path"]) for item in group)
+    return declared
+
+
+def _readable_folder_name(parent, taken: set[str]) -> str:
+    name = f"{parent.session_uuid}_Cam{parent.camera_id}"
+    require(
+        _SAFE_FOLDER_NAME.fullmatch(name) is not None,
+        f"recording folder name is not filesystem-safe: {name!r}",
+    )
+    require(name not in taken, f"two parents share a recording folder name: {name}")
+    taken.add(name)
+    return name
+
+
+def _parent_directory(plan: dict, recording_id: str) -> Path:
+    """The recorded destination of one parent; never derived from its id."""
+
+    matches = [
+        Path(parent["destination_dir"])
+        for parent in plan["parents"]
+        if parent["identity"]["recording_id"] == recording_id
+    ]
+    require(len(matches) == 1, f"unknown or duplicate parent: {recording_id}")
+    return matches[0]
+
+
+def _video_sync_assessment(plan: dict, parent: dict) -> dict:
+    """Keyframe/sync-sample check of every materialized video, fail-closed.
+
+    The same check the retired organizer ran on apply
+    (``diagnostics.video.container.check_hevc_keyframe_flags``), now recorded
+    per parent. An unreadable container or Orange evidence contradicting the
+    MP4's sync-sample declaration refuses intake rather than warning.
+    """
+    from fisheye.diagnostics.video.container import check_hevc_keyframe_flags
+
+    key = parent["identity"]["recording_id"]
+    directory = Path(parent["destination_dir"])
+    videos = sorted(
+        target["relative_path"]
+        for item in plan["files"]
+        if item["role"] == "camera_output"
+        for target in item["destinations"]
+        if target["recording_id"] == key
+        and Path(target["relative_path"]).suffix.lower() in (".mp4", ".mov", ".mkv")
+    )
+    assessments = {}
+    for relative in videos:
+        result = check_hevc_keyframe_flags(directory / relative)
+        require(
+            result.get("container_inspection_status") == "ok",
+            f"video sync samples cannot be verified: {relative}: {result.get('message')}",
+        )
+        require(
+            result.get("sync_sample_proof") != "orange_idr_sidecar_contradiction",
+            f"Orange sync-sample evidence contradicts {relative}: {result.get('message')}",
+        )
+        assessments[relative] = result
+    return {"schema_id": "palette.transfer_parent_video_sync_assessment.v1", "videos": assessments}
+
+
+def _parent_manifest(plan: dict, parent: dict) -> dict:
+    key = parent["identity"]["recording_id"]
+    files = {"raw": [], "cams": [], "derived": [INDEX_DIRECTORY + "/", VIDEO_SYNC_ASSESSMENT]}
+    mapping = []
+    for item in plan["files"]:
+        for target in item["destinations"]:
+            if target["recording_id"] == key:
+                relative = target["relative_path"]
+                files[relative.split("/", 1)[0]].append(relative)
+                mapping.append(
+                    {
+                        "source": item["source"],
+                        "relative_path": relative,
+                        "role": item["role"],
+                    }
+                )
+    return {
+        **parent["producer_context"],
+        **parent["identity"],
+        **parent["context"],
+        "recording_name": parent["recording_name"],
+        "source_dir": plan["source_dir"],
+        "source_layout": "rolling_clips",
+        "acquisition_recording_layout": parent["acquisition_recording_layout"],
+        "context_source": parent["context_source"],
+        "orange_session_id": plan["acquisition_session_id"],
+        "orange_producer": plan["orange_producer"],
+        **(
+            {"h5_relative_path": parent["h5_relative_path"]}
+            if parent["h5_relative_path"] is not None
+            else {}
+        ),
+        **(
+            {"h5_finalization_receipt_relative_path": parent["h5_finalization_receipt_relative_path"]}
+            if parent.get("h5_finalization_receipt_relative_path") is not None
+            else {}
+        ),
+        "files": files,
+        "recording_geometry_bundle": parent["recording_geometry_bundle"],
+        **(
+            {"zebrobot_subject_reference": parent["zebrobot_subject_reference"]}
+            if parent.get("zebrobot_subject_reference") is not None
+            else {}
+        ),
+        "preflight": default_preflight_payload(),
+        "source_transfer": {
+            "schema_id": "palette.organized_recording_transfer.v1",
+            "snapshot_id": plan["snapshot_id"],
+            "transfer_attempt_id": plan["transfer_attempt_id"],
+            **({"sealer": plan["transfer_sealer"]} if plan.get("transfer_sealer") else {}),
+            "organization_plan_sha256": plan["plan_sha256"],
+            "snapshot_path": f"raw/acquisition/{SNAPSHOT_PATH}",
+            "marker_path": f"raw/acquisition/{MARKER_NAME}",
+            "source_to_parent_files": mapping,
+        },
+        "rolling_clip_streams": {
+            "schema_id": "palette.orange_rolling_clip_streams.v1",
+            "frame_clock": "recording_frame_id",
+            "recording_clip_index": f"{INDEX_DIRECTORY}/recording_clip_index.json",
+            "recording_frame_index": f"{INDEX_DIRECTORY}/recording_frame_index.parquet",
+            "recording_frame_index_manifest": f"{INDEX_DIRECTORY}/recording_frame_index_manifest.json",
+            "output_kinds": parent["output_kinds"],
+        },
+    }
+
+
+def _set_aside_incomplete_index(plan: dict, state: dict, parent: dict, index: Path) -> None:
+    """Move a dead attempt's manifest-less index into the intake state directory."""
+
+    require(not index.is_symlink() and index.is_dir(), "incomplete index is not a directory")
+    key = parent["identity"]["recording_id"]
+    _require_directory(Path(parent["destination_dir"]), state["parent_directory_identities"][key])
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    target = _state_directory(plan) / "incomplete_indexes" / f"{parent['identity']['camera_id']}-{stamp}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    require(not target.exists(), "incomplete index destination already exists")
+    os.rename(index, target)
+    _fsync_directory(index.parent)
+    _fsync_directory(target.parent)
+    state.setdefault("incomplete_indexes_set_aside", []).append(
+        {
+            "recording_id": key,
+            "from": str(index),
+            "to": str(target),
+            "files": sorted(path.name for path in target.iterdir()),
+            "set_aside_utc": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
+def run_parents_in_parallel(parents: list, work, *, workers: int) -> list:
+    """Run ``work(parent)`` for every parent; results in plan order.
+
+    One worker runs inline. With more, the threads share the caller's digest
+    memo, and the first failure propagates only after every started worker
+    has finished, so no builder is still writing when the caller refuses.
+    """
+    workers = max(1, min(int(workers), len(parents)))
+    if workers == 1:
+        return [work(parent) for parent in parents]
+    memo = _transfer_snapshot.active_digest_memo()
+
+    def in_worker(parent):
+        with _transfer_snapshot.digest_memo_shared(memo):
+            return work(parent)
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="palette-parent") as pool:
+        return list(pool.map(in_worker, parents))
+
+
+def prepare_transfer_parent_recordings(
+    plan: dict,
+    *,
+    batch_rows: int = 65536,
+    registry_path: Path | None = None,
+    require_stimulus: bool = False,
+    parent_workers: int = 1,
+) -> dict:
+    """Materialize and describe exact parents, leaving actual admission pending.
+
+    Completed derived indexes are content-verified on retry. An index directory
+    without its manifest was left by an attempt that died while building it
+    (callers hold the transfer workflow lock, so no other builder is live): it
+    is moved, never deleted, into this delivery's intake state directory and
+    recorded in the journal, and the index is rebuilt. An index whose manifest
+    exists is never replaced; if it does not verify, preparation refuses.
+
+    ``parent_workers`` is an execution resource: parents are independent, so
+    their index builds, index verification and video sync assessments may run
+    concurrently. Journal writes and parent manifests stay on the caller's
+    thread, in plan order, and the written bytes do not depend on the count.
+    """
+    from fisheye.utils.build_transfer_parent_frame_index import (
+        build_transfer_parent_frame_index,
+    )
+
+    # Both transfer-v2 producer layouts share parents[].clips[]; a single_video
+    # parent is a one-clip collection with its original paths preserved.
+    require(
+        plan.get("recording_layout") in TRANSFER_PARENT_LAYOUTS,
+        "parent collection preparation requires rolling_clips or single_video",
+    )
+    materialize_transfer_organization(plan)
+    with _organization_state(plan) as (state, save):
+        contract = {
+            "registry_path": (
+                str(registry_path.resolve()) if registry_path is not None else None
+            ),
+            "require_stimulus": require_stimulus,
+        }
+        require(
+            state.get("admission_contract") in (None, contract),
+            "preparation cannot change its requested admission contract",
+        )
+        state["admission_contract"] = contract
+        save()
+        for parent in plan["parents"]:
+            index = Path(parent["destination_dir"]) / INDEX_DIRECTORY
+            if (
+                (index.exists() or index.is_symlink())
+                and not (index / INDEX_MANIFEST_NAME).exists()
+                and not state.get("parent_manifests_prepared")
+            ):
+                _set_aside_incomplete_index(plan, state, parent, index)
+                save()
+
+        def index_and_assess(parent: dict) -> dict:
+            index = Path(parent["destination_dir"]) / INDEX_DIRECTORY
+            if not index.exists():
+                build_transfer_parent_frame_index(
+                    Path(plan["source_dir"]),
+                    camera_id=parent["identity"]["camera_id"],
+                    output_dir=index,
+                    batch_rows=batch_rows,
+                    organization_plan=plan,
+                )
+            _verify_parent_index(plan, parent)
+            return _video_sync_assessment(plan, parent)
+
+        assessments = run_parents_in_parallel(
+            plan["parents"], index_and_assess, workers=parent_workers
+        )
+        for parent, assessment in zip(plan["parents"], assessments):
+            directory = Path(parent["destination_dir"])
+            assessment_path = directory / VIDEO_SYNC_ASSESSMENT
+            if assessment_path.exists():
+                require(
+                    strict_json(assessment_path) == assessment,
+                    "existing video sync assessment differs from the materialized videos",
+                )
+            else:
+                write_json_atomic(assessment_path, assessment, overwrite=False)
+            manifest = _parent_manifest(plan, parent)
+            path = directory / "recording_manifest.json"
+            if path.exists():
+                require(
+                    strict_json(path) == manifest,
+                    "existing parent manifest differs from organization plan",
+                )
+            else:
+                _require_directory(
+                    directory,
+                    state["parent_directory_identities"][
+                        parent["identity"]["recording_id"]
+                    ],
+                )
+                write_json_atomic(path, manifest, overwrite=False)
+        _verify_materialized_files(plan, state)
+        state["parent_manifests_prepared"] = True
+        save()
+        return state
+
+
+def parent_zarr_paths(plan: dict) -> list[Path]:
+    """The analysis Zarr of each planned parent, in plan order."""
+
+    return [
+        Path(parent["destination_dir"]) / "zarr" / f"{Path(parent['destination_dir']).name}_analysis.zarr"
+        for parent in plan["parents"]
+    ]
+
+
+def _verify_parent_imports(
+    plan: dict, *, registry_path: Path | None, require_stimulus: bool
+) -> dict:
+    """Use actual receipt/admission owners; organization state is never proof."""
+    from fisheye.registry.recording_identity_authority import (
+        load_verified_recording_import_receipt,
+    )
+    from fisheye.utils.import_recording_analysis import stimulus_runs_present
+
+    receipts = {}
+    for parent, zarr_path in zip(plan["parents"], parent_zarr_paths(plan)):
+        directory = Path(parent["destination_dir"])
+        require(
+            strict_json(directory / "recording_manifest.json")
+            == _parent_manifest(plan, parent),
+            "parent manifest changed before retirement",
+        )
+        _verify_parent_index(plan, parent)
+        receipt = load_verified_recording_import_receipt(zarr_path)
+        require(
+            receipt.identity_claim.identity.manifest_fields() == parent["identity"],
+            "parent receipt has another source identity",
+        )
+        if require_stimulus:
+            require(
+                stimulus_runs_present(zarr_path),
+                "requested stimulus import is incomplete",
+            )
+        if registry_path is not None:
+            from fisheye.registry.recording_identity_authority import (
+                load_verified_registry_recording_import,
+            )
+
+            verified = load_verified_registry_recording_import(
+                registry_path=registry_path, zarr_path=zarr_path
+            )
+            require(
+                verified.receipt == receipt,
+                "registry admission differs from parent receipt",
+            )
+        receipts[parent["identity"]["recording_id"]] = receipt.receipt_sha256
+    if registry_path is not None:
+        from fisheye.registry.shadow_publish import validate_registry_sqlite_copy
+
+        validate_registry_sqlite_copy(registry_path)
+    return receipts
+
+
+def _retire_source_file(
+    source: Path,
+    expected: dict,
+    signature: list[int],
+    *,
+    identity: _SealedSourceIdentity | None = None,
+) -> None:
+    _matches_file(source.parent, source.name, expected, identity)
+    descriptor = os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        current = os.stat(source.name, dir_fd=descriptor, follow_symlinks=False)
+        require(
+            [current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns]
+            == signature,
+            "source artifact ownership lost before retirement",
+        )
+        os.unlink(source.name, dir_fd=descriptor)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _source_members(source: Path) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
+    files, directories = {}, {}
+    for directory, names, filenames in os.walk(source, followlinks=False):
+        current = Path(directory)
+        for name in names:
+            path = current / name
+            directories[path.relative_to(source).as_posix()] = _directory_identity(path)
+        for name in filenames:
+            path = current / name
+            info = path.lstat()
+            require(
+                stat.S_ISREG(info.st_mode), "staging contains a non-regular artifact"
+            )
+            files[path.relative_to(source).as_posix()] = [
+                info.st_dev,
+                info.st_ino,
+                info.st_size,
+                info.st_mtime_ns,
+            ]
+    return files, directories
+
+
+def finalize_transfer_staging(
+    plan: dict, *, registry_path: Path | None = None, require_stimulus: bool = False
+) -> dict:
+    """Retire only inventoried staged files after every requested admission gate.
+
+    Original producer custody is untouched. The exact external journal supports
+    retry even after the snapshot/marker has been retired; missing files are
+    tolerated only after verified retirement began. Every durable copy and
+    actual parent receipt is checked again on retry, including completed runs.
+    Empty source root is retained; no recursive removal is used. Once the
+    delivery is complete, a replay accepts that the empty root was removed.
+    """
+    _validate_plan(plan, live_source=False)
+    registry_path = registry_path.resolve() if registry_path is not None else None
+    contract = {
+        "registry_path": str(registry_path) if registry_path is not None else None,
+        "require_stimulus": require_stimulus,
+    }
+    with _organization_state(plan) as (state, save):
+        source = Path(plan["source_dir"])
+        source_removed = state["status"] == "complete" and not os.path.lexists(source)
+        if not source_removed:
+            _require_directory(source, state["source_directory_identity"])
+        prior_contract = state.get("admission_contract")
+        require(
+            prior_contract is None or prior_contract == contract,
+            "retirement cannot change its requested admission contract",
+        )
+        state["admission_contract"] = contract
+        save()
+        _verify_materialized_files(plan, state)
+        receipts = _verify_parent_imports(
+            plan, registry_path=registry_path, require_stimulus=require_stimulus
+        )
+        if state["status"] == "complete":
+            require(
+                source_removed or not list(source.iterdir()),
+                "completed staging source is no longer empty",
+            )
+            require(
+                receipts == state["import_receipts"],
+                "completed parent receipts changed",
+            )
+            return state
+        require(
+            state["status"] in {"materialized", "retiring"},
+            "parent materialization is incomplete",
+        )
+        _flush_parent_publications(plan, state)
+        _verify_materialized_files(plan, state)
+        if state["status"] == "materialized":
+            _validate_plan(plan, live_source=True)
+            files, directories = _source_members(source)
+            require(
+                set(files) == {item["source"]["path"] for item in plan["files"]},
+                "source inventory changed before retirement",
+            )
+            state.update(
+                status="retiring",
+                import_receipts=receipts,
+                import_complete=True,
+                retirement_files=files,
+                retirement_directories=directories,
+                retired_files=[],
+            )
+            save()
+        require(
+            receipts == state["import_receipts"], "retirement parent receipts changed"
+        )
+        current_files, current_directories = _source_members(source)
+        pending = set(state["retirement_files"]) - set(state["retired_files"])
+        require(
+            set(current_files) <= pending,
+            "staging contains unplanned or reappeared source artifacts",
+        )
+        require(
+            set(current_directories) <= set(state["retirement_directories"]),
+            "staging contains new unplanned directories",
+        )
+        by_relative = {item["source"]["path"]: item for item in plan["files"]}
+        identity = _SealedSourceIdentity(plan, state)
+        for relative in sorted(pending):
+            item = by_relative[relative]
+            _require_directory(source, state["source_directory_identity"])
+            for target in item["destinations"]:
+                parent = _parent_directory(plan, target["recording_id"])
+                _require_directory(
+                    parent, state["parent_directory_identities"][target["recording_id"]]
+                )
+                _matches_file(parent, target["relative_path"], item["source"], identity)
+            if relative in current_files:
+                _retire_source_file(
+                    source / relative,
+                    item["source"],
+                    state["retirement_files"][relative],
+                    identity=identity,
+                )
+            # Missing pending member covers unlink-success/journal-write-failure.
+            # It is acknowledged only after all declared copies were rechecked.
+            state["retired_files"].append(relative)
+            save()
+        for relative in sorted(
+            state["retirement_directories"],
+            key=lambda p: (p.count("/"), p),
+            reverse=True,
+        ):
+            directory = source / relative
+            if directory.exists() or directory.is_symlink():
+                _require_directory(directory, state["retirement_directories"][relative])
+                directory.rmdir()  # Exact recorded empty directory, never recursive.
+                _fsync_directory(directory.parent)
+        _require_directory(source, state["source_directory_identity"])
+        require(not list(source.iterdir()), "staging did not become empty")
+        _verify_materialized_files(plan, state)
+        require(
+            _verify_parent_imports(
+                plan, registry_path=registry_path, require_stimulus=require_stimulus
+            )
+            == receipts,
+            "parent admission changed during retirement",
+        )
+        state.update(status="complete", staging_finalized=True)
+        save()
+        return state

@@ -33,6 +33,7 @@ from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array, st
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_failed, mark_run_started, require_runs_parent
 from fisheye.utils.import_acquisition_detections_to_detect_run import resolve_source_dimensions
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
+from fisheye.shared.orange_frame_identity import crop_meta_stream_frame_field
 
 
 SCHEMA_ID = "palette.analysis_acquisition_crop_run.v1"
@@ -210,11 +211,13 @@ def load_crop_meta_table(crop_meta_path: Path) -> _CropMetaTable:
         missing = sorted(required - set(reader.fieldnames or ()))
         if missing:
             raise ValueError(f"Crop metadata missing required columns: {missing}")
+        # frame_identity_v1: stream_frame_id (adopted) or local_frame_id (before).
+        stream_field = crop_meta_stream_frame_field(reader.fieldnames or (), label=str(crop_meta_path))
         for row_index, row in enumerate(reader):
             frame = _safe_int(row.get("recording_frame_id"), default=0) - 1
             frame_indices.append(frame)
             video_frame_indices.append(_safe_int(row.get("crop_video_frame_index"), default=row_index))
-            local_frame_ids.append(_safe_int(row.get("local_frame_id"), default=row_index))
+            local_frame_ids.append(_safe_int((row.get(stream_field) if stream_field else None), default=row_index))
             row_indices.append(row_index)
             has_detection.append(bool(_safe_int(row.get("has_detection"), default=0)))
             blank_frame.append(bool(_safe_int(row.get("blank_frame"), default=0)))

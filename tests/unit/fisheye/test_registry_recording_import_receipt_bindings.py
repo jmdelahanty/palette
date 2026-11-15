@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from fisheye.registry.db import Registry
+from fisheye.registry.migrations import MIGRATION_METHODS
 from fisheye.shared.source_recording_identity import (
     SOURCE_RECORDING_IDENTITY_CLAIM_SCHEMA_ID,
     SOURCE_RECORDING_IDENTITY_PROFILE,
@@ -157,7 +158,7 @@ def test_migration_73_creates_empty_receipt_binding_table(tmp_path: Path) -> Non
         assert registry.conn.execute(
             "SELECT COUNT(*) FROM recording_import_receipt_bindings;"
         ).fetchone()[0] == 0
-        assert registry._current_schema_version() == 73
+        assert registry._current_schema_version() == MIGRATION_METHODS[-1][0]
     finally:
         registry.close()
 

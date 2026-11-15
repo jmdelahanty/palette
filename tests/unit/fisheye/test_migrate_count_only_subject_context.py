@@ -311,9 +311,11 @@ def test_migration_recovers_when_subject_published_before_setup(tmp_path: Path) 
     )
     desired = plan["recordings"][0]["desired"]
     root = zarr.open_group(str(analysis_path), mode="r+", use_consolidated=False)
+    # The interrupted earlier apply ran this same tool, so it wrote the same v2 record.
     publish_subject_metadata(
         root,
         desired["subject_metadata_record"]["subject_metadata"],
+        translator="manual_assertion",
     )
     assert "analysis/experiment_setup_runs" not in root
 

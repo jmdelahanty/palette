@@ -19,6 +19,9 @@ from fisheye.analysis_workflows.position_body_frame_motion import (
     bind_position_body_frame_to_tracking,
     compose_position_body_frame_motion_authority,
 )
+from fisheye.analysis_workflows.provider_recording_timing_authority import (
+    load_provider_recording_timing_authority,
+)
 from fisheye.analysis_workflows.tracking_source_handle import (
     TrackingSourceHandleError,
 )
@@ -26,12 +29,30 @@ from tests.unit.fisheye.test_position_body_frame_motion import (
     _handles,
     _tracking_handle,
 )
+from tests.unit.fisheye.test_provider_recording_timing_authority import (
+    _install_clock_authority,
+)
 
 
 def _tracked(tmp_path):  # type: ignore[no-untyped-def]
     position, body_frame = _handles(tmp_path)
     source = compose_position_body_frame_motion_authority(position, body_frame)
     return bind_position_body_frame_to_tracking(source, _tracking_handle(source))
+
+
+def _timed_tracked(tmp_path, *, fps: float = 10.0, frame_count: int = 3):  # type: ignore[no-untyped-def]
+    tracked = _tracked(tmp_path)
+    _install_clock_authority(
+        tracked.source_authority.analysis_zarr_path,
+        tmp_path,
+        frame_count=frame_count,
+        fps=fps,
+    )
+    timing = load_provider_recording_timing_authority(
+        tracked.source_authority.analysis_zarr_path
+    )
+    assert timing is not None
+    return tracked, timing
 
 
 def _install_fake_physical_authority(monkeypatch, *, mm_per_pixel: float = 0.25):
@@ -93,6 +114,56 @@ def test_prepared_provider_motion_keeps_lineages_and_validity_independent(
     assert prepared.computation_record["validity_profile"] == (
         "explicit_position_body_frame_independent_validity.v1"
     )
+    assert prepared.computation_record["schema_version"] == 1
+    assert prepared.temporal_authority is None
+
+
+def test_prepared_provider_motion_binds_live_timing_authority(tmp_path) -> None:
+    tracked, timing = _timed_tracked(tmp_path)
+
+    prepared = prepare_provider_track_motion(
+        tracked,
+        fps=10.0,
+        smooth_seconds=0.0,
+        allow_pixel_only=True,
+        temporal_authority=timing,
+    )
+
+    assert prepared.temporal_authority is timing
+    assert prepared.temporal_authority_sha256 == timing.sha256
+    assert prepared.computation_record["schema_version"] == 2
+    assert prepared.computation_record["temporal_authority"] == {
+        "record": timing.record,
+        "sha256": timing.sha256,
+    }
+
+
+def test_prepared_provider_motion_rejects_timing_fps_mismatch(tmp_path) -> None:
+    tracked, timing = _timed_tracked(tmp_path)
+
+    with pytest.raises(ProviderTrackMotionError, match="nominal FPS"):
+        prepare_provider_track_motion(
+            tracked,
+            fps=9.0,
+            smooth_seconds=0.0,
+            allow_pixel_only=True,
+            temporal_authority=timing,
+        )
+
+
+def test_prepared_provider_motion_rejects_frame_outside_timing_domain(
+    tmp_path,
+) -> None:
+    tracked, timing = _timed_tracked(tmp_path, frame_count=2)
+
+    with pytest.raises(ProviderTrackMotionError, match="frame-clock domain"):
+        prepare_provider_track_motion(
+            tracked,
+            fps=10.0,
+            smooth_seconds=0.0,
+            allow_pixel_only=True,
+            temporal_authority=timing,
+        )
 
 
 def test_publishes_selector_ineligible_successor_without_pointer_mutation(
@@ -210,6 +281,36 @@ def test_publication_reopens_tracking_authority_and_fails_before_write(
     root[f"{tracked.tracking_run_path}/track_ids"][0] = np.int32(99)
 
     with pytest.raises(TrackingSourceHandleError, match="manifest"):
+        publish_provider_track_motion_run(plan, keep_scratch=True)
+
+    assert not plan.local_zarr.exists()
+    assert not plan.target_run_path.exists()
+
+
+def test_publication_reopens_timing_authority_and_fails_before_write(
+    tmp_path,
+) -> None:
+    tracked, timing = _timed_tracked(tmp_path)
+    prepared = prepare_provider_track_motion(
+        tracked,
+        fps=10.0,
+        smooth_seconds=0.0,
+        allow_pixel_only=True,
+        temporal_authority=timing,
+    )
+    archive = tracked.source_authority.analysis_zarr_path
+    plan = plan_provider_track_motion_run(
+        archive,
+        prepared,
+        run_name="provider_motion_timing_stale",
+        scratch_root=tmp_path / "provider_motion_timing_stale_scratch",
+    )
+    root = zarr.open_group(
+        str(archive), mode="r+", zarr_format=3, use_consolidated=False
+    )
+    root.attrs["fps"] = 9.0
+
+    with pytest.raises(ProviderTrackMotionError, match="timing authority"):
         publish_provider_track_motion_run(plan, keep_scratch=True)
 
     assert not plan.local_zarr.exists()

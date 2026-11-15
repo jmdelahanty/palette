@@ -20,6 +20,13 @@ augmentation:
     - [eye_left, eye_right]
   flipud_keypoint_pairs: []
 
+# Immutable merged exports on shared storage are copied to verified node-local
+# scratch before training when the complete set fits both limits.
+dataset_staging:
+  mode: auto
+  max_total_size_gib: 8.0
+  min_free_space_gib_after_stage: 8.0
+
 datasets:
   arena4:
     zarr_path: /nvme1/sesh3/2025-09-23T22-11-11Z_arena_4_chaser_arena4.zarr

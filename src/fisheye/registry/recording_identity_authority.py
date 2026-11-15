@@ -22,8 +22,13 @@ from uuid import uuid4
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.acquisition_publication_status import (
     ACQUISITION_AUTHORITY_PUBLISHED,
+    CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE,
     EXTERNAL_ACQUISITION_AUTHORITY_MODE,
     load_acquisition_authority_publication_status,
+)
+from fisheye.shared.clipped_video_collection import (
+    SOURCE_VIDEO_COLLECTION_LAYOUT,
+    SOURCE_VIDEO_COLLECTION_LOCATOR_KIND,
 )
 from fisheye.shared.pixel_frame_authority import (
     BoundAcquisitionCameraFrame,
@@ -630,6 +635,7 @@ def _verify_live_import_receipt(
     evidence: SourceRecordingIdentityClaim,
     receipt: object,
     require_current_producer_code: bool = False,
+    verify_current_surfaces: bool = False,
 ) -> tuple[
     str,
     BoundAcquisitionImportOwnership,
@@ -670,11 +676,7 @@ def _verify_live_import_receipt(
             use_consolidated=False,
         )
         publication = load_acquisition_authority_publication_status(root)
-        if (
-            publication.status != ACQUISITION_AUTHORITY_PUBLISHED
-            or publication.authority_mode
-            != EXTERNAL_ACQUISITION_AUTHORITY_MODE
-        ):
+        if publication.status != ACQUISITION_AUTHORITY_PUBLISHED:
             raise RecordingIdentityProjectionConflict(
                 "acquisition authority is not a published external-video authority"
             )
@@ -682,6 +684,25 @@ def _verify_live_import_receipt(
             root,
             expected_camera_id=source_identity.camera_id,
         )
+        layout = frame.record.source_video_metadata.get("layout")
+        expected_mode = {
+            "single_video": EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+            SOURCE_VIDEO_COLLECTION_LAYOUT: CLIPPED_EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+        }.get(layout)
+        expected_locator = {
+            "single_video": "recording_relative",
+            SOURCE_VIDEO_COLLECTION_LAYOUT: SOURCE_VIDEO_COLLECTION_LOCATOR_KIND,
+        }.get(layout)
+        if (
+            expected_mode is None
+            or publication.authority_mode != expected_mode
+            or ownership.record.mode != expected_mode
+            or frame.record.source_video_metadata["locator"].get("kind")
+            != expected_locator
+        ):
+            raise RecordingIdentityProjectionConflict(
+                "acquisition layout, publication mode and source locator disagree"
+            )
     except RecordingIdentityProjectionConflict:
         raise
     except Exception as exc:
@@ -719,15 +740,32 @@ def _verify_live_import_receipt(
         )
     ownership.assert_verified()
     frame.assert_verified()
+    if verify_current_surfaces or layout == SOURCE_VIDEO_COLLECTION_LAYOUT:
+        try:
+            _verify_current_import_surfaces(
+                resolved=resolved_path,
+                evidence=evidence,
+                frame=frame,
+                authority_path=frame_path,
+            )
+        except RecordingIdentityAuthorityError:
+            raise
+        except Exception as exc:
+            raise RecordingIdentityAuthorityError(
+                f"current import source surfaces could not be verified: {exc}"
+            ) from exc
     if load_acquisition_authority_publication_status(root) != publication:
         raise RecordingIdentityProjectionConflict(
             "acquisition publication status changed while it was verified"
         )
-    if _verify_import_receipt(
-        resolved_path=resolved_path,
-        evidence=evidence,
-        receipt=receipt,
-    ) != receipt_sha256:
+    if (
+        _verify_import_receipt(
+            resolved_path=resolved_path,
+            evidence=evidence,
+            receipt=receipt,
+        )
+        != receipt_sha256
+    ):
         raise RecordingIdentityProjectionConflict(
             "import receipt changed while live acquisition was verified"
         )
@@ -742,72 +780,192 @@ def load_verified_recording_import_receipt(zarr_path: Path) -> RecordingImportRe
     check or the duplicated publication marker alone is not receipt evidence.
     """
 
-    from fisheye.shared.zarr.metadata_equivalence import validate_direct_consolidated_subtree
-    from fisheye.shared import acquisition_frame_clock as clock_contract
-    from fisheye.shared.acquisition_crop_stream_ledger import validate_current_acquisition_crop_stream_ledger
-    from fisheye.shared.source_recording_identity import load_source_recording_identity
-    from fisheye.shared.recording_preflight import preflight_gate_reason
-    from fisheye.shared.recording_manifest_context import validate_recording_manifest_context
-    from fisheye.shared.acquisition_video_streams import validate_acquisition_video_stream_inventory
-    import zarr
-
     resolved = Path(zarr_path).expanduser().resolve()
     evidence = collect_regular_source_recording_identity(resolved)
     paths = recording_import_receipt_paths(resolved)
     if len(paths) != 1:
-        raise RecordingIdentityAuthorityError("ingestion replay requires exactly one immutable import receipt")
+        raise RecordingIdentityAuthorityError(
+            "ingestion replay requires exactly one immutable import receipt"
+        )
     receipt = RecordingImportReceipt.from_path(paths[0])
-    _digest, _ownership, frame, authority_path = _verify_live_import_receipt(
-        resolved_path=resolved, evidence=evidence, receipt=receipt,
+    _verify_live_import_receipt(
+        resolved_path=resolved,
+        evidence=evidence,
+        receipt=receipt,
+        verify_current_surfaces=True,
     )
+    return receipt
+
+
+def _verify_current_import_surfaces(
+    *,
+    resolved: Path,
+    evidence: SourceRecordingIdentityClaim,
+    frame: BoundAcquisitionCameraFrame,
+    authority_path: str,
+) -> None:
+    """Verify replay surfaces; all clipped registry paths use this same boundary."""
+
+    from fisheye.shared.zarr.metadata_equivalence import (
+        validate_direct_consolidated_subtree,
+    )
+    from fisheye.shared import acquisition_frame_clock as clock_contract
+    from fisheye.shared.acquisition_crop_stream_ledger import (
+        validate_current_acquisition_crop_stream_ledger,
+    )
+    from fisheye.shared.source_recording_identity import load_source_recording_identity
+    from fisheye.shared.recording_preflight import preflight_gate_reason
+    from fisheye.shared.recording_manifest_context import (
+        manifest_context_attrs,
+        validate_recording_manifest_context,
+    )
+    from fisheye.shared.acquisition_video_streams import (
+        validate_acquisition_video_stream_inventory,
+    )
+    from fisheye.shared.clipped_video_collection import (
+        verify_clipped_video_collection_live_files,
+    )
+    import zarr
+
     for subtree in ("raw_video", authority_path):
         validate_direct_consolidated_subtree(resolved, subtree_path=subtree)
 
     recording_dir = recording_directory_for_source_target(resolved)
-    manifest, _identity = load_source_recording_identity(recording_dir / "recording_manifest.json")
+    manifest, _identity = load_source_recording_identity(
+        recording_dir / "recording_manifest.json"
+    )
     validate_recording_manifest_context(manifest)
     reason = preflight_gate_reason(recording_dir)
     if reason is not None:
         raise RecordingIdentityAuthorityError(reason)
-    validate_acquisition_video_stream_inventory(recording_dir, manifest)
-    locator = frame.record.source_video_metadata["locator"]
-    if locator.get("kind") != "recording_relative":
-        raise RecordingIdentityAuthorityError("current intake requires a recording-relative source video")
-    if manifest.get("video_streams") is not None:
-        full = manifest["video_streams"]["streams"].get("full")
-        if not isinstance(full, Mapping) or not isinstance(full.get("video"), str):
-            raise RecordingIdentityAuthorityError("source video must bind the declared full-frame stream")
-        if (recording_dir / full["video"]).resolve() != (recording_dir / locator["relative_path"]).resolve():
-            raise RecordingIdentityAuthorityError("source video differs from the declared full-frame stream")
-    source = clock_contract.load_acquisition_frame_clock_source(
-        recording_dir,
-        camera_id=evidence.identity.camera_id,
-        video_path=recording_dir / locator["relative_path"],
-        expected_frame_count=frame.record.source_total_frames,
-    )
+    inventory = validate_acquisition_video_stream_inventory(recording_dir, manifest)
+    metadata = frame.record.source_video_metadata
+    locator = metadata["locator"]
+    clipped = metadata["layout"] == SOURCE_VIDEO_COLLECTION_LAYOUT
+    if clipped:
+        if manifest.get("video_streams") is not None:
+            raise RecordingIdentityAuthorityError(
+                "clipped intake cannot bind single-video stream declarations"
+            )
+        files = verify_clipped_video_collection_live_files(recording_dir, metadata)
+        rolling = manifest.get("rolling_clip_streams")
+        if "rolling_clip_streams" in manifest:
+            if not isinstance(rolling, Mapping):
+                raise RecordingIdentityAuthorityError(
+                    "rolling_clip_streams must be an object"
+                )
+            declared_indexes = rolling
+        elif manifest.get("source_layout") == "rolling_clips":
+            declared_indexes = manifest
+        else:
+            raise RecordingIdentityAuthorityError(
+                "clipped intake requires explicit rolling-clip source declarations"
+            )
+        for field, expected_path in zip(
+            (
+                "recording_clip_index",
+                "recording_frame_index",
+                "recording_frame_index_manifest",
+            ),
+            files.index_paths,
+            strict=True,
+        ):
+            declared = declared_indexes.get(field)
+            if (
+                type(declared) is not str
+                or not declared
+                or declared != declared.strip()
+                or Path(declared).is_absolute()
+                or (recording_dir / declared).resolve() != expected_path
+            ):
+                raise RecordingIdentityAuthorityError(
+                    f"declared {field} differs from the bound clipped collection"
+                )
+        source = clock_contract.load_clipped_acquisition_frame_clock_source(
+            recording_dir,
+            camera_id=evidence.identity.camera_id,
+            frame_index_path=locator["relative_path"],
+            expected_frame_count=frame.record.source_total_frames,
+        )
+        if source.source_path != files.index_paths[1]:
+            raise RecordingIdentityAuthorityError(
+                "clipped clock locator differs from the bound frame index"
+            )
+    else:
+        if manifest.get("video_streams") is not None:
+            full = manifest["video_streams"]["streams"].get("full")
+            if not isinstance(full, Mapping) or not isinstance(full.get("video"), str):
+                raise RecordingIdentityAuthorityError(
+                    "source video must bind the declared full-frame stream"
+                )
+            if (recording_dir / full["video"]).resolve() != (
+                recording_dir / locator["relative_path"]
+            ).resolve():
+                raise RecordingIdentityAuthorityError(
+                    "source video differs from the declared full-frame stream"
+                )
+        source = clock_contract.load_acquisition_frame_clock_source(
+            recording_dir,
+            camera_id=evidence.identity.camera_id,
+            video_path=recording_dir / locator["relative_path"],
+            expected_frame_count=frame.record.source_total_frames,
+        )
     root = zarr.open_group(str(resolved), mode="r", use_consolidated=False)
+    context_attrs = manifest_context_attrs(manifest)
     for field in ("recording_type", "recording_subtype", "behavior_mode"):
-        if root.attrs.get(field) != manifest[field].strip():
-            raise RecordingIdentityAuthorityError(f"published {field} differs from its manifest")
+        if root.attrs.get(field) != context_attrs.get(field):
+            raise RecordingIdentityAuthorityError(
+                f"published {field} differs from its manifest"
+            )
     clock = clock_contract.resolve_acquisition_frame_clock(
-        root, required=source is not None or root.attrs.get("acquisition_frame_clock_available") is True,
+        root,
+        required=source is not None
+        or root.attrs.get("acquisition_frame_clock_available") is True,
     )
     if source is None and clock is not None:
-        raise RecordingIdentityAuthorityError("published clock has no live source evidence")
+        raise RecordingIdentityAuthorityError(
+            "published clock has no live source evidence"
+        )
     if source is not None:
         # Reuse the clock owner's existing persisted grammar, including source
         # stat evidence and array digests. Never reconstruct a competing digest.
-        expected_clock = clock_contract.acquisition_frame_clock_source_sha256(source)
+        # Rebuild with the published record's own version (v1 rules for v1).
+        expected_clock = (
+            clock_contract.acquisition_frame_clock_source_sha256(
+                source, schema_version=int(clock.record["schema_version"])
+            )
+            if clock is not None
+            else None
+        )
         if clock is None or clock.record_sha256 != expected_clock:
-            raise RecordingIdentityAuthorityError("published clock differs from its current source")
+            raise RecordingIdentityAuthorityError(
+                "published clock differs from its current source"
+            )
         validate_direct_consolidated_subtree(
-            resolved, subtree_path=clock_contract.ACQUISITION_FRAME_CLOCK_RUNS_PATH,
+            resolved,
+            subtree_path=clock_contract.ACQUISITION_FRAME_CLOCK_RUNS_PATH,
         )
     streams = (manifest.get("video_streams") or {}).get("streams", {})
+    if clipped and inventory is not None:
+        streams = inventory["streams"]
     if "crop" in streams or root.attrs.get("acquisition_crop_ledger_available") is True:
-        validate_current_acquisition_crop_stream_ledger(root)
-        validate_direct_consolidated_subtree(resolved, subtree_path="analysis/acquisition_video_streams")
-    return receipt
+        # Validate the ledger through the consolidated view (one root metadata
+        # read instead of one zarr.json open per ledger array: about 2 s per
+        # camera on NFS, 0.04 s consolidated), then prove the subtree's direct
+        # declarations and group attributes equal that view. Together these
+        # are the same claim as validating the direct view. Without a
+        # consolidated view the equivalence check owns the refusal.
+        try:
+            ledger_view = zarr.open_group(str(resolved), mode="r", use_consolidated=True)
+        except ValueError:
+            validate_direct_consolidated_subtree(
+                resolved, subtree_path="analysis/acquisition_video_streams"
+            )
+            ledger_view = root
+        validate_current_acquisition_crop_stream_ledger(ledger_view)
+        validate_direct_consolidated_subtree(
+            resolved, subtree_path="analysis/acquisition_video_streams"
+        )
 
 
 def _preflight_receipt_binding(
@@ -885,11 +1043,17 @@ class RegistryRecordingIdentityMixin:
         is_source_recording = bool(session_uuid) and "/recordings/" in str(
             zarr_path
         ).replace("\\", "/").lower()
-        if not is_source_recording:
+        # B7: a different locator never takes over a receipt-bound dataset
+        # row; it resolves to its own path-scoped dataset id instead.
+        base_is_bound = (
+            row is not None
+            and self.verified_source_dataset_binding(base_dataset_id) is not None
+        )
+        if not is_source_recording and not base_is_bound:
             return base_dataset_id
 
-        assert session_uuid is not None
-        candidate = f"{session_uuid}:z{current_hash[:12]}"
+        prefix = session_uuid or base_dataset_id
+        candidate = f"{prefix}:z{current_hash[:12]}"
         for extra in (
             "",
             current_hash[12:16],
@@ -903,7 +1067,7 @@ class RegistryRecordingIdentityMixin:
             ).fetchone()
             if existing is None or str(existing["path_hash"] or "") == current_hash:
                 return resolved
-        return f"{session_uuid}:z{current_hash}"
+        return f"{prefix}:z{current_hash}"
 
     def resolve_effective_dataset_id(
         self,
@@ -919,6 +1083,234 @@ class RegistryRecordingIdentityMixin:
             session_uuid=session_uuid,
             zarr_path=zarr_path,
         )
+
+    # -- B7 boundary: rows owned by a verified current-source import --------
+    #
+    # A recording or dataset is "current-source" when the authority bound it to
+    # a verified import receipt (``recording_import_receipt_bindings``).  Those
+    # bindings are immutable and are written only by
+    # ``project_regular_source_recording_identity``.  Generic writers consult
+    # these predicates so they never change identity or context on such rows.
+
+    def verified_source_recording_binding(
+        self,
+        recording_id: str | None,
+    ) -> sqlite3.Row | None:
+        """Return the bound ``(recording_id, session_uuid)`` or ``None``."""
+
+        if not recording_id:
+            return None
+        return self.conn.execute(
+            """
+            SELECT c.recording_id, c.session_uuid
+            FROM recording_identity_current c
+            WHERE c.recording_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM recording_import_receipt_bindings b
+                  WHERE b.identity_scope_id = c.identity_scope_id
+              )
+            LIMIT 1;
+            """,
+            (str(recording_id),),
+        ).fetchone()
+
+    def verified_source_recording_at_directory(
+        self,
+        recording_dir: Path,
+    ) -> sqlite3.Row | None:
+        """Return the bound recording whose canonical directory is ``recording_dir``."""
+
+        resolved_dir = Path(recording_dir).expanduser().resolve()
+        return self.conn.execute(
+            """
+            SELECT c.recording_id, c.session_uuid
+            FROM recording_identity_current c
+            INNER JOIN recordings r ON r.recording_id = c.recording_id
+            WHERE r.recording_path = ?
+              AND EXISTS (
+                  SELECT 1 FROM recording_import_receipt_bindings b
+                  WHERE b.identity_scope_id = c.identity_scope_id
+              )
+            ORDER BY c.recording_id
+            LIMIT 1;
+            """,
+            (str(resolved_dir),),
+        ).fetchone()
+
+    def verified_source_dataset_binding(
+        self,
+        dataset_id: str | None,
+    ) -> sqlite3.Row | None:
+        """Return the receipt-bound dataset row for ``dataset_id`` or ``None``."""
+
+        if not dataset_id:
+            return None
+        return self.conn.execute(
+            """
+            SELECT d.*
+            FROM datasets d
+            WHERE d.dataset_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM recording_import_receipt_bindings b
+                  WHERE b.dataset_id = d.dataset_id
+              )
+            LIMIT 1;
+            """,
+            (str(dataset_id),),
+        ).fetchone()
+
+    def verified_source_dataset_at_path(
+        self,
+        zarr_path: Path,
+    ) -> sqlite3.Row | None:
+        """Return the receipt-bound dataset at one canonical locator, if any.
+
+        This is a registry-only lookup (no live receipt re-verification); it
+        decides which writer owns the row, not whether the import is valid.
+        """
+
+        resolved_path = Path(zarr_path).expanduser().resolve()
+        rows = self.conn.execute(
+            """
+            SELECT d.*
+            FROM datasets d
+            WHERE (d.zarr_path = ? OR d.path_hash = ?)
+              AND EXISTS (
+                  SELECT 1 FROM recording_import_receipt_bindings b
+                  WHERE b.dataset_id = d.dataset_id
+              )
+            ORDER BY d.dataset_id;
+            """,
+            (str(resolved_path), canonical_dataset_path_hash(resolved_path)),
+        ).fetchall()
+        if len(rows) > 1:
+            raise RecordingIdentityAuthorityError(
+                "multiple receipt-bound datasets share one canonical locator: "
+                + ", ".join(str(row["dataset_id"]) for row in rows)
+            )
+        return rows[0] if rows else None
+
+    def refuse_conflicting_verified_source_identity(
+        self,
+        *,
+        recording_id: str | None,
+        session_uuid: str | None,
+        writer: str,
+    ) -> sqlite3.Row | None:
+        """Refuse a non-authority claim that contradicts a bound recording.
+
+        Returns the bound recording row, or ``None`` when ``recording_id`` is
+        not bound to a verified source.
+        """
+
+        bound = self.verified_source_recording_binding(recording_id)
+        if bound is None:
+            return None
+        if session_uuid and str(session_uuid) != str(bound["session_uuid"]):
+            raise RecordingIdentityAuthorityError(
+                f"{writer}: recording_id {recording_id!r} is bound to a verified "
+                f"source import with session_uuid {bound['session_uuid']!r}; "
+                f"refusing a claim with session_uuid {session_uuid!r}"
+            )
+        return bound
+
+    def mark_dataset_seen(self, dataset_id: str) -> None:
+        """Touch ``datasets.last_seen_utc`` without writing identity or context."""
+
+        self.conn.execute(
+            "UPDATE datasets SET last_seen_utc = ? WHERE dataset_id = ?;",
+            (utc_now(), str(dataset_id)),
+        )
+        self._commit_if_standalone()
+
+    def refuse_or_touch_verified_source_dataset(
+        self,
+        dataset_id: str,
+        *,
+        zarr_path: Path,
+        explicit: Mapping[str, Any],
+    ) -> bool:
+        """B7 guard: generic dataset upserts never write a receipt-bound row.
+
+        Returns ``True`` when ``dataset_id`` is bound to a verified current-source
+        import and every explicitly requested value already agrees; only
+        ``last_seen_utc`` is touched.  Any disagreement is refused.  Returns
+        ``False`` for rows the identity authority does not own.
+        """
+
+        resolved_path = Path(zarr_path).expanduser().resolve()
+        bound = self.verified_source_dataset_binding(dataset_id)
+        if bound is None:
+            at_path = self.verified_source_dataset_at_path(resolved_path)
+            if at_path is not None:
+                raise RecordingIdentityAuthorityError(
+                    f"upsert_dataset: locator {str(resolved_path)!r} is bound to "
+                    f"verified source dataset {at_path['dataset_id']!r}; refusing "
+                    f"to register it as dataset {dataset_id!r}"
+                )
+            return False
+        requested = {"zarr_path": str(resolved_path), **explicit}
+        self._refuse_bound_row_changes(
+            bound,
+            requested,
+            what=f"upsert_dataset: dataset {dataset_id!r}",
+        )
+        self.mark_dataset_seen(dataset_id)
+        return True
+
+    def refuse_verified_source_recording_change(
+        self,
+        payload: Mapping[str, Any],
+    ) -> bool:
+        """B7 guard: generic recording upserts never write a bound recording.
+
+        Returns ``True`` (and writes nothing) when the recording is bound to a
+        verified current-source import and every supplied value already agrees.
+        Any supplied value that would change the row is refused.  Returns
+        ``False`` for recordings the authority does not own (historical path).
+        """
+
+        recording_id = str(payload["recording_id"])
+        if self.verified_source_recording_binding(recording_id) is None:
+            return False
+        row = self.conn.execute(
+            "SELECT * FROM recordings WHERE recording_id = ?;",
+            (recording_id,),
+        ).fetchone()
+        requested = {
+            field: value
+            for field, value in payload.items()
+            if field not in {"recording_id", "created_utc", "updated_utc"}
+        }
+        self._refuse_bound_row_changes(
+            row,
+            requested,
+            what=f"upsert_recording: recording {recording_id!r}",
+        )
+        return True
+
+    @staticmethod
+    def _refuse_bound_row_changes(
+        row: sqlite3.Row | None,
+        requested: Mapping[str, Any],
+        *,
+        what: str,
+    ) -> None:
+        conflicts = []
+        for field, value in requested.items():
+            if value is None:
+                continue
+            stored = row[field] if row is not None else None
+            if stored is None or str(stored) != str(value):
+                conflicts.append(
+                    f"{field} (registry={stored!r}, requested={value!r})"
+                )
+        if conflicts:
+            raise RecordingIdentityAuthorityError(
+                f"{what} is bound to a verified source import; only the "
+                "recording identity authority may change its identity or "
+                "context: " + "; ".join(conflicts)
+            )
 
     def _update_current_source_dataset_metadata(
         self,
@@ -1019,12 +1411,16 @@ class RegistryRecordingIdentityMixin:
             "canvas_name",
             "protocol_name",
             "dish_design",
+            "context_source",
+            "recording_context_schema_version",
+            "recording_intent",
+            "data_origin",
         )
-        updates = {
-            field: context[field]
-            for field in optional_fields
-            if context.get(field) is not None
-        }
+        # Decision 4 (2026-10-07 intake single-writer design): a receipt-bound
+        # current-source row mirrors the authority exactly, NULL included, so a
+        # value the authority no longer declares cannot survive as stale
+        # registry state.  Historical rows keep COALESCE in ``upsert_recording``.
+        updates = {field: context.get(field) for field in optional_fields}
         updates.update(
             recording_path=canonical_recording_path,
             camera_id=camera_id,
@@ -1840,6 +2236,48 @@ class RegistryRecordingIdentityMixin:
         )
 
 
+@dataclass
+class _ReadOnlyRecordingIdentityReader(RegistryRecordingIdentityMixin):
+    path: Path
+    conn: sqlite3.Connection
+
+
+def load_verified_registry_recording_import(
+    *,
+    registry_path: Path,
+    zarr_path: Path,
+) -> VerifiedRecordingImport:
+    """Read existing receipt-bound admission without initializing a registry.
+
+    The same owner/mixin reader verifies live identity, acquisition and receipt
+    evidence. SQLite mode=ro prevents database creation or schema/projection
+    writes; no generic Registry constructor or replacement admission SQL runs.
+    """
+
+    path = Path(registry_path).expanduser().resolve()
+    if not path.is_file():
+        raise RecordingIdentityAuthorityError(
+            "read-only registry admission requires an existing database"
+        )
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        # These are connection-local settings, not schema/database mutations.
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA query_only=ON")
+        return _ReadOnlyRecordingIdentityReader(
+            path, conn
+        ).read_verified_recording_import_by_path(zarr_path)
+    except sqlite3.Error as exc:
+        raise RecordingIdentityAuthorityError(
+            "read-only registry import admission could not be verified"
+        ) from exc
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 __all__ = [
     "IDENTITY_REVISION_SCHEMA_ID",
     "RecordingIdentityAuthorityError",
@@ -1852,5 +2290,6 @@ __all__ = [
     "canonical_dataset_path_hash",
     "collect_regular_source_recording_identity",
     "load_verified_recording_import_receipt",
+    "load_verified_registry_recording_import",
     "recording_directory_for_source_target",
 ]

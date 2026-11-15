@@ -20,10 +20,10 @@ from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.frame_domains import FrameDomain, FrameDomainUnmappedError, FrameDomains
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
+from fisheye.shared.subject_metadata import read_profile_composition
 from fisheye.utils.detection_profile import (
     DetectionProfileError,
     DetectionSourceError,
-    _extract_composition,
     _load_detection_arrays,
     _normalize_text,
     infer_zarr_use,
@@ -576,7 +576,7 @@ def build_training_image_profile_summary(
         },
         "profile_config": config,
     }
-    composition = _extract_composition(root)
+    composition = read_profile_composition(root)
     if composition:
         summary["composition"] = composition
     return json_attr_safe(summary)

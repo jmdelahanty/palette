@@ -30,7 +30,11 @@ from fisheye.shared.subject_position_expression import (
     get_estimator_profile,
     estimator_profile_digest,
 )
-from fisheye.shared.subject_position_types import POSITION_FAILURE_REASON_CODES, empty_position_xy
+from fisheye.shared.subject_position_types import (
+    POSITION_FAILURE_REASON_CODES,
+    empty_position_xy,
+    float32_quantization_record,
+)
 from fisheye.shared.subject_position_storage import canonical_source_camera_coordinate_metadata
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
@@ -84,7 +88,7 @@ def _arrays(row_count: int) -> dict[str, np.ndarray]:
     }
 
 
-def _prepared(row_count: int = 2) -> SubjectPositionPreparedInput:
+def _prepared(row_count: int = 2, **overrides: object) -> SubjectPositionPreparedInput:
     estimator = get_estimator_profile(DETECTION_BBOX_CENTROID_ESTIMATOR_ID)
     coordinate = _coordinate(row_count)
     records = {
@@ -103,8 +107,9 @@ def _prepared(row_count: int = 2) -> SubjectPositionPreparedInput:
             "commit": "c" * 40,
         },
     }
+    arrays = _arrays(row_count)
     return SubjectPositionPreparedInput(
-        arrays=_arrays(row_count),
+        arrays=arrays,
         estimator_record=estimator,
         estimator_sha256=estimator_profile_digest(estimator),
         anatomy_record=records["anatomy"],
@@ -117,6 +122,12 @@ def _prepared(row_count: int = 2) -> SubjectPositionPreparedInput:
         software_sha256=canonical_json_sha256(records["software"]),
         coordinate_record=coordinate,
         coordinate_sha256=canonical_json_sha256(coordinate),
+        **{
+            "float32_quantization": float32_quantization_record(
+                arrays["position_xy"].astype(np.float64), arrays["position_xy"], arrays["valid"]
+            ),
+            **overrides,
+        },
     )
 
 
@@ -225,3 +236,83 @@ def test_real_zarr_publication_is_complete_ineligible_and_nonpromoting(tmp_path)
             run_name=plan.run_name,
             scratch_root=tmp_path / "retry-scratch",
         )
+
+
+def test_plan_refuses_prepared_input_without_float32_quantization(tmp_path) -> None:
+    archive = tmp_path / "analysis.zarr"
+    zarr.open_group(str(archive), mode="w", zarr_format=3)
+    prepared = _prepared(2, float32_quantization=None)
+    with pytest.raises(ValueError, match="float32 quantization record"):
+        plan_subject_position_run(
+            archive,
+            prepared,
+            run_name="position_unmeasured",
+            scratch_root=tmp_path / "scratch",
+        )
+
+
+def test_prepared_input_refuses_quantization_inconsistent_with_arrays() -> None:
+    record = dict(_prepared(2).float32_quantization)
+    with pytest.raises(ValueError, match="valid_row_count differs"):
+        _prepared(2, float32_quantization={**record, "valid_row_count": 2})
+    with pytest.raises(ValueError, match="half-spacing bound"):
+        _prepared(2, float32_quantization={**record, "max_abs_error": 0.5})
+
+
+def test_manifest_v2_records_quantization_and_v1_stays_readable(tmp_path) -> None:
+    archive = tmp_path / "analysis.zarr"
+    zarr.open_group(str(archive), mode="w", zarr_format=3)
+    plan = plan_subject_position_run(
+        archive,
+        _prepared(2),
+        run_name="position_versions",
+        scratch_root=tmp_path / "scratch",
+    )
+    manifest = build_subject_position_manifest(plan, status="complete")
+    assert manifest["schema_version"] == 2
+    result = validate_subject_position_manifest(manifest, expected_status="complete")
+    assert result["float32_quantization"] == dict(plan.prepared.float32_quantization)
+
+    payload = {k: v for k, v in manifest["payload"].items() if k != "float32_quantization"}
+    historical = {
+        **manifest,
+        "schema_version": 1,
+        "payload": payload,
+        "payload_digest": canonical_json_sha256(payload),
+    }
+    assert validate_subject_position_manifest(historical)["float32_quantization"] is None
+
+    with pytest.raises(ValueError, match="field set is not exact"):
+        validate_subject_position_manifest(
+            {**historical, "schema_version": 2}
+        )
+    with pytest.raises(ValueError, match="schema version mismatch"):
+        validate_subject_position_manifest({**manifest, "schema_version": True})
+
+
+def test_published_run_refuses_quantization_above_half_spacing_bound(tmp_path) -> None:
+    archive = tmp_path / "analysis.zarr"
+    zarr.open_group(str(archive), mode="w", zarr_format=3)
+    plan = plan_subject_position_run(
+        archive,
+        _prepared(2),
+        run_name="position_quantization",
+        scratch_root=tmp_path / "scratch",
+    )
+    publish_subject_position_run(plan, keep_scratch=False)
+    final = validate_subject_position_run(archive, plan.run_path, expected_status="complete")
+    assert final["manifest_schema_version"] == 2
+    assert final["float32_quantization"]["valid_row_count"] == 1
+
+    run = zarr.open_group(str(archive), mode="r+", zarr_format=3, use_consolidated=False)[
+        plan.run_path
+    ]
+    manifest = dict(run.attrs["subject_position_manifest"])
+    payload = dict(manifest["payload"])
+    payload["float32_quantization"] = {**payload["float32_quantization"], "max_abs_error": 0.25}
+    manifest["payload"] = payload
+    manifest["payload_digest"] = canonical_json_sha256(payload)
+    run.attrs["subject_position_manifest"] = manifest
+    run.attrs["subject_position_manifest_sha256"] = manifest["payload_digest"]
+    with pytest.raises(ValueError, match="half-spacing bound"):
+        validate_subject_position_run(archive, plan.run_path, expected_status="complete")

@@ -144,8 +144,18 @@ def test_get_transitive_dependents_tail_posture_view_includes_classification() -
     assert get_transitive_dependents("tail_posture_view") == frozenset({"bout_classification"})
 
 
+def test_get_transitive_dependents_tracks_includes_motion_products() -> None:
+    assert get_transitive_dependents("tracks") == frozenset({
+        "track_kinematics",
+        "track_kinematics_visualization",
+        "swim_bouts",
+        "bout_kinematics",
+        "bout_classification",
+        "stimulus_response",
+    })
+
+
 def test_get_transitive_dependents_leaf_step() -> None:
-    assert get_transitive_dependents("tracks") == frozenset()
     assert get_transitive_dependents("refined_eye_masks") == frozenset()
     assert get_transitive_dependents("bout_kinematics") == frozenset()
     assert get_transitive_dependents("bout_classification") == frozenset()
@@ -428,19 +438,38 @@ def test_invalidate_downstream_clears_run_name_and_method(tmp_path: Path) -> Non
     registry.close()
 
 
-def test_invalidate_downstream_leaf_step_returns_empty(tmp_path: Path) -> None:
+def test_invalidate_downstream_from_tracks_marks_motion_products_missing(
+    tmp_path: Path,
+) -> None:
     registry = _create_registry(tmp_path)
+    expected = get_transitive_dependents("tracks")
+    for step in expected:
+        _seed_step(registry, step, "ok")
 
     result = invalidate_downstream_steps(
         registry,
         dataset_id="dataset_a",
         step_name="tracks",
         source="test_source",
+        recording_id="recording_a",
+        trigger_run_name="tracks_run_002",
     )
 
-    assert result["steps_invalidated"] == []
+    assert set(result["steps_invalidated"]) == expected
     assert result["steps_skipped"] == []
     assert result["errors"] == []
+    for step in expected:
+        assert _get_step_status(registry, step) == "missing"
+    row = registry.conn.execute(
+        "SELECT details_json FROM recording_step_status"
+        " WHERE dataset_id = ? AND step_name = ?;",
+        ("dataset_a", "track_kinematics"),
+    ).fetchone()
+    assert row is not None
+    assert json.loads(str(row["details_json"])) == {
+        "cascade_trigger_run": "tracks_run_002",
+        "cascade_trigger_step": "tracks",
+    }
     registry.close()
 
 

@@ -5,10 +5,15 @@ import pytest
 import zarr
 
 from fisheye.analysis import swim_bout_schema
+from fisheye.analysis import swim_bout_io as swim_bout_io_mod
+from fisheye.analysis.swim_bout_frame_axis import canonical_frame_axis_sha256
 from fisheye.analysis.swim_bout_io import (
     SwimBoutIOError,
     load_default_swim_bout_tables,
     load_exact_selector_ineligible_default_swim_bout_tables,
+    load_exact_selector_ineligible_swim_bout_events,
+    load_exact_selector_ineligible_swim_bout_overlay_tables,
+    load_exact_selector_ineligible_swim_bout_tables,
 )
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
@@ -263,6 +268,153 @@ def test_selector_ineligible_loader_returns_default_candidate_and_signal_tables(
     assert payload.signal.speed_level == "speed_exponential"
     assert payload.signal.is_default is True
     assert payload.bouts["bout_id"].tolist() == [7, 8, 9]
+
+
+def test_selector_ineligible_overlay_projection_reuses_event_reader_without_bulk_tables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _build_selector_ineligible_v8_root()
+    loaded_names: list[str] = []
+    original = swim_bout_io_mod._load_structured_or_empty
+
+    def _record(group, name, *args, **kwargs):  # type: ignore[no-untyped-def]
+        loaded_names.append(str(name))
+        return original(group, name, *args, **kwargs)
+
+    monkeypatch.setattr(swim_bout_io_mod, "_load_structured_or_empty", _record)
+
+    events = load_exact_selector_ineligible_swim_bout_events(
+        root,
+        run_name=RUN_NAME,
+    )
+    overlay = load_exact_selector_ineligible_swim_bout_overlay_tables(
+        root,
+        run_name=RUN_NAME,
+        candidate_id=0,
+        signal_id=1,
+    )
+
+    assert events.bouts["bout_id"].tolist() == [7, 8, 9]
+    assert overlay.bouts["bout_id"].tolist() == [7, 8, 9]
+    assert overlay.peak_events["bout_id"].tolist() == [7, 8, 9]
+    assert overlay.inter_bout_intervals["prev_bout_id"].tolist() == [7, 8, 9]
+    np.testing.assert_allclose(
+        overlay.series["detection_signal_mm_s"],
+        [0.0, 5.0, 8.0, 0.0, 6.0, 9.0, 0.0],
+    )
+    assert {"bout_points", "summary_metrics", "histograms"}.isdisjoint(
+        loaded_names
+    )
+
+
+def test_selector_ineligible_overlay_accepts_exact_parent_and_bound_frame_axis() -> None:
+    root = _build_selector_ineligible_v8_root()
+    parent = root["analysis/swim_bout_runs"]
+    frames = np.arange(7, dtype=np.int64)
+    parent[RUN_NAME].attrs["frame_axis_contract"] = {
+        "content_sha256": canonical_frame_axis_sha256(frames)
+    }
+
+    events = load_exact_selector_ineligible_swim_bout_events(
+        None,
+        swim_bout_parent=parent,
+        run_name=RUN_NAME,
+    )
+    overlay = load_exact_selector_ineligible_swim_bout_overlay_tables(
+        None,
+        swim_bout_parent=parent,
+        authoritative_frame_indices=frames,
+        run_name=RUN_NAME,
+        signal_id=1,
+    )
+
+    assert events.run_path == f"analysis/swim_bout_runs/{RUN_NAME}"
+    np.testing.assert_array_equal(overlay.series["frame_indices"], frames)
+
+
+def test_selector_ineligible_parent_overlay_rejects_wrong_bound_frame_axis() -> None:
+    root = _build_selector_ineligible_v8_root()
+    parent = root["analysis/swim_bout_runs"]
+    parent[RUN_NAME].attrs["frame_axis_contract"] = {
+        "content_sha256": canonical_frame_axis_sha256(
+            np.arange(7, dtype=np.int64)
+        )
+    }
+
+    with pytest.raises(SwimBoutIOError, match="frame axis"):
+        load_exact_selector_ineligible_swim_bout_overlay_tables(
+            None,
+            swim_bout_parent=parent,
+            authoritative_frame_indices=np.arange(1, 8, dtype=np.int64),
+            run_name=RUN_NAME,
+            signal_id=1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("speed_level", "signal_id", "bout_ids"),
+    (
+        ("speed_filtered", 0, []),
+        ("speed_exponential", 1, [7, 8, 9]),
+        ("speed_smoothed", 2, []),
+    ),
+)
+def test_selector_ineligible_loader_supports_one_explicit_signal_without_selectors(
+    speed_level: str,
+    signal_id: int,
+    bout_ids: list[int],
+) -> None:
+    root = _build_selector_ineligible_v8_root()
+
+    payload = load_exact_selector_ineligible_swim_bout_tables(
+        root,
+        run_name=RUN_NAME,
+        speed_level=speed_level,
+    )
+
+    assert payload.run_name == RUN_NAME
+    assert payload.candidate.candidate_id == 0
+    assert payload.signal.signal_id == signal_id
+    assert payload.signal.speed_level == speed_level
+    assert payload.bouts["bout_id"].tolist() == bout_ids
+
+
+def test_selector_ineligible_explicit_signal_loader_rejects_unknown_selection() -> None:
+    root = _build_selector_ineligible_v8_root()
+
+    with pytest.raises(SwimBoutIOError, match="not found"):
+        load_exact_selector_ineligible_swim_bout_tables(
+            root,
+            run_name=RUN_NAME,
+            speed_level="speed_invented",
+        )
+
+
+def test_selector_ineligible_explicit_signal_loader_rejects_conflicting_identity() -> None:
+    root = _build_selector_ineligible_v8_root()
+
+    with pytest.raises(SwimBoutIOError, match="identify different signals"):
+        load_exact_selector_ineligible_swim_bout_tables(
+            root,
+            run_name=RUN_NAME,
+            signal_id=0,
+            speed_level="exponential",
+        )
+
+
+@pytest.mark.parametrize(("field", "value"), (("candidate_id", True), ("signal_id", "1")))
+def test_selector_ineligible_explicit_signal_loader_requires_exact_integer_ids(
+    field: str,
+    value: object,
+) -> None:
+    root = _build_selector_ineligible_v8_root()
+
+    with pytest.raises(TypeError, match=field):
+        load_exact_selector_ineligible_swim_bout_tables(
+            root,
+            run_name=RUN_NAME,
+            **{field: value},
+        )
 
 
 @pytest.mark.parametrize(

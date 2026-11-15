@@ -42,6 +42,16 @@ class _FakeGroup:
         return self._members.keys()
 
 
+class _CountingGroup(_FakeGroup):
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.reads: dict[str, int] = {}
+
+    def __getitem__(self, key: str):
+        self.reads[key] = self.reads.get(key, 0) + 1
+        return super().__getitem__(key)
+
+
 class _FakeIndexManager:
     metadata_rows: list[mod.DatasetMetadata] = []
     split_rows: list[tuple[str, int]] = []
@@ -121,6 +131,58 @@ def test_pose_loader_uses_metadata_label_signature(monkeypatch) -> None:
     ds = mod.ZarrYOLODataset(cfg, mode="train")
 
     assert ds.keypoint_labels == ["eye_left", "tail_tip", "swim_bladder"]
+
+
+def test_pose_getitem_uses_cached_roi_array_without_resolving_run(
+    monkeypatch,
+) -> None:
+    path = "/tmp/pose_cached.zarr"
+    root = _fake_pose_root()
+    counting_root = _CountingGroup(attrs=root.attrs, members=root._members)
+    _FakeIndexManager.metadata_rows = [
+        mod.DatasetMetadata(
+            path=path,
+            name="pose_cached",
+            total_frames=1,
+            valid_frames=1,
+            column_names=["eye_left", "tail_tip", "swim_bladder"],
+            keypoint_run="kp_001",
+            bbox_array_path="crop_runs/crop_001/bbox_norm_coords",
+        )
+    ]
+    _FakeIndexManager.split_rows = [(path, 0)]
+    monkeypatch.setattr(mod, "GlobalIndexManager", _FakeIndexManager)
+    monkeypatch.setattr(mod.zarr, "open", lambda *args, **kwargs: counting_root)
+
+    dataset = mod.ZarrYOLODataset(
+        mod.ZarrDatasetConfig(
+            datasets={
+                "pose": {
+                    "zarr_path": path,
+                    "source_type": "filtered",
+                    "input_format": "gray",
+                    "split": {"train": 1.0, "val": 0.0},
+                }
+            },
+            task="pose",
+            random_seed=11,
+            sampling_strategy="proportional",
+        ),
+        mode="train",
+    )
+    reads_after_init = dict(counting_root.reads)
+
+    sample = dataset[0]
+
+    assert sample["img"].shape == (3, 32, 32)
+    assert counting_root.reads == reads_after_init
+    receipt = dataset.pose_preprocessing_receipt()
+    assert receipt["schema_id"] == "palette.pose_training_preprocessing_runtime.v2"
+    assert receipt["source_bindings"][path] == {
+        "crop_run": "crop_001",
+        "roi_images_path": "crop_runs/crop_001/roi_images",
+        "selection_lifetime": "fixed_at_dataset_construction",
+    }
 
 
 def test_pose_loader_rejects_mixed_metadata_label_signatures(monkeypatch) -> None:

@@ -476,6 +476,15 @@ remains gated by Phase 9.
 
 ## Completion criteria
 
+The versioned per-ROI visible-tail-endpoint acceptance in the training mask-tail
+recipe is a narrow derivation exception for a body mask touching the crop edge.
+It binds the reviewer, reason, row/frame/crop identity, and exact body-mask
+content, and records that the derived tip is the visible endpoint. It can change
+numerical derivation eligibility, but does not approve the subject mask or
+keypoints, waive required review, select an authority, or activate a scientific
+product. Review and selector contracts in
+this checklist remain separate gates.
+
 This work is complete only when:
 
 - every maintained product declares its technical authority mechanism and

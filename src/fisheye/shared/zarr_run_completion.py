@@ -245,14 +245,17 @@ def mark_run_started(
     :func:`mark_run_complete` is called.
     """
 
-    attrs = run_group.attrs
-    attrs[RUN_COMPLETION_CONTRACT_ATTR] = RUN_COMPLETION_CONTRACT
-    attrs[RUN_COMPLETION_STATUS_ATTR] = RUN_STATUS_RUNNING
-    attrs[RUN_STARTED_AT_ATTR] = started_at_utc or utc_now_iso()
+    # One metadata write: the status transition is never observed half-applied.
+    updates = {
+        RUN_COMPLETION_CONTRACT_ATTR: RUN_COMPLETION_CONTRACT,
+        RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_RUNNING,
+        RUN_STARTED_AT_ATTR: started_at_utc or utc_now_iso(),
+    }
     if run_name is not None:
-        attrs[RUN_NAME_ATTR] = str(run_name)
+        updates[RUN_NAME_ATTR] = str(run_name)
     if stage is not None:
-        attrs[RUN_STAGE_ATTR] = str(stage)
+        updates[RUN_STAGE_ATTR] = str(stage)
+    run_group.attrs.update(updates)
 
 
 def mark_run_complete(
@@ -288,12 +291,15 @@ def mark_run_complete(
             except Exception:
                 pass
         raise
-    attrs = run_group.attrs
-    attrs[RUN_COMPLETION_CONTRACT_ATTR] = RUN_COMPLETION_CONTRACT
-    attrs[RUN_COMPLETION_STATUS_ATTR] = RUN_STATUS_COMPLETE
-    attrs[RUN_COMPLETED_AT_ATTR] = completed_at_utc or utc_now_iso()
+    # One metadata write: the status transition is never observed half-applied.
+    updates = {
+        RUN_COMPLETION_CONTRACT_ATTR: RUN_COMPLETION_CONTRACT,
+        RUN_COMPLETION_STATUS_ATTR: RUN_STATUS_COMPLETE,
+        RUN_COMPLETED_AT_ATTR: completed_at_utc or utc_now_iso(),
+    }
     if run_name is not None:
-        attrs[RUN_NAME_ATTR] = str(run_name)
+        updates[RUN_NAME_ATTR] = str(run_name)
+    run_group.attrs.update(updates)
     if parent_group is not None and run_name is not None:
         name = str(run_name)
         if is_run_selector_eligible(run_group):

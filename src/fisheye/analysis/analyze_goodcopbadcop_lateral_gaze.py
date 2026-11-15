@@ -69,16 +69,6 @@ BEHIND_C = "#8a8a8a"
 EPOCH_C = {"pre": "#8a8a8a", "chase": "#c1435b", "post": "#1b3a6b"}
 
 
-def wrap180(a):
-    return (a + 180.0) % 360.0 - 180.0
-
-
-def bearing_of(obj_xy, fish_xy, heading_deg):
-    dx = obj_xy[:, 0] - fish_xy[:, 0]
-    dy = obj_xy[:, 1] - fish_xy[:, 1]
-    return wrap180(-np.degrees(np.arctan2(dy, dx)) - heading_deg)
-
-
 def rotate_about(pt_xy, cx, cy, deg):
     th = np.radians(deg)
     x = pt_xy[:, 0] - cx

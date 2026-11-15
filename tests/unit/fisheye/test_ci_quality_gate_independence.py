@@ -107,14 +107,35 @@ def test_test_shards_publish_complete_file_timing_evidence() -> None:
     steps = test_job["steps"]
     by_name = {step.get("name"): step for step in steps}
 
+    isolated = by_name["Run isolated subject-mask finalizer tests"]
+    assert (
+        isolated["if"]
+        == "steps.subject-mask-finalizer-fixture-owner.outputs.selected == 'true'"
+    )
+    isolated_command = str(isolated["run"])
+    assert (
+        "python -m pytest tests/unit/fisheye/test_finalize_subject_masks.py"
+        in isolated_command
+    )
+    assert "pytest-shard-${{ matrix.shard }}.subject-mask-finalizer.xml" in (
+        isolated_command
+    )
+
     run_command = str(by_name["Run non-GPU test shard"]["run"])
     assert "--shard-count 16" in run_command
+    assert (
+        "--deselect=tests/unit/fisheye/test_finalize_subject_masks.py"
+        in run_command
+    )
     assert "--junitxml=" in run_command
     assert "junit_family=legacy" in run_command
     assert "junit_duration_report=total" in run_command
-    assert "ci_pytest_junit_summary.py" in str(
-        by_name["Summarize per-file pytest durations"]["run"]
+    summary_command = str(by_name["Summarize per-file pytest durations"]["run"])
+    assert "ci_pytest_junit_summary.py" in summary_command
+    assert 'for report in ".ci-results/pytest-shard-${{ matrix.shard }}"*.xml' in (
+        summary_command
     )
+    assert 'junit_args+=(--junitxml "$report")' in summary_command
     upload = by_name["Upload pytest duration evidence"]
     assert upload["uses"] == "actions/upload-artifact@v4"
     assert upload["if"] == "always()"

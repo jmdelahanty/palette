@@ -22,6 +22,7 @@ from fisheye.diagnostics.video.batch import build_batch_report
 from fisheye.diagnostics.video.camera_csv import expected_camera_csv_path
 from fisheye.diagnostics.video.probe import inspect_stream
 from fisheye.shared.batch_logging import make_run_id, utc_now
+from fisheye.shared.orange_frame_identity import keyframe_field_name
 from fisheye.shared.recording_preflight import (
     PRECHECK_FAIL,
     PRECHECK_NOT_RUN,
@@ -240,7 +241,9 @@ def _repair_keyframe_json(
     if not target.keyframe_path.exists():
         raise FileNotFoundError(f"keyframe JSON is missing: {target.keyframe_path}")
     payload = _load_json(target.keyframe_path)
-    raw_keyframes = payload.get("keyframe_frames")
+    # Keep the source's own name (frame_identity_v1 renamed keyframe_frames).
+    keyframe_field = keyframe_field_name(payload, label=str(target.keyframe_path))
+    raw_keyframes = payload[keyframe_field]
     if not isinstance(raw_keyframes, list):
         raise ValueError(f"keyframe JSON lacks keyframe_frames list: {target.keyframe_path}")
     keyframes = [int(frame) for frame in raw_keyframes]
@@ -279,7 +282,7 @@ def _repair_keyframe_json(
         backup.unlink()
     shutil.copy2(target.keyframe_path, backup)
     payload["total_frames"] = int(target.target_frames)
-    payload["keyframe_frames"] = repaired_keyframes
+    payload[keyframe_field] = repaired_keyframes
     payload["palette_trim_repair"] = {
         "tool": "fisheye.utils.repair_trimmed_video_sidecars",
         "repair_id": repair_id,

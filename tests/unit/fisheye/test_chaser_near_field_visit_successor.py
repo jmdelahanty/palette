@@ -5,6 +5,8 @@ import json
 
 import numpy as np
 import pytest
+from matplotlib import pyplot as plt
+from matplotlib.text import Text
 
 from fisheye.analysis.provider_chaser_position_suite import (
     CircularArena,
@@ -37,6 +39,7 @@ from fisheye.analysis_workflows.exact_immutable_child_validation_receipt import 
 )
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.utils.plot_chaser_near_field_visit_successor import (
+    PLOT_RECIPE_ID,
     main as plot_main,
     render_near_field_visit_trajectories,
 )
@@ -441,6 +444,7 @@ def test_persisted_visit_view_and_static_render_use_exact_ragged_rows(
     files, parameters = render_near_field_visit_trajectories(
         handle,
         output_stem=tmp_path / "visits",
+        provider_role="detection",
     )
 
     assert len(view.panels) == 2
@@ -460,6 +464,7 @@ def test_persisted_visit_view_and_static_render_use_exact_ragged_rows(
         parameters["rendering"]["chaser_marker"]["appearance_authority_claimed"]
         is False
     )
+    assert parameters["provider_display"]["binding"]["provider_role"] == ("detection")
 
 
 def test_receipt_bound_visit_plot_rehashes_only_declared_view_arrays(
@@ -502,6 +507,8 @@ def test_receipt_bound_visit_plot_rehashes_only_declared_view_arrays(
                 "recording",
                 "--output-dir",
                 str(output_dir),
+                "--provider-role",
+                "detection",
                 "--source-validation-receipt",
                 str(validation_receipt),
             ]
@@ -514,6 +521,8 @@ def test_receipt_bound_visit_plot_rehashes_only_declared_view_arrays(
     assert receipt["schema_id"] == (
         "palette.analysis.chaser_near_field_visits.plot_receipt"
     )
+    assert receipt["schema_version"] == 2
+    assert receipt["plot_recipe_id"] == PLOT_RECIPE_ID
     assert receipt["source_binding"]["verification_mode"] == (
         "receipt_bound_targeted_array_rehash_v1"
     )
@@ -560,6 +569,7 @@ def test_visit_plot_retains_boundary_censored_visits_by_default(tmp_path) -> Non
     files, parameters = render_near_field_visit_trajectories(
         handle,
         output_stem=tmp_path / "censored",
+        provider_role="detection",
     )
 
     assert [visit.complete for visit in view.visits] == [False, False]
@@ -568,3 +578,71 @@ def test_visit_plot_retains_boundary_censored_visits_by_default(tmp_path) -> Non
     assert parameters["selection"]["include_censored"] is True
     assert parameters["selection"]["visit_row_ids"] == [0, 1]
     assert all(path.is_file() for path in files)
+
+
+def test_long_near_field_provider_and_chaser_ids_are_not_visible(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    long_provider_id = "opaque-detection-authority:" + "d" * 96
+    source = _radial_inputs()
+    source = replace(
+        source,
+        fish_position_authority={
+            **source.fish_position_authority,
+            "provider_id": long_provider_id,
+        },
+        chaser_registry={
+            "1": "opaque-stimulus-chaser:" + "x" * 96,
+            "2": "opaque-stimulus-chaser:" + "y" * 96,
+        },
+    )
+    prepared = prepare_chaser_near_field_visit_successor(_visit_inputs(source))
+    figures = []
+
+    def capture_figure(figure, stem):
+        figures.append(figure)
+        return stem.with_suffix(".png"), stem.with_suffix(".pdf")
+
+    monkeypatch.setattr(
+        "fisheye.utils.plot_chaser_near_field_visit_successor._save_figure",
+        capture_figure,
+    )
+    try:
+        _, parameters = render_near_field_visit_trajectories(
+            _PreparedViewHandle(prepared),
+            output_stem=tmp_path / "near-field",
+            provider_role="detection",
+        )
+        visible_text = "\n".join(
+            artist.get_text()
+            for figure in figures
+            for artist in figure.findobj(match=Text)
+        )
+        assert long_provider_id not in visible_text
+        assert source.chaser_registry["1"] not in visible_text
+        assert source.chaser_registry["2"] not in visible_text
+        assert "Detection-derived position" in visible_text
+        assert "chaser 1 · aggressive" in visible_text
+        arena_direction = next(
+            artist
+            for figure in figures
+            for artist in figure.findobj(match=Text)
+            if artist.get_text() == "toward arena centre"
+        )
+        arena_direction.figure.canvas.draw()
+        renderer = arena_direction.figure.canvas.get_renderer()
+        text_bounds = arena_direction.get_window_extent(renderer=renderer)
+        axes_bounds = arena_direction.axes.get_window_extent(renderer=renderer)
+        assert text_bounds.x0 >= axes_bounds.x0
+        assert text_bounds.x1 <= axes_bounds.x1
+    finally:
+        for figure in figures:
+            plt.close(figure)
+
+    binding = parameters["provider_display"]["binding"]
+    assert binding["provider_id"] == long_provider_id
+    assert binding["provider_role"] == "detection"
+    assert parameters["provider_display"]["panel_chaser_identity_display"] == (
+        "numeric_identity_code_plus_sealed_behavior_role"
+    )

@@ -31,14 +31,21 @@ if TYPE_CHECKING:
     import zarr
 
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.subject_fields import from_legacy_zebrobot_snapshot
 from fisheye.shared.subject_metadata import (
     MissingSubjectMetadataError,
+    explicit_subject_ids,
     resolve_subject_metadata,
 )
 from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
 from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from .analytics_reports import RegistryAnalyticsReportMixin
-from .extractors.acquisition_video_streams import _extract_acquisition_video_stream_rows
+from .realtime_products import RegistryRealtimeProductsMixin
+from .extractors.acquisition_video_streams import (
+    _extract_acquisition_video_stream_rows,
+    collection_video_facts,
+)
+from .extractors.realtime_products import extract_realtime_product_rows
 from .extractors.chaser_metadata import extract_recording_chaser_metadata
 from .extractors.stimulus_metadata import extract_stimulus_metadata
 from .extractors.crop import _extract_crop_quality_rows
@@ -546,43 +553,6 @@ def _first_value(payload: Dict[str, Any], keys: Iterable[str]) -> Optional[Any]:
     return None
 
 
-def _normalize_parents(value: Any) -> List[Dict[str, Optional[str]]]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        parents: List[Dict[str, Optional[str]]] = []
-        for item in value:
-            if isinstance(item, dict):
-                parents.append(
-                    {
-                        "identifier": item.get("identifier"),
-                        "sex": item.get("sex"),
-                    }
-                )
-            elif isinstance(item, str):
-                parents.append({"identifier": item, "sex": None})
-        return parents
-    if isinstance(value, (bytes, bytearray)):
-        try:
-            value = value.decode("utf-8")
-        except Exception:
-            return []
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return []
-        parsed = _json_loads(value)
-        if isinstance(parsed, list):
-            return _normalize_parents(parsed)
-        parents = []
-        for part in value.split(";"):
-            ident = part.strip()
-            if ident:
-                parents.append({"identifier": ident, "sex": None})
-        return parents
-    return []
-
-
 def _compute_path_hash(path: Path) -> str:
     return canonical_dataset_path_hash(path)
 
@@ -683,21 +653,24 @@ def _extract_protocol(root: zarr.Group) -> Tuple[Optional[str], Optional[str]]:
 
 def _extract_snapshot(
     root: zarr.Group,
-) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], Optional[Dict[str, Any]]]:
+    """Canonical subject fields (fisheye.shared.subject_fields), source, raw mapping."""
+
     try:
         canonical = resolve_subject_metadata(root, allow_legacy=True)
     except MissingSubjectMetadataError:
         canonical = None
     if canonical is not None:
-        return dict(canonical.metadata), canonical.group_path
+        return dict(canonical.subject), canonical.group_path, dict(canonical.metadata)
     analysis = root.get("analysis_metadata")
     if analysis is not None:
         for key in ("zebrobot_snapshot",):
             raw = analysis.attrs.get(key)
             payload = _json_loads(raw)
             if payload:
-                return payload, key
-    return None, None
+                subject = from_legacy_zebrobot_snapshot(payload, explicit_subject_ids(payload))
+                return subject, key, payload
+    return None, None, None
 
 
 def _extract_session_context(root: zarr.Group) -> Dict[str, Any]:
@@ -800,7 +773,17 @@ def _extract_recording_context(
         "canvas_name": first_text("canvas_name"),
         "protocol_name": (first_text("protocol_name", "protocol_name_from_definition") or protocol_name),
         "dish_design": first_text("dish_design") or _decode_attr(acquisition.get("dish_design")),
+        "context_source": first_text("context_source"),
+        "recording_context_schema_version": _optional_int(
+            first_text("recording_context_schema_version")
+        ),
+        "recording_intent": first_text("recording_intent"),
+        "data_origin": first_text("data_origin"),
     }
+
+
+def _optional_int(value: Optional[str]) -> Optional[int]:
+    return int(value) if value is not None else None
 
 
 def _extract_arena_config(root: zarr.Group) -> Dict[str, Any]:
@@ -912,6 +895,13 @@ def _extract_acquisition(root: zarr.Group) -> Dict[str, Any]:
         if isinstance(compressor, dict):
             compression_name = compressor.get("name")
             compression_level = _as_int(compressor.get("clevel"))
+    collection = collection_video_facts(root)
+    if fps is None:
+        fps = collection.get("fps")
+    if video_codec is None:
+        video_codec = collection.get("codec")
+    if video_pix_fmt is None:
+        video_pix_fmt = collection.get("pix_fmt")
     if has_images_ds and "gray" not in downsample_formats:
         downsample_formats.append("gray")
     if has_images_ds_rgb and "rgb" not in downsample_formats:
@@ -999,28 +989,35 @@ def _extract_acquisition(root: zarr.Group) -> Dict[str, Any]:
     }
 
 
-def _extract_provenance(snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    if not snapshot:
+def _single_subject_id(subject: Mapping[str, Any]) -> Optional[str]:
+    if subject.get("identity_scope") == "recording_local_placeholder":
+        return None
+    ids = subject.get("subject_ids") or []
+    return str(ids[0]) if len(ids) == 1 else None
+
+
+def _extract_provenance(
+    subject: Optional[Mapping[str, Any]], raw: Optional[Mapping[str, Any]] = None
+) -> Dict[str, Any]:
+    """Provenance columns from canonical subject fields (one name per fact)."""
+
+    if not subject:
         return {}
-    dish = snapshot.get("dish") or snapshot
-    cross = snapshot.get("cross") or {}
-    identity_is_placeholder = (
-        str(snapshot.get("identity_scope") or "").strip().casefold() == "recording_local_placeholder"
-    )
+    raw = raw or {}
     return {
-        "fish_id": None if identity_is_placeholder else snapshot.get("fish_id"),
-        "subject_count": snapshot.get("subject_count"),
-        "dish_id": snapshot.get("dish_id") or dish.get("dish_id"),
-        "cross_id": dish.get("cross_id") or cross.get("cross_id"),
-        "line_strain": cross.get("line_strain") or dish.get("line_strain"),
-        "genotype": dish.get("genotype"),
-        "parents": _normalize_parents(cross.get("parents") or dish.get("parents")),
-        "species": dish.get("species"),
-        "sex": dish.get("sex"),
-        # Canonical source field in current subject metadata payloads.
-        "dpf_at_acquisition": _as_int(snapshot.get("days_post_fertilization")),
-        "snapshot_status": snapshot.get("status"),
-        "snapshot_missing": snapshot.get("missing"),
+        "fish_id": _single_subject_id(subject),  # column name predates subject_id
+        "subject_count": subject.get("subject_count"),
+        "dish_id": subject.get("dish_id"),
+        "cross_id": subject.get("cross_id"),
+        "line_strain": subject.get("line_strain"),
+        "genotype": subject.get("genotype"),
+        "parents": subject.get("parents") or [],
+        "species": subject.get("species"),
+        "sex": subject.get("sex"),
+        "dpf_at_acquisition": subject.get("dpf_at_acquisition"),
+        # Lookup status of the legacy zebrobot snapshot form, not a subject fact.
+        "snapshot_status": raw.get("status"),
+        "snapshot_missing": raw.get("missing"),
     }
 
 
@@ -1039,7 +1036,9 @@ def _normalize_zarr_use(value: Any) -> Optional[str]:
     if text is None:
         return None
     norm = text.lower()
-    if norm in {"training", "analysis", "inference", "export", "archive"}:
+    # recovered_training: selector-ineligible recovered derivatives
+    # (register_recovered_training_archives); never selected as training.
+    if norm in {"training", "analysis", "inference", "export", "archive", "recovered_training"}:
         return norm
     if norm in {"production"}:
         return "analysis"
@@ -1233,6 +1232,7 @@ def _build_detection_source_records(root: zarr.Group) -> List[Dict[str, Any]]:
 class Registry(
     RegistryAcquisitionBatchMixin,
     RegistryAnalyticsReportMixin,
+    RegistryRealtimeProductsMixin,
     RegistryRecordingIdentityMixin,
     RegistryMigrationMixin,
 ):
@@ -1349,13 +1349,9 @@ class Registry(
         return row is not None
 
     def _record_schema_version(self, *, version: int, name: str) -> None:
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO schema_version (version, name, applied_utc)
-            VALUES (?, ?, ?);
-            """,
-            (int(version), str(name), _utc_now()),
-        )
+        from .migrations import record_schema_version
+
+        record_schema_version(self.conn, version=version, name=name, applied_utc=_utc_now())
 
     def _apply_schema_migrations(self) -> None:
         migrations = sorted(self._schema_migrations(), key=lambda item: item[0])
@@ -2524,6 +2520,15 @@ class Registry(
             "last_seen_utc": now,
             "status": "active",
         }
+        # B7: receipt-bound rows are owned by the recording identity authority.
+        explicit = dict(session_uuid=session_uuid, recording_id=recording_id, artifact_kind=artifact_kind)
+        explicit.update(zarr_origin=_normalize_zarr_origin(zarr_origin), zarr_use=_normalize_zarr_use(zarr_use))
+        explicit.update({key: payload[key] for key in payload if key.startswith("source_")})
+        if self.refuse_or_touch_verified_source_dataset(dataset_id, zarr_path=zarr_path, explicit=explicit):
+            return
+        self.refuse_conflicting_verified_source_identity(
+            recording_id=resolved_recording_id, session_uuid=session_uuid, writer="upsert_dataset"
+        )
         self.conn.execute(
             """
             INSERT INTO datasets (
@@ -2577,6 +2582,10 @@ class Registry(
         canvas_name: Optional[str] = None,
         protocol_name: Optional[str] = None,
         dish_design: Optional[str] = None,
+        context_source: Optional[str] = None,
+        recording_context_schema_version: Optional[int] = None,
+        recording_intent: Optional[str] = None,
+        data_origin: Optional[str] = None,
     ) -> None:
         now = _utc_now()
         payload = {
@@ -2599,9 +2608,15 @@ class Registry(
             "canvas_name": canvas_name,
             "protocol_name": protocol_name,
             "dish_design": dish_design,
+            "context_source": context_source,
+            "recording_context_schema_version": recording_context_schema_version,
+            "recording_intent": recording_intent,
+            "data_origin": data_origin,
             "created_utc": now,
             "updated_utc": now,
         }
+        if self.refuse_verified_source_recording_change(payload):
+            return
         self.conn.execute(
             """
             INSERT INTO recordings (
@@ -2610,7 +2625,9 @@ class Registry(
                 experiment_context_status, experiment_context_source,
                 experiment_context_status_detail, stimulus_runs_available,
                 rig_id, arena_id, camera_id, canvas_name,
-                protocol_name, dish_design, created_utc, updated_utc
+                protocol_name, dish_design, context_source,
+                recording_context_schema_version, recording_intent, data_origin,
+                created_utc, updated_utc
             )
             VALUES (
                 :recording_id, :session_uuid, :recording_name, :recording_path, :started_utc,
@@ -2618,7 +2635,9 @@ class Registry(
                 :experiment_context_status, :experiment_context_source,
                 :experiment_context_status_detail, :stimulus_runs_available,
                 :rig_id, :arena_id, :camera_id, :canvas_name,
-                :protocol_name, :dish_design, :created_utc, :updated_utc
+                :protocol_name, :dish_design, :context_source,
+                :recording_context_schema_version, :recording_intent, :data_origin,
+                :created_utc, :updated_utc
             )
             ON CONFLICT(recording_id) DO UPDATE SET
                 session_uuid=COALESCE(excluded.session_uuid, recordings.session_uuid),
@@ -2651,6 +2670,13 @@ class Registry(
                 canvas_name=COALESCE(excluded.canvas_name, recordings.canvas_name),
                 protocol_name=COALESCE(excluded.protocol_name, recordings.protocol_name),
                 dish_design=COALESCE(excluded.dish_design, recordings.dish_design),
+                context_source=COALESCE(excluded.context_source, recordings.context_source),
+                recording_context_schema_version=COALESCE(
+                    excluded.recording_context_schema_version,
+                    recordings.recording_context_schema_version
+                ),
+                recording_intent=COALESCE(excluded.recording_intent, recordings.recording_intent),
+                data_origin=COALESCE(excluded.data_origin, recordings.data_origin),
                 updated_utc=excluded.updated_utc;
             """,
             payload,
@@ -3033,15 +3059,10 @@ class Registry(
 
         if not recording_id or not snapshot:
             return
-        if str(snapshot.get("identity_scope") or "").strip().casefold() == "recording_local_placeholder":
+        # ``snapshot`` is canonical subject fields (fisheye.shared.subject_fields).
+        if snapshot.get("identity_scope") == "recording_local_placeholder":
             return
-        raw_ids = snapshot.get("subject_ids") or snapshot.get("fish_ids")
-        if isinstance(raw_ids, (list, tuple)):
-            subject_ids = [str(value).strip() for value in raw_ids if str(value).strip()]
-        else:
-            single = _as_text(snapshot.get("fish_id") or snapshot.get("subject_id"))
-            subject_ids = [single] if single else []
-        subject_ids = list(dict.fromkeys(subject_ids))
+        subject_ids = list(dict.fromkeys(str(value) for value in snapshot.get("subject_ids") or ()))
         if not subject_ids:
             return
         recording_row = self.conn.execute(
@@ -3062,14 +3083,14 @@ class Registry(
                 f"ids={len(subject_ids)}, subject_count={subject_count}"
             )
 
-        provenance = _extract_provenance(dict(snapshot))
+        provenance = _extract_provenance(snapshot)
         dish_id = _as_text(provenance.get("dish_id"))
         cross_id = _as_text(provenance.get("cross_id"))
         species = _as_text(provenance.get("species"))
         sex = _as_text(provenance.get("sex"))
         genotype = _as_text(provenance.get("genotype"))
         line_strain = _as_text(provenance.get("line_strain"))
-        dpf = _as_int(provenance.get("dpf_at_acquisition") or snapshot.get("dpf_at_acquisition") or snapshot.get("dpf"))
+        dpf = _as_int(provenance.get("dpf_at_acquisition"))
         parents = provenance.get("parents")
         now = _utc_now()
         source_payload = _json_dumps(
@@ -6563,8 +6584,8 @@ class Registry(
         """Project registry metadata after identity has been decided elsewhere."""
 
         protocol_name, protocol_hash = _extract_protocol(root)
-        snapshot, snapshot_source = _extract_snapshot(root)
-        provenance = _extract_provenance(snapshot)
+        snapshot, snapshot_source, raw_snapshot = _extract_snapshot(root)
+        provenance = _extract_provenance(snapshot, raw_snapshot)
         context = _extract_session_context(root)
         acquisition = _extract_acquisition(root)
         recording_context = _extract_recording_context(
@@ -6579,7 +6600,15 @@ class Registry(
             raise RecordingIdentityAuthorityError(
                 "current source root is missing required recording context"
             )
-        if recording_context:
+        # B7: a derived artifact sharing a verified-source recording_id gets its
+        # own dataset row; recording-level rows stay owned by the authority.
+        derived_of_verified_source = not authoritative_current_source and (
+            self.refuse_conflicting_verified_source_identity(
+                recording_id=recording_id, session_uuid=metadata.session_uuid, writer="register_from_root"
+            )
+            is not None
+        )
+        if recording_context and not derived_of_verified_source:
             if authoritative_current_source:
                 if (
                     recording_id is None
@@ -6610,18 +6639,22 @@ class Registry(
             acquisition=acquisition,
             zarr_purpose=metadata.zarr_purpose,
         )
-        self.upsert_subject_snapshot_entities(
-            dataset_id,
-            recording_id=recording_id,
-            snapshot=snapshot,
-            snapshot_source=snapshot_source,
-            require_existing_recording=authoritative_current_source,
-        )
+        if not derived_of_verified_source:
+            self.upsert_subject_snapshot_entities(
+                dataset_id,
+                recording_id=recording_id,
+                snapshot=snapshot,
+                snapshot_source=snapshot_source,
+                require_existing_recording=authoritative_current_source,
+            )
         self.replace_detection_sources(dataset_id, _build_detection_source_records(root))
         acquisition_rows = _extract_acquisition_video_stream_rows(
             root, zarr_path=zarr_path, recording_id=recording_id, zarr_use=zarr_use
         )
         self.replace_acquisition_video_streams(dataset_id, acquisition_rows)
+        self.replace_recording_realtime_products(
+            dataset_id, extract_realtime_product_rows(root, recording_id=recording_id)
+        )
         chaser_metadata = extract_recording_chaser_metadata(
             root,
             zarr_path=zarr_path,

@@ -724,24 +724,38 @@ Default path:
 ~/.palette/labeling_work.sqlite
 ```
 
-Preferred backup procedure:
+Keep live labeling stores on local disk: SQLite file locking is reliable there
+for several server processes, but not on NFS. Durability comes from validated
+snapshots copied to `/groups`.
 
-1. Use the `backup-store` command for SQLite-consistent backups.
-2. Store backups with timestamped names.
-3. If using filesystem copies instead, stop the service or use a
-   SQLite-aware snapshot tool and copy SQLite sidecar files such as `-wal` and
-   `-shm`.
-4. Restore by stopping the service, replacing the database files, then starting
-   the service again.
-
-Example SQLite-safe backup:
+Scheduled backups (read-only on the live store; safe while servers run):
 
 ```bash
-backup_dir=/path/to/backups/labeling_work_$(date +%Y%m%d_%H%M%S)
-mkdir -p "$backup_dir"
-scripts/py -m fisheye.utils.labeling_work --store /path/to/labeling_work.sqlite \
-  backup-store --output "$backup_dir/labeling_work.sqlite"
+scripts/py -m fisheye.labeling.store_backup \
+  --store ~/.palette/labeling_work.sqlite=labeling_work \
+  --store /path/to/other_store.sqlite=other_label
 ```
+
+Each run takes a consistent snapshot through a read-only connection with the
+SQLite online backup API, runs `PRAGMA integrity_check` and
+`PRAGMA foreign_key_check` on the copy with Palette's Python SQLite, and skips
+publication when the content is unchanged. Otherwise it writes
+`<label>_<timestamp>.sqlite.zst` plus a `.receipt.json` under
+`/groups/johnson/johnsonlab/jeremy/palette_backups/labeling_stores/<label>/`
+(override with `--backup-dir` or `PALETTE_LABELING_BACKUP_DIR`), updates
+`latest.json`, and prunes to the newest 48 snapshots plus the newest per day for
+30 days. It exits non-zero if any store fails, after attempting all of them.
+
+For a single ad hoc uncompressed copy, `backup-store` uses the same read-only,
+validated path and never initializes or migrates the live store:
+
+```bash
+scripts/py -m fisheye.utils.labeling_work --store /path/to/labeling_work.sqlite \
+  backup-store --output /path/to/backups/labeling_work.sqlite
+```
+
+Restore: stop every server using the store, then
+`zstd -d <backup>.sqlite.zst -o <store>.sqlite`, then restart the servers.
 
 Before copying mutable per-recording Zarrs, generate the read-only operator plan
 from the current task scopes:

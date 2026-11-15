@@ -6,14 +6,21 @@ import hmac
 import json
 import re
 import sqlite3
+import threading
 import uuid
-from dataclasses import dataclass
+from contextlib import nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import numpy as np
 
+from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
+
 from .web_responses import _decode_uint8_payload, _raw_array_payload
+from .web_subject_mask_apply_effects import apply_effects_status
+from .web_subject_mask_apply_state import pending_mask_run_effects, tail_successor_offer
+from .web_subject_mask_deferred_review import pending_deferred_review
 
 if TYPE_CHECKING:
     from .assignment_store import LabelingStore
@@ -35,6 +42,11 @@ class KeypointRuntimeSession:
     auto_advance_on_save: bool = False
     target_token: str | None = None
     target_token_position: int | None = None
+    summary_cache: dict[str, object] | None = None
+    task_roi_indices: np.ndarray | None = None
+    task_scope_sha256: str | None = None
+    request_generation: int = 0
+    request_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
 @dataclass
 class DetectRuntimeSession:
@@ -99,6 +111,7 @@ class SubjectMaskRuntimeSession:
     component_source_component: str = ""
     component_source_resolution: str = ""
     component_source_seed_masks_present: bool = False
+    apply_effects_background: bool = False
 
 def _session_scope(session: Mapping[str, object]) -> Mapping[str, object]:
     scope = session.get("scope")
@@ -196,6 +209,8 @@ def _get_keypoint_runtime(state: Any, session: Mapping[str, object]) -> Keypoint
         review_intended_use=str(scope.get("review_intended_use") or "").strip() or None,
         review_notes=str(scope.get("review_notes") or "").strip() or None,
         auto_advance_on_save=_bool_from_scope(scope, "auto_advance_on_save", default=False),
+        task_roi_indices=np.asarray(review_session.failures, dtype=np.int64).copy(),
+        task_scope_sha256=canonical_json_sha256(dict(scope)),
     )
     _refresh_keypoint_queue(runtime, backend_module)
     state.keypoint_sessions[session_id] = runtime
@@ -455,6 +470,7 @@ def _get_subject_mask_runtime(state: Any, session: Mapping[str, object]) -> Subj
         component_source_component=component_source_component,
         component_source_resolution=component_source_resolution,
         component_source_seed_masks_present=component_source_seed_masks_present,
+        apply_effects_background=bool(getattr(getattr(state, "config", None), "background_apply_effects", False)),
     )
     state.subject_mask_sessions[session_id] = runtime
     return runtime
@@ -602,7 +618,18 @@ def _require_browser_mutation_target_token(runtime: object, body: Mapping[str, o
         raise ValueError("Stale or invalid target_token; reload the current target before saving.")
 
 
-def _keypoint_runtime_state(runtime: KeypointRuntimeSession, backend_module: Any) -> dict[str, object]:
+def _keypoint_runtime_request_lock(runtime: object):
+    """Serialize navigation and checkpoint admission for one browser runtime."""
+
+    return getattr(runtime, "request_lock", nullcontext())
+
+
+def _keypoint_runtime_state(
+    runtime: KeypointRuntimeSession,
+    backend_module: Any,
+    *,
+    store: "LabelingStore | None" = None,
+) -> dict[str, object]:
     session = runtime.review_session
     total = int(session.failures.size)
     current: dict[str, object] = {}
@@ -614,13 +641,15 @@ def _keypoint_runtime_state(runtime: KeypointRuntimeSession, backend_module: Any
             "roi_idx": roi_idx,
             "frame_idx": int(session.frame_indices[roi_idx]),
         }
-    summary: dict[str, object]
-    try:
-        summary = dict(backend_module.review_session_summary(session))
-    except Exception as exc:
-        summary = {"error": str(exc)}
+    summary = runtime.summary_cache
+    if summary is None:
+        try:
+            summary = dict(backend_module.review_session_summary(session))
+        except Exception as exc:
+            summary = {"error": str(exc)}
+        runtime.summary_cache = summary
     review_status = session.refined.attrs.get("keypoint_review_status")
-    return dict(_redact_labeler_runtime_payload({
+    state = {
         "session_id": runtime.session_id,
         "task_id": runtime.task_id,
         "recording_id": runtime.recording_id,
@@ -638,6 +667,7 @@ def _keypoint_runtime_state(runtime: KeypointRuntimeSession, backend_module: Any
         "summary": summary,
         "review_status": dict(review_status) if isinstance(review_status, Mapping) else None,
         "immutable_base": bool(session.immutable_base),
+        "recovered_roi_only": bool(getattr(session, "recovered_roi_only", False)),
         "edit_storage": "delta_generation" if session.immutable_base else "in_place",
         "delta_run": str(session.delta_run) if session.delta_run is not None else None,
         "delta_generation": (
@@ -646,14 +676,22 @@ def _keypoint_runtime_state(runtime: KeypointRuntimeSession, backend_module: Any
             else None
         ),
         "auto_advance_on_save": bool(runtime.auto_advance_on_save),
-    }))
+    }
+    if store is not None:
+        from .web_keypoint_checkpoints import keypoint_checkpoint_state
+
+        state.update(keypoint_checkpoint_state(store, runtime))
+    return dict(_redact_labeler_runtime_payload(state))
 
 def _refresh_keypoint_queue(runtime: KeypointRuntimeSession, backend_module: Any) -> None:
-    runtime.review_session.failures = backend_module.filter_review_rois(
+    indices = backend_module.filter_review_rois(
         runtime.review_session,
         filter_mode=runtime.filter_mode,
         search=runtime.search,
     )
+    if runtime.task_roi_indices is not None:
+        indices = indices[np.isin(indices, runtime.task_roi_indices)]
+    runtime.review_session.failures = indices
     total = int(runtime.review_session.failures.size)
     runtime.position = 0 if total <= 0 else max(0, min(int(runtime.position), total - 1))
 
@@ -993,16 +1031,38 @@ def _subject_mask_component_review_state(runtime: SubjectMaskRuntimeSession) -> 
                 return state
     return "pending"
 
-def _subject_mask_component_completion_guard(runtime: SubjectMaskRuntimeSession) -> dict[str, object]:
+def _subject_mask_component_completion_guard(
+    runtime: SubjectMaskRuntimeSession,
+    *,
+    store: LabelingStore | None = None,
+) -> dict[str, object]:
     review_state = _subject_mask_component_review_state(runtime)
-    ready = review_state in SUBJECT_MASK_COMPLETABLE_REVIEW_STATES
+    pending_effect_count = len(pending_mask_run_effects(store, runtime))
+    # With background Apply effects, completion may outrun owed effects;
+    # approval stays gated on them.  A deferred review request recorded
+    # while effects are owed counts as the component's review state.
+    background = bool(getattr(runtime, "apply_effects_background", False))
+    deferred = pending_deferred_review(store, runtime) if background and pending_effect_count else None
+    if deferred is not None:
+        review_state = str(deferred.get("state") or review_state)
+    effects_block = bool(pending_effect_count) and not background
+    ready = review_state in SUBJECT_MASK_COMPLETABLE_REVIEW_STATES and not effects_block
+    not_ready_reason = (
+        "pending_apply_effects" if effects_block
+        else "component_review_pending" if not ready else ""
+    )
     return {
         "ready": ready,
         "component_name": runtime.component_name,
         "component_review_state": review_state,
         "completable_review_states": sorted(SUBJECT_MASK_COMPLETABLE_REVIEW_STATES),
-        "not_ready_reason": "" if ready else "component_review_pending",
-        "required_action": "" if ready else "set_component_review_status_before_completing_task",
+        "pending_apply_effect_count": int(pending_effect_count),
+        "not_ready_reason": not_ready_reason,
+        "review_state_deferred": deferred is not None,
+        "required_action": (
+            "retry_pending_apply_effects" if effects_block
+            else "set_component_review_status_before_completing_task" if not ready else ""
+        ),
     }
 
 def _subject_mask_runtime_state(
@@ -1029,6 +1089,25 @@ def _subject_mask_runtime_state(
         component_review = dict(raw_review) if isinstance(raw_review, Mapping) else None
     run_review = runtime.refined.group.attrs.get("refined_subject_mask_review_status")
     unapplied_checkpoint_count = _subject_mask_unapplied_checkpoint_count(store, runtime)
+    pending_effects = (
+        store.list_pending_session_checkpoint_apply_effects(
+            task_id=runtime.task_id, component_name=runtime.component_name,
+        ) if store is not None else []
+    )
+    pending_effect_count = len(pending_mask_run_effects(store, runtime))
+    qc_policy = runtime.refined.group.attrs.get("browser_apply_qc_policy")
+    edit_revision = _subject_mask_edit_revision(runtime)
+    qc_current = (
+        isinstance(qc_policy, Mapping)
+        and qc_policy.get("id") == "palette.browser_subject_mask_apply_full_qc_v1"
+        and type(qc_policy.get("version")) is int
+        and qc_policy.get("version") == 1
+        and type(qc_policy.get("edit_revision")) is int
+        and qc_policy.get("edit_revision") == edit_revision
+        and runtime.refined.group.attrs.get("metrics_stale") is False
+        and runtime.refined.group.attrs.get("contours_stale") is False
+    )
+    completion_guard = _subject_mask_component_completion_guard(runtime, store=store)
     return dict(_redact_labeler_runtime_payload({
         "session_id": runtime.session_id,
         "task_id": runtime.task_id,
@@ -1046,14 +1125,104 @@ def _subject_mask_runtime_state(
         "component_review_status": component_review,
         "run_review_status": dict(run_review) if isinstance(run_review, Mapping) else None,
         "auto_advance_on_save": bool(runtime.auto_advance_on_save),
-        "edit_revision": _subject_mask_edit_revision(runtime),
+        "edit_revision": edit_revision,
         "target_run_path": _subject_mask_target_run_path(runtime),
         "source_rowset_path": _subject_mask_source_rowset_path(runtime),
         "unapplied_session_edit_count": unapplied_checkpoint_count,
         "has_unapplied_session_edits": bool(unapplied_checkpoint_count > 0),
-        "component_review_completion_guard": _subject_mask_component_completion_guard(runtime),
-        "component_review_completion_ready": bool(_subject_mask_component_completion_guard(runtime).get("ready")),
+        "pending_apply_effect_count": int(pending_effect_count),
+        "resumable_apply_id": str(pending_effects[0].get("apply_id") or "") if pending_effects else None,
+        "apply_effects_background": bool(getattr(runtime, "apply_effects_background", False)),
+        "apply_effects_status": (
+            apply_effects_status(store, runtime)
+            if pending_effect_count and getattr(runtime, "apply_effects_background", False) else None
+        ),
+        "qc_status": "complete" if qc_current else "pending" if pending_effects else "not_recorded",
+        "qc_edit_revision": qc_policy.get("edit_revision") if isinstance(qc_policy, Mapping) else None,
+        "tail_refresh": tail_successor_offer(store, runtime),
+        "component_review_completion_guard": completion_guard,
+        "component_review_completion_ready": bool(completion_guard.get("ready")),
     }))
+
+def _subject_mask_tail_border_status(runtime, *, store, roi_idx: int, mask: np.ndarray) -> dict[str, object] | None:
+    from fisheye.shared.detect_reason_codec import decode_reason_bytes
+    from fisheye.shared.keypoint_motion_authority import keypoint_source_crop_run_from_attributes
+    from fisheye.shared.recovered_training_review_contract import REVIEW_SCHEMA, NATIVE_REVIEW_SCHEMA
+    from fisheye.training.mask_tail_border_acceptance import (
+        ACTION, active_acceptances, body_digest, expected_row_identity,
+        validate_acceptance_record,
+    )
+
+    if runtime.component_name != "subject_body" or runtime.refined.group.attrs.get("schema_id") not in (REVIEW_SCHEMA, NATIVE_REVIEW_SCHEMA):
+        return None
+    malformed_acceptance = None
+    try:
+        record = active_acceptances(runtime.refined.group).get(str(roi_idx))
+    except ValueError as exc:
+        record = None
+        malformed_acceptance = str(exc)
+    current_digest = body_digest(mask)
+    bound = False
+    if record:
+        try:
+            bound = validate_acceptance_record(
+                str(roi_idx), record, body=mask,
+                source_crop_run=keypoint_source_crop_run_from_attributes(runtime.refined.group.attrs),
+                row_identity=expected_row_identity(runtime.refined.group, roi_idx),
+            )
+        except ValueError as exc:
+            malformed_acceptance = str(exc)
+    checkpoint = store.get_session_checkpoint(
+        task_id=runtime.task_id, roi_idx=roi_idx, component_name=runtime.component_name,
+        state="active",
+    ) if store is not None else None
+    if checkpoint is None and store is not None:
+        checkpoint = store.get_session_checkpoint(
+            task_id=runtime.task_id, roi_idx=roi_idx, component_name=runtime.component_name,
+            state="applying",
+        )
+    pending = checkpoint.get("payload", {}).get(ACTION) if checkpoint else None
+    seed_reason = None
+    name = str(runtime.refined.run_name)
+    for prefix in ("mask_tail_edit_", "recovered_masks_edit_"):
+        if name.startswith(prefix):
+            seed_name = "head_tail11_fins_seed_" + name.removeprefix(prefix)
+            seeds = runtime.root.get("keypoints_runs")
+            if seeds is not None and seed_name in seeds:
+                seed = seeds[seed_name]
+                if (
+                    seed.attrs.get("source_bindings") == runtime.refined.group.attrs.get("source_bindings")
+                    and keypoint_source_crop_run_from_attributes(seed.attrs) == keypoint_source_crop_run_from_attributes(runtime.refined.group.attrs)
+                    and "reason_bytes" in seed
+                ):
+                    seed_reason = str(decode_reason_bytes(seed["reason_bytes"][roi_idx:roi_idx + 1])[0])
+            break
+    offer = tail_successor_offer(store, runtime)
+    if offer and int(offer.get("tail_refresh_mask_revision") or -1) == _subject_mask_edit_revision(runtime):
+        failure = next((item for item in offer.get("tail_refresh_failures", []) if int(item.get("roi_idx", -1)) == roi_idx), None)
+        visible = roi_idx in offer.get("tail_refresh_visible_endpoint_rows", [])
+        outcome = {
+            "mask_revision": int(offer["tail_refresh_mask_revision"]),
+            "status": "failed" if failure else "derived",
+            "reason": str(failure["reason"]) if failure else ("tail_tip_is_visible_crop_endpoint" if visible else "tail_derived"),
+            "visible_endpoint": bool(visible),
+        }
+    else:
+        outcome = None
+    return {
+        "roi_idx": int(roi_idx),
+        "mask_revision": _subject_mask_edit_revision(runtime),
+        "original_queued_reason": seed_reason,
+        "accepted": bound,
+        "acceptance": dict(record) if bound else None,
+        "stale_acceptance": bool(record and not bound),
+        "malformed_acceptance": malformed_acceptance,
+        "pending_action": pending,
+        "checkpoint_state": str(checkpoint.get("state") or "") if checkpoint else None,
+        "latest_outcome": outcome,
+        "body_mask_sha256": current_digest,
+    }
+
 
 def _subject_mask_current_payload(
     runtime: SubjectMaskRuntimeSession,
@@ -1103,6 +1272,7 @@ def _subject_mask_current_payload(
             frame_idx = int(np.asarray(frame_indices[roi_idx]).item())
         except Exception:
             frame_idx = None
+    tail_border = _subject_mask_tail_border_status(runtime, store=store, roi_idx=roi_idx, mask=mask)
     return {
         "ok": True,
         "roi_idx": roi_idx,
@@ -1110,6 +1280,7 @@ def _subject_mask_current_payload(
         "position": int(runtime.position),
         "component_name": runtime.component_name,
         "source_run": str(runtime.source.run_name),
+        "frame_index_domain": runtime.source.group.attrs.get("frame_index_domain"),
         "refined_run": str(runtime.refined.run_name),
         "component_source": {
             "source_stage": runtime.component_source_stage,
@@ -1124,5 +1295,6 @@ def _subject_mask_current_payload(
         "mask": _raw_array_payload(mask),
         "mask_area_px": int(mask.sum()),
         "session_checkpoint": session_checkpoint,
+        "tail_crop_border": tail_border,
         "state": _subject_mask_runtime_state(runtime, store=store),
     }

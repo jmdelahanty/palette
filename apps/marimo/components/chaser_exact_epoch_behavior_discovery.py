@@ -6,12 +6,13 @@ from typing import Any, Mapping
 
 from fisheye.analysis_workflows.materializers.provider_epoch_behavior_summary import (
     PARENT_PATH,
+    SEMANTIC_METHOD_VERSION,
+    SEMANTIC_SCHEMA_VERSION,
 )
 from fisheye.analysis_workflows.provider_epoch_behavior_summary_source_handle import (
     ProviderEpochBehaviorSummarySourceError,
     validate_provider_epoch_behavior_summary_metadata,
 )
-
 
 _FORBIDDEN_SELECTORS = frozenset(
     {
@@ -60,9 +61,15 @@ def compatible_epoch_behavior_binding(
         if run_name in {".", ".."} or run_name.casefold() in _FORBIDDEN_SELECTORS:
             continue
         run_path = f"{PARENT_PATH}/{run_name}"
+        attrs = dict(getattr(parent[run_name], "attrs", {}))
+        if (
+            attrs.get("schema_version") != SEMANTIC_SCHEMA_VERSION
+            or attrs.get("method_version") != SEMANTIC_METHOD_VERSION
+        ):
+            continue
         try:
             binding = validate_provider_epoch_behavior_summary_metadata(
-                dict(getattr(parent[run_name], "attrs", {})),
+                attrs,
                 run_path=run_path,
                 run_name=run_name,
                 expected_recording_id=recording_id,

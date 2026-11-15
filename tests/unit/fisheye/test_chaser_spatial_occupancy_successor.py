@@ -6,6 +6,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from matplotlib.figure import Figure
+from matplotlib.text import Text
 
 from fisheye.analysis.provider_chaser_position_suite import PositionSuiteEpoch
 from fisheye.analysis_workflows.chaser_spatial_occupancy_successor import (
@@ -27,6 +29,7 @@ from fisheye.utils.plot_chaser_spatial_occupancy_successor import (
     PLOT_RECIPE_ID,
     main as plot_main,
     render_spatial_occupancy_heatmaps,
+    spatial_occupancy_plot_parameters,
 )
 from fisheye.visualization.chaser_spatial_occupancy_display import (
     DEFAULT_DISPLAY_MODE_ID,
@@ -235,7 +238,7 @@ def test_publication_deep_audit_rehydrate_and_plot(tmp_path: Path) -> None:
     assert receipt.is_file()
     receipt_record = json.loads(receipt.read_text(encoding="utf-8"))
     parameters = receipt_record["plot_parameters"]
-    assert receipt_record["schema_version"] == 4
+    assert receipt_record["schema_version"] == 5
     assert receipt_record["plot_recipe_id"] == PLOT_RECIPE_ID
     assert receipt_record["run_name"] == "spatial-v1"
     assert receipt_record["bundle_name"] == "spatial-recipe-v5"
@@ -307,7 +310,7 @@ def test_publication_deep_audit_rehydrate_and_plot(tmp_path: Path) -> None:
             / "spatial-receipt-bound-v5_spatial_occupancy_plot_receipt.json"
         ).read_text(encoding="utf-8")
     )
-    assert targeted_receipt["schema_version"] == 4
+    assert targeted_receipt["schema_version"] == 5
     assert targeted_receipt["source_binding"]["deep_content_audit"] is False
     assert targeted_receipt["source_binding"]["verification_mode"] == (
         "receipt_bound_targeted_array_rehash_v1"
@@ -325,3 +328,71 @@ def test_publication_deep_audit_rehydrate_and_plot(tmp_path: Path) -> None:
             "y_bin_edges_mm",
         )
     )
+
+
+def test_long_spatial_provider_ids_stay_in_receipt_and_out_of_row_labels(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs()
+    keypoint_id = "opaque-keypoint-authority:" + "a" * 96
+    detection_id = "opaque-detection-authority:" + "b" * 96
+    providers = tuple(
+        replace(
+            provider,
+            fish_position_authority={
+                **provider.fish_position_authority,
+                "provider_id": provider_id,
+            },
+        )
+        for provider, provider_id in zip(
+            inputs.providers, (keypoint_id, detection_id), strict=True
+        )
+    )
+    prepared = prepare_chaser_spatial_occupancy_successor(
+        replace(inputs, providers=providers, bin_width_mm=2.0)
+    )
+    archive = tmp_path / "analysis.zarr"
+    root = open_zarr_root(archive, mode="w-")
+    root.attrs["recording_id"] = "recording"
+    plan = build_composable_chaser_successor_publication_plan(
+        archive,
+        run_name="spatial-long-identities",
+        prepared=prepared,
+    )
+    publish_composable_chaser_successor_run(plan, scratch_root=tmp_path / "scratch")
+    handle = load_composable_chaser_successor_source_handle(
+        archive,
+        successor_kind="chaser_spatial_occupancy",
+        run_name="spatial-long-identities",
+        deep_audit=True,
+    )
+    figures = []
+
+    def capture_savefig(figure, filename, *args, **kwargs):
+        figures.append(figure)
+        Path(filename).write_bytes(b"captured")
+
+    monkeypatch.setattr(Figure, "savefig", capture_savefig)
+    render_spatial_occupancy_heatmaps(handle, output_stem=tmp_path / "spatial")
+    visible_text = "\n".join(
+        artist.get_text()
+        for figure in figures[:1]
+        for artist in figure.findobj(match=Text)
+    )
+    assert keypoint_id not in visible_text
+    assert detection_id not in visible_text
+    assert "Keypoint-derived position" in visible_text
+    assert "Detection-derived position" in visible_text
+
+    parameters = spatial_occupancy_plot_parameters(handle)
+    assert parameters["scientific_coordinates"]["provider_order"] == [
+        keypoint_id,
+        detection_id,
+    ]
+    display = parameters["static_rendering"]["position_provider_display"]
+    assert display["provider_id_parsing"] == "prohibited"
+    assert [record["provider_id"] for record in display["bindings"]] == [
+        keypoint_id,
+        detection_id,
+    ]

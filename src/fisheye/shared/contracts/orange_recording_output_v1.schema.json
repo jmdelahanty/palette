@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orange.recording_output.v1",
+  "title": "Orange recording output descriptor (version 1)",
+  "description": "One encoded video output of one camera: recording_session.json recording_outputs.<serial>.<kind> (single clip), clips[].recording_outputs.<serial>.<kind> and each clip's clip_manifest.json recording_outputs.<serial>.<kind> (rolling), and the sealed recording_snapshot_start.json recording_outputs.<serial>.<kind> (declared at start, status pending). width and height are the encoded video's frame dimensions (the stream the container carries) and are REQUIRED on every output whose status is completed or finalized, for both kinds; a crop output's size is constant for a camera within a session and equals the start snapshot's crop_outputs.<serial>.runtime.crop_size_px. Written by orange::session::build_recording_outputs_json (src/session/recording_session.cpp) from RecordingOutputDescriptor; closed on the fields Orange writes; full-frame descriptors carry schema_version 1 and crop descriptors schema_version 2 (crop media contract).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "camera_serial",
+    "output_kind",
+    "role",
+    "backend",
+    "status",
+    "video",
+    "metadata",
+    "codec",
+    "container",
+    "frame_rate"
+  ],
+  "properties": {
+    "schema_version": {
+      "enum": [
+        1,
+        2
+      ],
+      "description": "1 for full-frame outputs; 2 for crop outputs (the crop media contract adds video_pixel_coordinate_space and source_geometry_coordinate_space)"
+    },
+    "camera_serial": {
+      "type": "string",
+      "minLength": 1
+    },
+    "output_kind": {
+      "enum": [
+        "full",
+        "crop"
+      ]
+    },
+    "role": {
+      "enum": [
+        "ingest_authoritative",
+        "runtime_derived_acquisition_input"
+      ]
+    },
+    "backend": {
+      "enum": [
+        "external_ipc",
+        "in_process"
+      ]
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "completed",
+        "finalized",
+        "incomplete",
+        "failed"
+      ]
+    },
+    "video": {
+      "type": "string",
+      "minLength": 1,
+      "description": "MP4 path (absolute under the recording folder, or relative to the clip directory)"
+    },
+    "metadata": {
+      "type": "string",
+      "minLength": 1,
+      "description": "per-frame CSV path"
+    },
+    "keyframes": {
+      "type": "string"
+    },
+    "perf": {
+      "type": "string"
+    },
+    "sidecar_perf": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "codec": {
+      "enum": [
+        "hevc",
+        "h264"
+      ]
+    },
+    "container": {
+      "const": "mp4"
+    },
+    "tuning": {
+      "type": "string"
+    },
+    "coordinate_space": {
+      "type": "string"
+    },
+    "video_pixel_coordinate_space": {
+      "type": "string"
+    },
+    "source_geometry_coordinate_space": {
+      "type": "string"
+    },
+    "pixel_source_format": {
+      "type": "string"
+    },
+    "encoded_format": {
+      "type": "string"
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "encoded video frame width in pixels (the container's stream width)"
+    },
+    "height": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "encoded video frame height in pixels"
+    },
+    "frame_rate": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "frame_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "first_recording_frame_id": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "last_recording_frame_id": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "recording_frame_id_gaps": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "packet_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "packet_count_source": {
+      "type": "string"
+    },
+    "encoding_budget": {
+      "type": "object"
+    },
+    "details": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "completed",
+              "finalized"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "width",
+          "height",
+          "frame_count",
+          "first_recording_frame_id",
+          "last_recording_frame_id",
+          "packet_count"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "output_kind": {
+            "const": "full"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "role": {
+            "const": "ingest_authoritative"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "output_kind": {
+            "const": "crop"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "role": {
+            "const": "runtime_derived_acquisition_input"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -10,9 +10,14 @@ from typing import Any, Mapping
 
 import zarr
 
-from fisheye.analysis.chaser_behavior import resolve_configured_chaser_behaviors
+from fisheye.analysis.chaser_behavior import (
+    ChaserBehaviorClass,
+    resolve_configured_chaser_behaviors,
+)
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.type_conversions import normalize_attr
+
+from .stimulus_metadata import is_unsupported_native_stimulus_run
 
 
 @dataclass(frozen=True)
@@ -74,6 +79,20 @@ def extract_recording_chaser_metadata(
     for run_name in run_names:
         source_path = f"analysis/stimulus_runs/{run_name}"
         run_group = parent[run_name]
+        if is_unsupported_native_stimulus_run(run_group):
+            issues.append(
+                ChaserMetadataIssue(
+                    stimulus_run_id=run_name,
+                    source_path=source_path,
+                    reason="unsupported_native_stimulus_profile",
+                    detail=(
+                        "Native stimulus candidate "
+                        f"({run_group.attrs.get('source_profile')}) has no "
+                        "legacy protocol; chaser behavior is not extracted."
+                    ),
+                )
+            )
+            continue
         payload = _protocol_payload(run_group.attrs.get("protocol_json"))
         if payload is None:
             issues.append(
@@ -106,6 +125,25 @@ def extract_recording_chaser_metadata(
                     source_path=source_path,
                     reason="duplicate_chaser_index",
                     detail=f"Configured chaser indices are not unique: {indices}",
+                )
+            )
+            continue
+
+        programmed = [
+            behavior.chaser_index
+            for behavior in behaviors
+            if behavior.behavior_class_id == int(ChaserBehaviorClass.PROGRAMMED)
+        ]
+        if programmed:
+            # The registry behavior_class vocabulary is 0-3; adding programmed
+            # needs a registry migration, so these runs are reported, not
+            # written under another class.
+            issues.append(
+                ChaserMetadataIssue(
+                    stimulus_run_id=run_name,
+                    source_path=source_path,
+                    reason="programmed_chaser_unsupported",
+                    detail=f"Programmed chasers (behavior class 4) at indices {programmed}.",
                 )
             )
             continue

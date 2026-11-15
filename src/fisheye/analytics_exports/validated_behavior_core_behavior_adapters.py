@@ -16,7 +16,6 @@ import numpy as np
 
 from fisheye.analysis_workflows.core_behavior_cohort_adapter import (
     CORE_BEHAVIOR_BUNDLE_ADAPTER_ID,
-    BoundCoreBehaviorCohortSources,
     bind_core_behavior_cohort_sources,
 )
 from fisheye.shared.json_safety import decode_null_terminated_text
@@ -47,6 +46,23 @@ from .validated_behavior_core_behavior_contracts import (
     SUBJECT_BODY_FRAME_CAPABILITY,
     SUBJECT_BODY_FRAME_SAMPLES_TABLE,
     TAIL_TRACE_CAPABILITY,
+)
+from .validated_behavior_bout_kinematics_contracts import (
+    BOUT_EYE_GAZE_TABLE,
+    BOUT_HEADING_TABLE,
+    BOUT_KINEMATICS_CAPABILITY,
+    BOUT_KINEMATICS_CAPABILITY_KEYS,
+    BOUT_KINEMATICS_EXPORT_PROFILE_ID,
+    BOUT_MOVEMENT_TABLE,
+    source_dtype,
+    source_field_name,
+)
+from .validated_behavior_frame_clock_contracts import (
+    ACQUISITION_FRAME_CLOCK_CAPABILITY,
+    ACQUISITION_FRAME_CLOCK_SAMPLES_TABLE,
+    FRAME_CLOCK_CAPABILITY_KEYS,
+    FRAME_CLOCK_EXPORT_PROFILE_ID,
+    RECORDING_CLOCK_METADATA_TABLE,
 )
 
 
@@ -107,6 +123,8 @@ class _CoreBehaviorContext:
         if self.export_profile_id not in {
             CORE_BEHAVIOR_EXPORT_PROFILE_ID_V1,
             CORE_BEHAVIOR_EXPORT_PROFILE_ID,
+            BOUT_KINEMATICS_EXPORT_PROFILE_ID,
+            FRAME_CLOCK_EXPORT_PROFILE_ID,
         }:
             _fail("Core-behavior extractor received an unsupported export profile.")
         self.bound = bind_core_behavior_cohort_sources(
@@ -123,9 +141,15 @@ class _CoreBehaviorContext:
         capabilities = _mapping(
             bundle_member.get("capabilities"), field="bundle capabilities"
         )
-        if set(capabilities) != set(CORE_BEHAVIOR_CAPABILITY_KEYS):
+        if self.export_profile_id == FRAME_CLOCK_EXPORT_PROFILE_ID:
+            capability_keys = FRAME_CLOCK_CAPABILITY_KEYS
+        elif self.export_profile_id == BOUT_KINEMATICS_EXPORT_PROFILE_ID:
+            capability_keys = BOUT_KINEMATICS_CAPABILITY_KEYS
+        else:
+            capability_keys = CORE_BEHAVIOR_CAPABILITY_KEYS
+        if set(capabilities) != set(capability_keys):
             _fail("Core-behavior bundle capability roster is inexact.")
-        for capability_id in CORE_BEHAVIOR_CAPABILITY_KEYS:
+        for capability_id in capability_keys:
             capability = _mapping(
                 capabilities[capability_id], field=f"capability {capability_id}"
             )
@@ -492,6 +516,211 @@ def _canonical_swim_bouts(
     return rows, None
 
 
+def _bout_metric_samples(
+    context: _CoreBehaviorContext,
+    *,
+    levels: tuple[str, ...],
+) -> ValidatedBehaviorBatchSource:
+    source = context.bound.bout_kinematics
+    if source is None:
+        _fail("Bout-metric projection requires the new bout-kinematics profile.")
+    capability = context.capability_binding(BOUT_KINEMATICS_CAPABILITY)
+    binding = _mapping(capability["source_binding"], field="bout source binding")
+    if _plain(binding) != _plain(source.binding):
+        _fail("Bout-metric source binding changed after admission.")
+    projection = _mapping(
+        capability["projection_contract"], field="bout projection contract"
+    )
+
+    def batches() -> Iterator[Mapping[str, Any]]:
+        for level in levels:
+            records = np.asarray(source.records_by_level[level])
+            native_level = "heading" if level.startswith("heading_") else level
+            dtype = source_dtype(native_level)
+            if records.dtype != dtype:
+                _fail(f"Bout-metric {level} dtype differs from the pinned contract.")
+            for start in range(0, len(records), context.row_group_rows):
+                chunk = records[start : start + context.row_group_rows]
+                count = len(chunk)
+                columns: dict[str, Any] = {
+                    **context.common_columns(count),
+                    "source_binding_sha256": _repeat(binding["payload_sha256"], count),
+                    "projection_contract_sha256": _repeat(
+                        projection["payload_sha256"], count
+                    ),
+                    "source_bout_kinematics_run": _repeat(binding["run_name"], count),
+                    "source_bout_kinematics_path": _repeat(binding["run_path"], count),
+                    "source_array_manifest_sha256": _repeat(
+                        binding["source_array_manifest_sha256"], count
+                    ),
+                    "source_metric_content_sha256": _repeat(
+                        binding["content_sha256_by_level"][level], count
+                    ),
+                    "track_id": _repeat(binding["source_track_id"], count),
+                    "source_signal_id": _repeat(binding["source_signal_id"], count),
+                }
+                if level.startswith("heading_"):
+                    columns["heading_level"] = _repeat(level, count)
+                for name in dtype.names or ():
+                    values = chunk[name]
+                    columns[source_field_name(name)] = (
+                        [
+                            decode_null_terminated_text(value, errors="strict")
+                            for value in values
+                        ]
+                        if values.dtype.kind == "S"
+                        else values
+                    )
+                yield columns
+
+    return _batch_source(batches())
+
+
+def _bout_movement_metrics(
+    context: _CoreBehaviorContext,
+) -> ValidatedBehaviorBatchSource:
+    return _bout_metric_samples(context, levels=("movement",))
+
+
+def _bout_heading_metrics(
+    context: _CoreBehaviorContext,
+) -> ValidatedBehaviorBatchSource:
+    return _bout_metric_samples(context, levels=("heading_raw", "heading_smoothed"))
+
+
+def _bout_eye_gaze_metrics(
+    context: _CoreBehaviorContext,
+) -> ValidatedBehaviorBatchSource:
+    return _bout_metric_samples(context, levels=("eye_gaze",))
+
+
+def _frame_clock_source(
+    context: _CoreBehaviorContext,
+) -> tuple[Any, Mapping[str, Any], Mapping[str, Any]]:
+    source = context.bound.acquisition_frame_clock
+    if source is None:
+        _fail("Frame-clock projection requires the frame-clock export profile.")
+    capability = context.capability_binding(ACQUISITION_FRAME_CLOCK_CAPABILITY)
+    binding = _mapping(capability["source_binding"], field="clock source binding")
+    projection = _mapping(
+        capability["projection_contract"], field="clock projection contract"
+    )
+    if _plain(binding) != _plain(source.source_binding) or _plain(projection) != _plain(
+        source.projection_contract
+    ):
+        _fail("Frame-clock source or projection changed after admission.")
+    return source.source, binding, projection
+
+
+def _clock_provenance_columns(
+    context: _CoreBehaviorContext,
+    *,
+    binding: Mapping[str, Any],
+    projection: Mapping[str, Any],
+    count: int,
+) -> dict[str, Any]:
+    return {
+        **context.common_columns(count),
+        "source_binding_sha256": _repeat(binding["payload_sha256"], count),
+        "projection_contract_sha256": _repeat(projection["payload_sha256"], count),
+    }
+
+
+def _recording_clock_metadata(
+    context: _CoreBehaviorContext,
+) -> tuple[list[dict[str, Any]], str | None]:
+    _source, binding, projection = _frame_clock_source(context)
+    clock_surfaces = _mapping(
+        _mapping(binding["clock_semantics"], field="clock semantics")["clock_surfaces"],
+        field="clock surfaces",
+    )
+    camera = _mapping(
+        clock_surfaces["camera_timestamp_ns"], field="camera clock semantics"
+    )
+    system = _mapping(
+        clock_surfaces["system_timestamp_ns"], field="system clock semantics"
+    )
+    common = {
+        name: values[0]
+        for name, values in _clock_provenance_columns(
+            context,
+            binding=binding,
+            projection=projection,
+            count=1,
+        ).items()
+    }
+    return [
+        {
+            **common,
+            "session_id": binding["session_id"],
+            "session_start_iso8601_utc": binding["session_start_iso8601_utc"],
+            "camera_id": binding["camera_id"],
+            "source_frame_count": binding["row_count"],
+            "raw_recording_path": binding["raw_recording_path"],
+            "frame_clock_source_path": binding["frame_clock_source_path"],
+            "frame_clock_source_file_sha256": binding["frame_clock_source_file_sha256"],
+            "recording_manifest_path": binding["recording_manifest_path"],
+            "recording_manifest_file_sha256": binding["recording_manifest_file_sha256"],
+            "ptp_sync_summary_path": binding["ptp_sync_summary_path"],
+            "ptp_sync_summary_file_sha256": binding["ptp_sync_summary_file_sha256"],
+            "acquisition_camera_frame_sha256": binding[
+                "acquisition_camera_frame_sha256"
+            ],
+            "source_video_metadata_sha256": binding["source_video_metadata_sha256"],
+            "acquisition_frame_clock_source_sha256": binding[
+                "acquisition_frame_clock_source_sha256"
+            ],
+            "clock_semantics_sha256": binding["clock_semantics_sha256"],
+            "camera_clock_domain": camera["clock_domain"],
+            "camera_time_reference_kind": camera["time_reference_kind"],
+            "camera_time_origin": camera["origin"],
+            "camera_timescale": camera["timescale"],
+            "camera_semantic_status": camera["semantic_status"],
+            "system_clock_domain": system["clock_domain"],
+            "system_time_reference_kind": system["time_reference_kind"],
+            "system_time_origin": system["origin"],
+            "system_timescale": system["timescale"],
+            "system_semantic_status": system["semantic_status"],
+            "within_session_alignment_status": binding[
+                "within_session_alignment_status"
+            ],
+            "cross_session_alignment_status": binding["cross_session_alignment_status"],
+            "equal_frame_rate_alignment_valid": binding[
+                "equal_frame_rate_alignment_valid"
+            ],
+        }
+    ], None
+
+
+def _acquisition_frame_clock_samples(
+    context: _CoreBehaviorContext,
+) -> ValidatedBehaviorBatchSource:
+    source, binding, projection = _frame_clock_source(context)
+
+    def batches() -> Iterator[Mapping[str, Any]]:
+        for start in range(0, source.row_count, context.row_group_rows):
+            stop = min(source.row_count, start + context.row_group_rows)
+            count = stop - start
+            yield {
+                **_clock_provenance_columns(
+                    context,
+                    binding=binding,
+                    projection=projection,
+                    count=count,
+                ),
+                "session_id": _repeat(binding["session_id"], count),
+                "camera_id": _repeat(binding["camera_id"], count),
+                "source_acquisition_frame_index": source.parent_frame_index[start:stop],
+                "recording_frame_id": source.recording_frame_id[start:stop],
+                "camera_timestamp_ns": source.camera_timestamp_ns[start:stop],
+                "camera_timestamp_valid": source.camera_timestamp_valid[start:stop],
+                "system_timestamp_ns": source.system_timestamp_ns[start:stop],
+                "system_timestamp_valid": source.system_timestamp_valid[start:stop],
+            }
+
+    return _batch_source(batches())
+
+
 _PRODUCERS: Mapping[str, Callable[[_CoreBehaviorContext], Any]] = MappingProxyType(
     {
         KINEMATICS_SAMPLES_TABLE: _kinematics_samples,
@@ -502,9 +731,27 @@ _PRODUCERS: Mapping[str, Callable[[_CoreBehaviorContext], Any]] = MappingProxyTy
     }
 )
 
+_BOUT_PRODUCERS: Mapping[str, Callable[[_CoreBehaviorContext], Any]] = MappingProxyType(
+    {
+        BOUT_MOVEMENT_TABLE: _bout_movement_metrics,
+        BOUT_HEADING_TABLE: _bout_heading_metrics,
+        BOUT_EYE_GAZE_TABLE: _bout_eye_gaze_metrics,
+    }
+)
 
-def build_core_behavior_row_extractors() -> Mapping[str, Callable[..., Any]]:
-    """Return five extractors sharing one strict last-record source context."""
+_FRAME_CLOCK_PRODUCERS: Mapping[str, Callable[[_CoreBehaviorContext], Any]] = (
+    MappingProxyType(
+        {
+            RECORDING_CLOCK_METADATA_TABLE: _recording_clock_metadata,
+            ACQUISITION_FRAME_CLOCK_SAMPLES_TABLE: _acquisition_frame_clock_samples,
+        }
+    )
+)
+
+
+def _build_row_extractors(
+    producers: Mapping[str, Callable[[_CoreBehaviorContext], Any]],
+) -> Mapping[str, Callable[..., Any]]:
 
     cache = _LastCoreBehaviorContext()
 
@@ -519,11 +766,35 @@ def build_core_behavior_row_extractors() -> Mapping[str, Callable[..., Any]]:
         return extract
 
     return MappingProxyType(
-        {name: wrap(producer) for name, producer in _PRODUCERS.items()}
+        {name: wrap(producer) for name, producer in producers.items()}
+    )
+
+
+def build_core_behavior_row_extractors() -> Mapping[str, Callable[..., Any]]:
+    """Return the frozen five-grain v1/v2 extractor roster."""
+
+    return _build_row_extractors(_PRODUCERS)
+
+
+def build_core_behavior_bout_row_extractors() -> Mapping[str, Callable[..., Any]]:
+    """Return the additive bout-metric profile without changing older rosters."""
+
+    return _build_row_extractors({**_PRODUCERS, **_BOUT_PRODUCERS})
+
+
+def build_core_behavior_bout_frame_clock_row_extractors() -> (
+    Mapping[str, Callable[..., Any]]
+):
+    """Return the bout profile plus normalized session-aware frame clocks."""
+
+    return _build_row_extractors(
+        {**_PRODUCERS, **_BOUT_PRODUCERS, **_FRAME_CLOCK_PRODUCERS}
     )
 
 
 __all__ = [
     "CoreBehaviorExportAdapterError",
+    "build_core_behavior_bout_frame_clock_row_extractors",
+    "build_core_behavior_bout_row_extractors",
     "build_core_behavior_row_extractors",
 ]

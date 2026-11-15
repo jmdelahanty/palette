@@ -87,7 +87,7 @@ def _fake_module(monkeypatch, name: str, **attrs: object) -> ModuleType:
     return module
 
 
-def _completed_keypoint_task(store: LabelingStore) -> None:
+def _completed_keypoint_task(store: LabelingStore, zarr_path: str = "/server-owned/task.zarr") -> None:
     store.initialize()
     store.upsert_labeling_user(user_id="alice", status="active")
     store.assign_recording(recording_id="rec-a", assignee_user="alice")
@@ -98,7 +98,7 @@ def _completed_keypoint_task(store: LabelingStore) -> None:
         title="Review these keypoints",
         state="complete",
         scope={
-            "zarr_path": "/server-owned/task.zarr",
+            "zarr_path": zarr_path,
             "refined_run": "refined-a",
             "crop_run": "crop-a",
         },
@@ -253,6 +253,7 @@ def test_admin_keypoint_correction_uses_task_scope_and_records_audit(
     monkeypatch,
 ):
     calls: list[tuple[str, object]] = []
+    archive = str(tmp_path / "task.zarr")
 
     def resolve_review_session(zarr_path, **kwargs):
         calls.append(("resolve", {"zarr_path": zarr_path, **kwargs}))
@@ -270,6 +271,10 @@ def test_admin_keypoint_correction_uses_task_scope_and_records_audit(
         }
 
     def save_roi_correction(_session, *, position, points):
+        from fisheye.shared.zarr_helpers import archive_publication_lock_held_by_current_thread
+
+        # The write happens under the lock keypoint checkpoint Apply holds.
+        assert archive_publication_lock_held_by_current_thread(archive)
         calls.append(("save", {"position": position, "points": points}))
         return {
             "roi_idx": 7,
@@ -293,7 +298,7 @@ def test_admin_keypoint_correction_uses_task_scope_and_records_audit(
     )
     store = LabelingStore(tmp_path / "labeling_work.sqlite")
     try:
-        _completed_keypoint_task(store)
+        _completed_keypoint_task(store, zarr_path=archive)
         corrected_points = [[2.0, 3.0], [3.0, 4.0]]
 
         with _running_server(
@@ -330,7 +335,7 @@ def test_admin_keypoint_correction_uses_task_scope_and_records_audit(
         assert calls[0] == (
             "resolve",
             {
-                "zarr_path": "/server-owned/task.zarr",
+                "zarr_path": archive,
                 "refined_run": "refined-a",
                 "crop_run": "crop-a",
                 "include_all": True,
@@ -352,5 +357,41 @@ def test_admin_keypoint_correction_uses_task_scope_and_records_audit(
         assert correction_events[0]["user"] == "admin"
         assert correction_events[0]["target"]["roi_idx"] == 7
         assert store.count_admin_correction_events("task-a") == 1
+    finally:
+        store.close()
+
+
+def test_admin_keypoint_correction_refuses_a_replaced_version(tmp_path, monkeypatch):
+    import zarr
+
+    archive = tmp_path / "task.zarr"
+    root = zarr.open_group(str(archive), mode="w", use_consolidated=False)
+    runs = root.create_group("refined_keypoints_runs")
+    runs.create_group("refined-a").attrs.update(palette_run_started_at_utc="2026-09-01")
+    runs.create_group("refined-b").attrs.update(
+        palette_run_started_at_utc="2026-09-02",
+        source_bindings={"mask_apply_refresh": {"source_pose_run": "refined_keypoints_runs/refined-a"}},
+    )
+    saves = []
+    _fake_module(
+        monkeypatch,
+        "fisheye.tune.keypoint_review_backend",
+        resolve_review_session=lambda *a, **k: SimpleNamespace(refined_run="refined-a", crop_run="crop-a"),
+        load_roi_payload=lambda *_a, **_k: {"points": [], "labels": []},
+        save_roi_correction=lambda *_a, **_k: saves.append(True) or {},
+    )
+    store = LabelingStore(tmp_path / "labeling_work.sqlite")
+    try:
+        _completed_keypoint_task(store, zarr_path=str(archive))
+        with _running_server(store, user="admin", admin_users=("admin",)) as base_url:
+            status, payload = _json_request(
+                base_url,
+                "/api/admin/keypoint-corrections",
+                method="POST",
+                payload={"task_id": "task-a", "roi_idx": 7, "points": [[2.0, 3.0], [3.0, 4.0]]},
+            )
+        assert status == 409, payload
+        assert "refined-b" in str(payload)
+        assert saves == []
     finally:
         store.close()

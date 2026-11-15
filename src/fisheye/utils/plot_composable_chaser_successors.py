@@ -31,12 +31,14 @@ from fisheye.analysis_workflows.composable_chaser_successor_publication import (
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.zarr.manifest_digest import canonical_json_sha256
 
-
 RECEIPT_SCHEMA_ID = "palette.analysis.composable_chaser_successor.plot_receipt"
-RECEIPT_SCHEMA_VERSION = 3
-PLOT_RECIPE_ID = "composable_chaser_dashboard_v2"
+RECEIPT_SCHEMA_VERSION = 4
+PLOT_RECIPE_ID = "composable_chaser_dashboard_v3"
 PLOT_DPI = 180
 PLOT_FIGURE_SIZE_INCHES = (15.0, 10.0)
+TRIAL_X_MARGIN_FRACTION = 0.12
+BOUT_COUNT_LABEL_OFFSET_STEP_POINTS = 11.0
+BOUT_Y_MARGIN_FRACTION = 0.12
 _RUN_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _KINDS = (
     "controller_chase_trials",
@@ -111,9 +113,7 @@ def _verify_chain(
             _fail(f"Plot product lacks verified authority: {exc}")
     bout_sources = bout.scientific_manifest.get("sources")
     escape_sources = escape.scientific_manifest.get("sources")
-    if not isinstance(bout_sources, Mapping) or not isinstance(
-        escape_sources, Mapping
-    ):
+    if not isinstance(bout_sources, Mapping) or not isinstance(escape_sources, Mapping):
         _fail("Plot product source bindings are absent.")
     if (
         bout_sources.get("controller_trial_payload_sha256")
@@ -133,7 +133,9 @@ def _trial_panel(ax: Any, controller: ComposableChaserSuccessorSourceHandle) -> 
     logged = _array(controller, "logged_trial_id").astype(np.int64)
     chaser = _array(controller, "chaser_identity_code").astype(np.int64)
     gap = _array(controller, "gap_fraction").astype(np.float64)
-    if not (start.size == end.size == ordinal.size == logged.size == chaser.size == gap.size):
+    if not (
+        start.size == end.size == ordinal.size == logged.size == chaser.size == gap.size
+    ):
         _fail("Controller trial table columns have different lengths.")
     colors = plt.get_cmap("tab10")
     for row in range(start.size):
@@ -161,6 +163,12 @@ def _trial_panel(ax: Any, controller: ComposableChaserSuccessorSourceHandle) -> 
     ax.set_xlabel("acquisition frame ID")
     ax.set_title("Exact producer-authored controller trials")
     ax.grid(axis="x", alpha=0.2)
+    if start.size:
+        first_frame = float(np.min(start))
+        final_frame_exclusive = float(np.max(end)) + 1.0
+        frame_span = max(1.0, final_frame_exclusive - first_frame)
+        padding = TRIAL_X_MARGIN_FRACTION * frame_span
+        ax.set_xlim(first_frame - padding, final_frame_exclusive + padding)
 
 
 def _distance_label(low: float, high: float) -> str:
@@ -176,17 +184,19 @@ def _bout_panel(ax: Any, bout: ComposableChaserSuccessorSourceHandle) -> None:
     rate = _array(bout, "summary_bout_rate_per_min").astype(np.float64)
     count = _array(bout, "summary_bout_count").astype(np.int64)
     registry = bout.scientific_manifest.get("identity_registries", {})
-    role_registry = registry.get("semantic_role", {}) if isinstance(registry, Mapping) else {}
+    role_registry = (
+        registry.get("semantic_role", {}) if isinstance(registry, Mapping) else {}
+    )
     series = sorted(set(zip(role.tolist(), chaser.tolist())))
     labels_by_band: dict[int, str] = {}
-    for role_code, chaser_code in series:
+    for series_index, (role_code, chaser_code) in enumerate(series):
         mask = (role == role_code) & (chaser == chaser_code)
         order = np.argsort(band[mask])
         x = band[mask][order]
         y = rate[mask][order]
         valid = np.isfinite(y)
         name = role_registry.get(str(role_code), f"role {role_code}")
-        ax.plot(
+        (line,) = ax.plot(
             x[valid],
             y[valid],
             marker="o",
@@ -195,14 +205,35 @@ def _bout_panel(ax: Any, bout: ComposableChaserSuccessorSourceHandle) -> None:
         )
         for band_index, lo, hi in zip(band[mask], low[mask], high[mask]):
             labels_by_band[int(band_index)] = _distance_label(float(lo), float(hi))
-        for x_value, y_value, n_value in zip(x[valid], y[valid], count[mask][order][valid]):
-            ax.annotate(str(int(n_value)), (x_value, y_value), xytext=(0, 4), textcoords="offset points", ha="center", fontsize=7)
+        label_offset = (
+            series_index - (len(series) - 1) / 2.0
+        ) * BOUT_COUNT_LABEL_OFFSET_STEP_POINTS
+        for x_value, y_value, n_value in zip(
+            x[valid], y[valid], count[mask][order][valid], strict=True
+        ):
+            ax.annotate(
+                str(int(n_value)),
+                (x_value, y_value),
+                xytext=(0, label_offset),
+                textcoords="offset points",
+                ha="center",
+                va="center",
+                fontsize=6.5,
+                color=line.get_color(),
+                bbox={
+                    "boxstyle": "square,pad=0.08",
+                    "facecolor": "white",
+                    "edgecolor": "none",
+                    "alpha": 0.78,
+                },
+            )
     ticks = sorted(labels_by_band)
     ax.set_xticks(ticks, [labels_by_band[value] for value in ticks])
     ax.set_xlabel("distance band (mm); labels show bout count")
     ax.set_ylabel("bout rate per minute of valid exposure")
     ax.set_title("Generalized bout response by semantic role")
     ax.grid(alpha=0.2)
+    ax.margins(y=BOUT_Y_MARGIN_FRACTION)
     if series:
         ax.legend(fontsize=7, ncols=2)
 
@@ -263,14 +294,10 @@ def dashboard_plot_parameters(
         previous = distance_bins.setdefault(int(code), record)
         if previous != record:
             _fail("Bout distance-bin evidence is inconsistent across summary rows.")
-    sweep_thresholds = _array(
-        escape, "sweep_speed_threshold_mm_s"
-    ).astype(np.float64)
+    sweep_thresholds = _array(escape, "sweep_speed_threshold_mm_s").astype(np.float64)
     if np.any(~np.isfinite(sweep_thresholds)):
         _fail("Escape threshold sweep contains a non-finite threshold.")
-    response_registry = escape.scientific_manifest.get(
-        "identity_registries", {}
-    )
+    response_registry = escape.scientific_manifest.get("identity_registries", {})
     if isinstance(response_registry, Mapping):
         response_registry = response_registry.get("response_class", {})
     if not isinstance(response_registry, Mapping):
@@ -300,8 +327,14 @@ def dashboard_plot_parameters(
             "trial_bar_height": 0.62,
             "trial_bar_alpha": 0.82,
             "trial_colormap": "tab10",
+            "trial_x_margin_fraction": TRIAL_X_MARGIN_FRACTION,
             "bout_line_marker": "o",
             "bout_line_width_points": 1.4,
+            "bout_count_label_offset_step_points": (
+                BOUT_COUNT_LABEL_OFFSET_STEP_POINTS
+            ),
+            "bout_count_label_vertical_alignment": "centered_series_rank",
+            "bout_y_margin_fraction": BOUT_Y_MARGIN_FRACTION,
             "response_colors": ["#999999", "#d95f02", "#1b9e77", "#7570b3"],
             "sweep_line_marker": "o",
             "sweep_line_width_points": 1.3,
@@ -385,9 +418,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     output_dir = args.output_dir.expanduser().resolve()
     stem = output_dir / f"{bundle_name}_dashboard"
     receipt_path = output_dir / f"{bundle_name}_plot_receipt.json"
-    expected_outputs = (stem.with_suffix(".png"), stem.with_suffix(".pdf"), receipt_path)
+    expected_outputs = (
+        stem.with_suffix(".png"),
+        stem.with_suffix(".pdf"),
+        receipt_path,
+    )
     if not args.overwrite and any(path.exists() for path in expected_outputs):
-        raise FileExistsError("Plot output already exists; pass --overwrite explicitly.")
+        raise FileExistsError(
+            "Plot output already exists; pass --overwrite explicitly."
+        )
     source_receipts = (
         args.controller_validation_receipt,
         args.bout_validation_receipt,
@@ -407,9 +446,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             use_consolidated=True,
             deep_audit=not receipt_bound,
             direct_validation_receipt=source_receipt,
-            required_array_names=(
-                _PLOT_ARRAY_NAMES[kind] if receipt_bound else None
-            ),
+            required_array_names=(_PLOT_ARRAY_NAMES[kind] if receipt_bound else None),
         )
         for kind, source_receipt in zip(_KINDS, source_receipts, strict=True)
     )
@@ -465,7 +502,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     receipt = {**body, "payload_sha256": canonical_json_sha256(body)}
     write_json_atomic(receipt_path, receipt)
-    print(json.dumps({**receipt, "receipt_path": str(receipt_path)}, sort_keys=True, indent=2))
+    print(
+        json.dumps(
+            {**receipt, "receipt_path": str(receipt_path)}, sort_keys=True, indent=2
+        )
+    )
     return 0
 
 

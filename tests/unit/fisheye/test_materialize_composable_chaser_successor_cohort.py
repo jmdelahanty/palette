@@ -755,10 +755,11 @@ def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> No
     assert entry["output_run_names"]["dashboard_bundle"] == (
         cohort.DASHBOARD_RECIPE_BUNDLE_NAME
     )
+    assert entry["output_run_names"]["dashboard_bundle"].endswith("recipe_v2")
     assert entry["output_run_names"]["detailed_bundle"] == (
         cohort.DETAILED_RECIPE_BUNDLE_NAME
     )
-    assert entry["output_run_names"]["detailed_bundle"].endswith("recipe_v1")
+    assert entry["output_run_names"]["detailed_bundle"].endswith("recipe_v2")
     assert entry["output_run_names"]["epoch_behavior"] == cohort.EPOCH_BEHAVIOR_RUN
     assert entry["output_run_names"]["body_alignment_plot_bundle"] == (
         cohort.BODY_ALIGNMENT_RECIPE_BUNDLE_NAME
@@ -771,7 +772,7 @@ def test_task_successor_freezes_receipt_bound_plot_recipes(tmp_path: Path) -> No
         == cohort.DETECTION_NEAR_FIELD_VISIT_PLOT_BUNDLE_NAME
     )
     assert successor["selection_policy"]["plot_recipe_provenance"] == (
-        "self_contained_exact_parameters_v5"
+        "self_contained_exact_parameters_v6"
     )
     assert successor["selection_policy"]["near_field_visit_provider_policy"] == (
         cohort.NEAR_FIELD_VISIT_PROVIDER_POLICY
@@ -1253,6 +1254,10 @@ def test_receipt_bound_successor_dry_run_passes_targeted_receipts(
             if stage["stage"] == f"{provider}_near_field_visit_plots"
         )
         assert "--source-validation-receipt" in visit_plot["command"]
+        assert (
+            visit_plot["command"][visit_plot["command"].index("--provider-role") + 1]
+            == provider
+        )
         assert (
             visit_plot["command"][visit_plot["command"].index("--bundle-name") + 1]
             == entry["output_run_names"][f"{provider}_near_field_visit_plot_bundle"]

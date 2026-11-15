@@ -3,7 +3,7 @@
 version: 4
 status: active
 implementation: implemented
-last_verified: 2026-08-27
+last_verified: 2026-11-12
 -->
 
 Purpose: define a shared fish-relative coordinate-frame contract that can be
@@ -289,7 +289,13 @@ fields, not infer the snout from `body_frame/origin_xy`.
 
 ## Recommended Metadata Shape
 
-Run attrs should include a machine-readable contract payload when practical:
+Run attrs should include a machine-readable contract payload when practical.
+The JSON below is an informal illustration of the fields such a payload
+carries, not the exact persisted layout. The implemented sealed record is
+`palette.fish_anatomical_body_frame`
+(`fisheye.shared.coordinate_frame_record`), whose exact `definition`,
+estimator-formula, and angle-convention strings are the constants in that
+module:
 
 ```json
 {
@@ -373,7 +379,8 @@ centerlines and splines are implemented.
 
 ## Validity
 
-Recommended failure reasons:
+Recommended failure reasons (current producers emit only some of these;
+`midline_fit_failed` is reserved and not emitted by any current producer):
 
 - `missing_source_anchor`
 - `missing_source_component`

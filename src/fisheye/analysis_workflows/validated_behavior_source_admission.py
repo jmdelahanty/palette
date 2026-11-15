@@ -112,6 +112,7 @@ _NODE_PATH_PREFIXES = {
     "subject_shape": "analysis/subject_shape_runs/",
     "eye_angles": "analysis/eye_angle_runs/",
     "tail_kinematics": "analysis/tail_kinematics_runs/",
+    "bout_kinematics": "analysis/bout_kinematics_runs/",
 }
 
 
@@ -211,6 +212,7 @@ def validate_core_behavior_execution_report(
     *,
     expected_analysis_zarr: str | Path,
     expected_recording_id: str,
+    additional_stage_nodes: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Validate one completed core-behavior execution report as admission.
 
@@ -219,6 +221,12 @@ def validate_core_behavior_execution_report(
     source resolver and seals those bindings into the bundle-set member.
     """
 
+    if additional_stage_nodes not in ((), ("bout_kinematics",)):
+        _fail("Unsupported additional core-behavior stage selection.")
+    required_stage_nodes = (
+        *CORE_BEHAVIOR_REQUIRED_STAGE_NODES,
+        *additional_stage_nodes,
+    )
     report = _plain(_mapping(value, field="core-behavior execution report"))
     schema_version = report.get("schema_version")
     expected_fields = (
@@ -304,10 +312,10 @@ def validate_core_behavior_execution_report(
         if node_id in workflow_nodes or node.get("stage_id") not in {None, node_id}:
             _fail("Core-behavior workflow node identity is duplicated or inconsistent.")
         workflow_nodes[node_id] = node
-    if not set(CORE_BEHAVIOR_REQUIRED_STAGE_NODES).issubset(workflow_nodes):
+    if not set(required_stage_nodes).issubset(workflow_nodes):
         _fail("Core-behavior workflow snapshot lacks required scientific stages.")
     run_selection = _mapping(workflow_raw.get("run_selection"), field="run_selection")
-    for node_id in CORE_BEHAVIOR_REQUIRED_STAGE_NODES:
+    for node_id in required_stage_nodes:
         _text(run_selection.get(node_id), field=f"run_selection.{node_id}")
     temporal_policy = _mapping(
         workflow_raw.get("temporal_policy"), field="workflow.temporal_policy"
@@ -372,7 +380,7 @@ def validate_core_behavior_execution_report(
             )
         results[node_id] = result
 
-    missing = sorted(set(CORE_BEHAVIOR_REQUIRED_STAGE_NODES) - set(results))
+    missing = sorted(set(required_stage_nodes) - set(results))
     if missing:
         _fail(f"Core-behavior execution report lacks required nodes: {missing!r}.")
 
@@ -386,7 +394,7 @@ def validate_core_behavior_execution_report(
     }
     output_runs = _mapping(execution_plan.get("output_runs"), field="output_runs")
     runs: dict[str, dict[str, Any]] = {}
-    for node_id in CORE_BEHAVIOR_REQUIRED_STAGE_NODES:
+    for node_id in required_stage_nodes:
         result = results[node_id]
         plan_node = _mapping(plan_nodes.get(node_id), field=f"plan node {node_id}")
         workflow_node = workflow_nodes[node_id]
@@ -505,6 +513,7 @@ def bind_core_behavior_execution_report(
     *,
     recording_id: str,
     analysis_zarr: str | Path,
+    additional_stage_nodes: tuple[str, ...] = (),
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Mint and validate a binding for one concrete execution report."""
 
@@ -514,6 +523,7 @@ def bind_core_behavior_execution_report(
         raw,
         expected_analysis_zarr=analysis_zarr,
         expected_recording_id=recording_id,
+        additional_stage_nodes=additional_stage_nodes,
     )
     role = (
         CORE_BEHAVIOR_EXECUTION_ADMISSION_ROLE

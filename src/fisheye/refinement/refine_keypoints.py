@@ -95,6 +95,7 @@ from ..shared.zarr_run_completion import (
     require_runs_parent,
 )
 from ..shared.system_metadata import get_environment_info, get_git_info
+from fisheye.shared.heading_convention import heading_degrees
 
 REFINED_KEYPOINT_GROUP = "refined_keypoints_runs"
 LEGACY_KEYPOINT_GROUP = "keypoints_refined_runs"
@@ -828,7 +829,7 @@ def _compute_heading_from_points(
     head_vec = eye_mean - bladder
     if not np.all(np.isfinite(head_vec)) or np.linalg.norm(head_vec) == 0:
         return float("nan")
-    return float(np.rad2deg(np.arctan2(-head_vec[1], head_vec[0])))
+    return float(heading_degrees(head_vec[0], head_vec[1], dtype=head_vec.dtype))
 
 
 def _detect_eye_flip(
