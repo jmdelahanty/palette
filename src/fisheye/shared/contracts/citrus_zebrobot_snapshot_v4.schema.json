@@ -1054,7 +1054,7 @@
     "members": {
       "type": "array",
       "uniqueItems": true,
-      "description": "dish_group only. Fish known to be in the arena because each was placed from a registered unit. Never a track-to-fish mapping. Citrus emits [] until members have a GUI.",
+      "description": "dish_group only. Fish known to be in the arena because each was placed from a registered unit or, for larvae drawn from a dish, registered in the declared (source) dish at loading. Never a track-to-fish mapping. Empty: members not declared; non-empty: exactly subject_count fish (R4).",
       "items": {
         "type": "object",
         "additionalProperties": false,
