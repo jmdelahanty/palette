@@ -4,7 +4,9 @@
   it here; Orange and Citrus answer the questions in §7. Once they agree, it
   moves to agent-contracts as a three-party contract (proposed home:
   `systems/coordinate_spaces_v1/`).
-- **Owner:** Jeremy Delahanty. **Last reviewed:** 2026-10-12.
+- **Owner:** Jeremy Delahanty. **Last reviewed:** 2026-11-14 (citations
+  re-verified against palette main `b04ec0d4` and agent-contracts main
+  `de21c037`; see §9).
 - **Builds on:**
   - the heading convention, agent-contracts `citrus-palette/heading/heading_convention_v1.json` (PR #86, merged `6b63aa2`);
   - `citrus.pose_observation` v2 (same PR);
@@ -38,7 +40,7 @@ projector canvas and on the fish.** Today no shared contract can establish it.
      Palette never parses.
 3. **Homography handedness is never checked.** Palette checks only that the
    matrix is invertible:
-   - `abs(det) > 1e-12` in `shared/unified_h5/geometry.py:66-73`;
+   - `abs(det) > 1e-12` in `shared/unified_h5/geometry.py:79-82`;
    - `abs(np.linalg.det(values)) <= 1e-12` in `shared/stimulus_coordinate_contract.py:2526`.
 
    Citrus folds fixed mount and optical orientation *into* that matrix on
@@ -48,7 +50,7 @@ projector canvas and on the fish.** Today no shared contract can establish it.
 4. **The fish's left assumes an undeclared camera view.** The body frame
    hard-codes `"left_axis": "fixed_clockwise_90_degrees_in_camera_xy"` and
    `"axis_handedness": "determinant_negative_one_camera_xy"`
-   (`shared/zarr/body_frame_producer.py:218-219`). That is correct only for a
+   (`shared/zarr/body_frame_producer.py:219-220`). That is correct only for a
    dorsal, non-mirrored camera image.
    - The new heading convention now says so: `AC:citrus-palette/heading/heading_convention_v1.json:33-34`, `"camera_view_assumed": "dorsal_unmirrored"`.
    - It is *assumed* per session, not measured. A ventral view or a ReverseX
@@ -56,9 +58,9 @@ projector canvas and on the fish.** Today no shared contract can establish it.
      any check.
 5. **The camera raster is tied to its calibration only by size.** Palette
    matches calibration and recording on `native_{width,height}_px` alone
-   (`shared/unified_h5/geometry.py:167-173`).
+   (`shared/unified_h5/geometry.py:175-181`).
    - Orange's `coordinate_frame` declares `top_left_pixel` at (0,0), right/down
-     (`shared/recording_geometry.py:400`), but not *top-left of what*: sensor or
+     (`shared/recording_geometry.py:446-451`), but not *top-left of what*: sensor or
      AOI.
    - A changed AOI offset, flip or binning at the same output size passes every
      check today.
@@ -91,10 +93,10 @@ One canonical id per space. Every space is 2-D, +x right, +y down, units px unle
 | `palette.roi_px.v1` | Palette | Palette's requested ROI window inside `camera.recorded_px` | A translation, zero-padded outside the frame (`requested_window_zero_padded_v1`). Not the same rule as Orange's clamping; each declares its own. |
 | `palette.model_input_px.v1` | Palette | the detector or pose model input tensor | A scale and translation from `palette.roi_px` or `camera.recorded_px`, declared per run. |
 | `citrus.display_canvas_px.v1` | Citrus | the logical final display canvas Citrus renders into (= one xrandr output's `W×H`) | The homography's destination. Extent comes from the session's `stimulus_output_{width,height}`, which must equal xrandr `W×H` (§5). |
-| `citrus.framebuffer_px.v1` | Citrus | the OpenGL framebuffer | Declared by Citrus as the canvas reflected once vertically (`presentation.py:132-139`). |
-| `citrus.stimulus_video_px.v1` | Citrus | the encoded stimulus video raster | Declared as reflected once (`presentation.py:123-130`). |
+| `citrus.framebuffer_px.v1` | Citrus | the OpenGL framebuffer | Declared by Citrus as the canvas reflected once vertically (`presentation.py:132-140`). |
+| `citrus.stimulus_video_px.v1` | Citrus | the encoded stimulus video raster | Declared as reflected once (`presentation.py:123-131`). |
 | `citrus.arena_canvas_px.v1` | Citrus | the active arena rectangle inside `citrus.display_canvas_px` | A translation by the arena origin. The origin must be integer px (§6c). |
-| `physical.camera_mm.v1` | Palette | coincident with `camera.recorded_px` top-left (`coordinate_frame_record.py:142`) | Isotropic scale `1 / pixels_per_mm_camera`, one plane (dish top rim). y stays down. |
+| `physical.camera_mm.v1` | Palette | coincident with `camera.recorded_px` top-left (`coordinate_frame_record.py:143`) | Isotropic scale `1 / pixels_per_mm_camera`, one plane (dish top rim). y stays down. |
 
 There is one pixel convention per space and kind:
 - points: `continuous_pixel_edge`;
@@ -108,12 +110,12 @@ A transform may join only spaces whose convention it declares (§3).
 | Today's name | Where | Canonical |
 |---|---|---|
 | `source_camera_px` | Citrus geometry matrices (`shared/unified_h5/contracts/experimental_h5_geometry_v1.json:37,48`) | `camera.recorded_px.v1` |
-| `camera_view_px` | calibration attrs (`selected_calibration.py:140`, `unified_h5/geometry.py:152`) | `camera.recorded_px.v1` |
-| `camera_native_pixels` | Orange `coordinate_frame`, rim observations (`recording_geometry.py:287,323`) | `camera.recorded_px.v1` (to confirm: Q-O1) |
+| `camera_view_px` | calibration attrs (`selected_calibration.py:140`, `unified_h5/geometry.py:160`) | `camera.recorded_px.v1` |
+| `camera_native_pixels` | Orange `coordinate_frame`, rim observations (`recording_geometry.py:446,374`) | `camera.recorded_px.v1` (to confirm: Q-O1) |
 | `full_frame_pixels` | Orange crop outputs (`contracts/orange_recording_crop_output_v1.schema.json:75-77`) | `camera.recorded_px.v1` |
-| `source_frame_pixels` | Orange pose events (`contracts/orange_pose_event_v2.schema.json:212,228`) | `camera.recorded_px.v1` |
+| `source_frame_pixels` | Orange pose events (`contracts/orange_pose_event_v2.schema.json:212,228`; same lines in `orange_pose_event_v3.schema.json`) | `camera.recorded_px.v1` |
 | `crop_pixels` | Orange pose events (`:199`) | `camera.crop_px.v1` |
-| `source_camera_image_px.top_left_y_down.v1` | Palette descriptor registry (`coordinate_descriptor.py:1248`) | `camera.recorded_px.v1` |
+| `source_camera_image_px.top_left_y_down.v1` | Palette descriptor registry (`coordinate_descriptor.py:1249`) | `camera.recorded_px.v1` |
 | `roi_local_px.top_left_y_down.v1` | Palette | `palette.roi_px.v1` |
 | `detector_model_input_px…` | Palette (`coordinate_descriptor.py:1297`) | `palette.model_input_px.v1` |
 | `final_display_canvas_px` | Citrus matrices, calibration attrs | `citrus.display_canvas_px.v1` |
@@ -208,7 +210,7 @@ For every recording admitted under this contract:
    AOI, flips, binning and rotation, not only width and height.
 4. **Display extent.** `stimulus_output_{width,height}` must equal the xrandr
    `W×H` of the selected output. The unified path checks only the session attrs
-   today (`unified_h5/geometry.py:167-173`), while the legacy path uses xrandr
+   today (`unified_h5/geometry.py:175-181`), while the legacy path uses xrandr
    (`shared/stimulus_frame_transform.py:206-213`).
 5. **Missing evidence.** A new recording (after the contract's effective date)
    without the §4 fields is refused at intake.
@@ -234,13 +236,20 @@ a. **xrandr token.** Stop deriving `selected_output_transform_token` from the
    - Add tests for a rotated output and a reflected one.
    - Until this lands, the existing token proves nothing; treat it as such.
 
-b. **Stale agent-contract.** `AC:palette-crimson/detect_bbox_read.md:128,151`
-   still requires `pixel_convention == "continuous"` for boxes. Palette
-   publishes `pixel_edge_half_open` (`shared/coordinate_surface_contract.py:35`;
+b. **Stale agent-contract.** `AC:palette-crimson/detect_bbox_read.md:128`
+   still requires `pixel_convention == "continuous"` for the source-camera
+   `bbox_img_xyxy` box. Palette publishes `pixel_edge_half_open`
+   (`shared/coordinate_surface_contract.py:35`;
    `docs/crimson_detect_bbox_read_contract.md:82`), and
    `AC:palette-crimson/subject_shape_read.md:207` already says half-open.
-   Fix the two lines in agent-contracts. This was flagged in
+   Fix that one line in agent-contracts. This was flagged in
    `docs/diagnostics/coordinate_contract_audit_2026-07-19.md` and is still open.
+   - *Correction (2026-11-14):* the earlier draft also cited line 151. That
+     line is the normalized `bbox_norm_coords` (`bbox_cxcywh`) descriptor, and
+     `continuous` is correct there: Palette publishes it
+     (`shared/coordinate_surface_contract.py:176`) and the descriptor validator
+     requires it for normalized spaces (`shared/coordinate_descriptor.py:2015-2016`).
+     Line 151 must not change.
 
 c. **Arena origin type.**
    - Citrus declares `effective_arena_origin_{x,y}_px` as `<f8`
@@ -258,6 +267,11 @@ d. **Two mm definitions.** The GoodCopBadCop workflow computes canvas mm from
    analyses use `physical.camera_mm.v1`.
 
 ## 7. Open questions
+
+> **Sent 2026-11-14.** Q-O1..Q-O5 went in full to Orange (`orange [87c8d1]`) and
+> Q-C1..Q-C7 to Citrus (`citrus-agent`). Replies go to the session
+> `PR-monitor [1f32ae]`. No answers have been recorded yet.
+> Q-C7 is partly answered by code merged since: see §9.
 
 ### For Orange
 
@@ -281,7 +295,7 @@ d. **Two mm definitions.** The GoodCopBadCop workflow computes canvas mm from
 
 1. **Now, Palette only.**
    - The §6a xrandr parser fix.
-   - The §6b agent-contracts two-line fix.
+   - The §6b agent-contracts one-line fix.
    - Stamp `orientation_status = "orientation_unverified"` on geometry runs from all current recordings, so nothing claims verified orientation.
 2. **Answers to §7,** then the agent-contracts PR `systems/coordinate_spaces_v1/`, containing:
    - the registry and alias table;
@@ -305,3 +319,46 @@ A left/right split on the fish's midline needs every link of the chain to be ver
 - `camera_view_assumed` backed by declared `viewing_side` (§5 item 2).
 
 Until those land, phototaxis sessions are acquired under `orientation_unverified`. Each needs the one-off asymmetric-pattern check on its rig before its left/right results are trusted. **The minimum to start phototaxis safely:** steps 1 and 2, plus Citrus's Q-C1 answer and that check run on the phototaxis rig.
+
+## 9. Re-verification and changes since 2026-10-13 (checked 2026-11-14)
+
+**Citations fixed.** Every file:line citation was rechecked against palette
+main `b04ec0d4` and agent-contracts main `de21c037`. These had drifted and are
+updated above:
+- `unified_h5/geometry.py`: determinant check 66-73 → 79-82, `camera_view_px`
+  152 → 160, extent check 167-173 → 175-181;
+- `zarr/body_frame_producer.py` 218-219 → 219-220;
+- `recording_geometry.py`: `top_left_pixel` 400 → 446-451, and `camera_native_pixels` 287,323 → 446,374;
+- `unified_h5/presentation.py` 123-130 → 123-131 and 132-139 → 132-140;
+- `coordinate_frame_record.py` 142 → 143;
+- `coordinate_descriptor.py` 1248 → 1249;
+- §6b: line 151 dropped (see the correction there).
+
+All other citations, including every `AC:` one, still hold.
+
+**Merged since 2026-10-13 that bears on this doc:**
+- **None of the §6 fixes has landed.** The xrandr token still comes from the
+  parenthesised list (`selected_calibration.py:196-201`, `:1544`). Both
+  `|det|`-only checks are unchanged. Nothing stamps `orientation_unverified`,
+  and no code mentions it.
+- **Pose observation v3** (`6988c81f`, 2026-10-14, admission revision 7)
+  carries `camera_view_assumed`, but as a schema `const: "dorsal_unmirrored"`
+  (`shared/contracts/citrus_pose_observation_contract.v3.schema.json:487-489`).
+  This partly answers Q-C7: today the value is a constant, not rig
+  configuration. Under v3 a ventral or mirrored rig cannot declare itself at
+  all; it would need a schema change. The semantic-hash v4 cases
+  (`citrus_palette_semantic_hash_v4_cases.json`) also embed the constant.
+- **Phototaxis is now admitted.** Admission revision 6 (`decdf91a`,
+  2026-10-14) admits reactive heading-split `phototaxis_v1`, and real
+  2026-10-17/18 phototaxis recordings have been registered since. The
+  "What blocks phototaxis" gate in §8 was therefore not applied before
+  acquisition. Those sessions carry no orientation evidence, and no
+  asymmetric-pattern check is recorded for their rig. Their left/right
+  results are `orientation_unverified` in substance, even though nothing
+  stamps them yet.
+- **Orange pose event v3** (`f0e12c8f`, frame_identity_v1) keeps
+  `crop_pixels` and `source_frame_pixels` at the same lines, so the alias table
+  is unchanged.
+- **Dish geometry** (`1bad4def`): `exact_match_applied` now comes from Citrus's
+  runtime geometry contract. That concerns registration status, not
+  orientation, so it does not change any point here.
