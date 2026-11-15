@@ -882,28 +882,63 @@ def publish_arena_geometry_comparison(
 ) -> dict[str, Any]:
     """Publish immutable selector-ineligible comparison evidence."""
 
-    if plan.target_run_path.exists():
-        existing = validate_arena_geometry_comparison_run(
-            plan.target_run_path,
-            expected_plan=plan,
-            require_complete=True,
-        )
+    return _publish_metadata_only_comparison_run(
+        source_zarr=plan.source_zarr,
+        comparison_id=plan.comparison_id,
+        target_run_path=plan.target_run_path,
+        run_attrs=_run_attrs(plan),
+        run_provenance=plan.run_provenance,
+        validate_run=lambda path, require_complete: validate_arena_geometry_comparison_run(
+            path, expected_plan=plan, require_complete=require_complete
+        ),
+        revalidate_sources=lambda: _revalidate_sources(plan),
+        algorithm_version=COMPARISON_ALGORITHM_VERSION,
+        scratch_root=scratch_root,
+        copy_backend=copy_backend,
+    )
+
+
+def _publish_metadata_only_comparison_run(
+    *,
+    source_zarr: Path,
+    comparison_id: str,
+    target_run_path: Path,
+    run_attrs: Mapping[str, Any],
+    run_provenance: Mapping[str, Any],
+    validate_run: Any,
+    revalidate_sources: Any,
+    algorithm_version: int,
+    scratch_root: str | Path,
+    copy_backend: str,
+) -> dict[str, Any]:
+    """Shared atomic metadata-only publication below ``COMPARISON_RUNS_PARENT``.
+
+    Every comparison profile publishes through this one owner so the lock,
+    selector-ineligibility check, completion marker and rollback policy are
+    identical.  Profile-specific grammar lives only in ``run_attrs`` and in the
+    supplied validators.
+    """
+
+    if target_run_path.exists():
+        existing = validate_run(target_run_path, True)
         if not existing["valid"]:
             raise FileExistsError(f"Existing comparison is not the expected run: {existing}")
         return {"published": False, "status": "already_complete", **existing}
-    _revalidate_sources(plan)
+    revalidate_sources()
     scratch = Path(scratch_root).expanduser().resolve()
     scratch.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
-        prefix=f"palette-{plan.comparison_id}-", dir=scratch
+        prefix=f"palette-{comparison_id}-", dir=scratch
     ) as temporary:
-        local_run = Path(temporary) / plan.comparison_id
-        local = zarr.open_group(str(local_run), mode="w", zarr_format=3)
-        local.attrs.update(json_attr_safe(_run_attrs(plan)))
-        mark_run_started(local, run_name=plan.comparison_id, stage="arena_geometry_comparison")
+        local_run = Path(temporary) / comparison_id
+        local = zarr.open_group(
+            str(local_run), mode="w", zarr_format=3, use_consolidated=False
+        )
+        local.attrs.update(json_attr_safe(dict(run_attrs)))
+        mark_run_started(local, run_name=comparison_id, stage="arena_geometry_comparison")
 
         def validate(path: Path) -> dict[str, Any]:
-            return validate_arena_geometry_comparison_run(path, expected_plan=plan)
+            return validate_run(path, False)
 
         def prepare(root: zarr.Group) -> tuple[zarr.Group]:
             analysis = root.require_group("analysis")
@@ -913,18 +948,18 @@ def publish_arena_geometry_comparison(
             mark_run_complete(
                 run,
                 parent_group=parent,
-                run_name=plan.comparison_id,
-                run_provenance=plan.run_provenance,
+                run_name=comparison_id,
+                run_provenance=run_provenance,
             )
 
         def verify(root: zarr.Group) -> None:
             parent = root[f"analysis/{COMPARISON_RUNS_PARENT}"]
-            run = parent[plan.comparison_id]
+            run = parent[comparison_id]
             if (
                 run.attrs.get("palette_run_completion_status") != "complete"
                 or run.attrs.get("stage_selector_eligible") is not False
-                or parent.attrs.get("latest") == plan.comparison_id
-                or parent.attrs.get("latest_complete") == plan.comparison_id
+                or parent.attrs.get("latest") == comparison_id
+                or parent.attrs.get("latest_complete") == comparison_id
             ):
                 raise RuntimeError(
                     "Comparison evidence became selector-visible during publication."
@@ -932,10 +967,10 @@ def publish_arena_geometry_comparison(
 
         publication = atomic_publish_run_group(
             AtomicRunPublishSpec(
-                source_zarr=plan.source_zarr,
+                source_zarr=source_zarr,
                 local_run_path=local_run,
-                target_run_path=plan.target_run_path,
-                run_name=plan.comparison_id,
+                target_run_path=target_run_path,
+                run_name=comparison_id,
                 lock_suffix="arena-geometry-comparison-publish",
                 publish_schema_id=COMPARISON_PUBLISH_SCHEMA_ID,
                 policy="node_local_metadata_only_atomic_publish_v1",
@@ -948,28 +983,733 @@ def publish_arena_geometry_comparison(
             complete_run=complete,
             verify_pointers=verify,
             after_rename=lambda _root, _run, _physical_copy: {
-                "source_revision_audit": _revalidate_sources(plan)
+                "source_revision_audit": revalidate_sources()
             },
-            payload_metadata={"algorithm_version": COMPARISON_ALGORITHM_VERSION},
+            payload_metadata={"algorithm_version": algorithm_version},
         )
-    final = validate_arena_geometry_comparison_run(
-        plan.target_run_path,
-        expected_plan=plan,
-        require_complete=True,
-    )
+    final = validate_run(target_run_path, True)
     if not final["valid"]:
         raise RuntimeError(f"Final comparison validation failed: {final}")
     return {"published": True, "status": "complete", "publication": publication, **final}
 
 
+# ---------------------------------------------------------------------------
+# Citrus-declared versus unreviewed Palette blind-fit cross-check (profile v1)
+# ---------------------------------------------------------------------------
+#
+# Scientific/schema addition.  This profile compares the dish geometry Citrus
+# declared (and, where proven, applied) in the unified H5 against the frozen
+# Palette blind ``top_rim_preferred_v1`` fit.  It requires NO human review of
+# the Palette fit because it never selects, accepts, gates or replaces
+# geometry: it only logs raw disagreement.  It deliberately carries no
+# pass/fail flag and no threshold; a flag plus a calibrated threshold policy is
+# a separate scientific decision.  It uses its own record schema version and
+# run schema id so the reviewed v1 path, readiness projection and selection
+# consumers neither accept nor count it.
+
+CITRUS_CROSSCHECK_PROFILE_ID = "citrus_declared_vs_unreviewed_blind_fit_v1"
+CITRUS_CROSSCHECK_RECORD_SCHEMA_VERSION = 2
+CITRUS_CROSSCHECK_RUN_SCHEMA_ID = "palette.arena_geometry_citrus_crosscheck_run"
+CITRUS_CROSSCHECK_RUN_SCHEMA_VERSION = 1
+CITRUS_CROSSCHECK_ALGORITHM_VERSION = 1
+CITRUS_CROSSCHECK_ID_PREFIX = "arena_geometry_citrus_crosscheck_"
+CITRUS_CROSSCHECK_SOURCE_KIND = "citrus_h5"
+CITRUS_CROSSCHECK_FIT_RECIPE_ID = "top_rim_preferred_v1"
+
+# Citrus runtime-identity statuses that are recorded explicitly (the H5 still
+# declares a complete geometry, but Citrus did not prove it applied it).
+_CITRUS_DECLARED_NOT_APPLIED_STATUSES = frozenset(
+    {"missing", "camera_arena_target_missing"}
+)
+# Integrity failures: the declared geometry itself is not trustworthy.
+_CITRUS_REFUSED_STATUSES = frozenset(
+    {
+        "checksum_mismatch",
+        "registration_id_mismatch",
+        "rim_observation_mismatch",
+        "invalid",
+    }
+)
+CITRUS_GEOMETRY_STATES = frozenset(
+    {"declared_and_applied", "declared_not_proven_applied"}
+)
+_CITRUS_CROSSCHECK_DECISION = {
+    "evidence_outcome": "disagreement_logged",
+    "workflow_action": "log_only",
+    "pass_fail_flag_emitted": False,
+    "candidate_selected": False,
+    "candidates_mutated": False,
+    "raw_detections_mutated": False,
+    "citrus_geometry_accepted": False,
+    "citrus_geometry_replaced": False,
+    "palette_fit_human_review_required_for_this_record": False,
+}
+_CITRUS_CROSSCHECK_THRESHOLD_POLICY = {
+    "status": "no_threshold_policy",
+    "thresholds": None,
+    "threshold_source": "uncalibrated_separate_scientific_decision",
+}
+_CITRUS_CROSSCHECK_METRIC_FIELDS = (
+    "center_offset_native_px",
+    "center_offset_x_native_px",
+    "center_offset_y_native_px",
+    "radius_delta_vs_citrus_physical_rim_px",
+    "radius_delta_vs_citrus_detection_gate_px",
+    "circle_iou_vs_citrus_physical_rim",
+    "circle_iou_vs_citrus_detection_gate",
+    "maximum_boundary_separation_vs_citrus_physical_rim_px",
+)
+_WINDOW_NAMES = ("early", "middle", "late")
+
+
+@dataclass(frozen=True)
+class ArenaGeometryCitrusCrosscheckPlan:
+    source_zarr: Path
+    acquisition_candidate_run: str
+    acquisition_candidate_record_sha256: str
+    fit_review_run: str
+    fit_review_record_sha256: str
+    fit_report_sha256: str
+    detect_source_group_path: str | None
+    detect_source_signature: str | None
+    comparison_id: str
+    comparison_record_sha256: str
+    comparison_record: Mapping[str, Any]
+    target_run_path: Path
+    run_provenance: Mapping[str, Any]
+
+
+def _citrus_geometry_state(source: Mapping[str, Any]) -> tuple[str, list[str]]:
+    if source.get("source_kind") != CITRUS_CROSSCHECK_SOURCE_KIND:
+        raise ValueError(
+            "Citrus cross-check requires an acquisition candidate whose geometry "
+            "came from the Citrus unified H5 (source_kind 'citrus_h5')."
+        )
+    status = source.get("citrus_registration_status")
+    applied = source.get("selected_daily_registration_applied_by_citrus")
+    if status in _CITRUS_REFUSED_STATUSES:
+        raise ValueError(
+            f"Citrus H5 geometry is invalid ({status}); it cannot be cross-checked."
+        )
+    if status == "exact_match_applied":
+        if applied is not True:
+            raise ValueError(
+                "Citrus H5 geometry claims an exact applied match but does not "
+                "declare the selected registration as applied."
+            )
+        return "declared_and_applied", []
+    if status in _CITRUS_DECLARED_NOT_APPLIED_STATUSES:
+        return "declared_not_proven_applied", [f"citrus_registration_{status}"]
+    raise ValueError(f"Unsupported Citrus registration status: {status!r}.")
+
+
+def _load_blind_fit(archive: Path, fit_review_run: str) -> dict[str, Any]:
+    # Local import keeps the module import graph identical for v1 consumers.
+    from fisheye.analysis_workflows.materializers import arena_geometry_fit_review
+
+    package = arena_geometry_fit_review.load_arena_geometry_fit_review_evidence(
+        archive, run_name=fit_review_run
+    )
+    report = json.loads(package.fit_report_bytes)
+    parameters = report.get("parameters") or {}
+    contract = report.get("fit_evidence_contract") or {}
+    if (
+        report.get("schema_id") != arena_geometry_fit_review.PROBE_SCHEMA_ID
+        or report.get("schema_version") != 1
+        or report.get("status") != "provisional_visual_review_required"
+        or report.get("fit_frozen_before_acquisition_reveal") is not True
+        or parameters.get("acquisition_geometry_available_to_fitter") is not False
+        or contract.get("all_window_candidates_frozen") is not True
+        or contract.get("candidate_geometry_revealed_to_acquisition_fit") is not False
+    ):
+        raise ValueError("Citrus cross-check requires a valid frozen blind fit.")
+    recipe = report.get("scientific_recipe")
+    if not isinstance(recipe, Mapping) or recipe.get("recipe_id") != (
+        CITRUS_CROSSCHECK_FIT_RECIPE_ID
+    ):
+        raise ValueError(
+            "Citrus cross-check requires the opt-in top_rim_preferred_v1 blind fit."
+        )
+    source = report.get("source")
+    windows = report.get("windows")
+    metrics = report.get("rim_metrics")
+    if not isinstance(source, Mapping) or not isinstance(windows, Mapping):
+        raise ValueError("Blind fit lacks source and temporal evidence.")
+    if not isinstance(metrics, Mapping):
+        raise ValueError("Blind fit lacks independently measured rim_metrics.")
+    # The fit-review owner already validated these at load; re-run them so the
+    # cross-check fails closed if that owner contract ever weakens.
+    arena_geometry_fit_review.validate_rim_metrics(
+        metrics, source=source, windows=windows
+    )
+    arena_geometry_fit_review.validate_rim_metrics_consensus(
+        report.get("consensus_fit"), windows=windows
+    )
+    consensus = report["consensus_fit"]
+    if consensus.get("coordinate_space") != "camera_native_pixels":
+        raise ValueError("Blind-fit consensus must use native camera pixels.")
+    selected = {
+        name: metrics["windows"][name]["candidates"][
+            metrics["windows"][name]["selected_candidate_id"]
+        ]
+        for name in _WINDOW_NAMES
+    }
+    if any(item.get("radial_residual_p95_px") is None for item in selected.values()):
+        raise ValueError("Blind-fit selected rim has no measurable image support.")
+    return {
+        "package": package,
+        "report": report,
+        "source": source,
+        "metrics": metrics,
+        "selected": selected,
+        "fitted": _circle(consensus, label="Palette blind fit"),
+        "fit_report_sha256": hashlib.sha256(package.fit_report_bytes).hexdigest(),
+    }
+
+
+def _citrus_boundary_support(
+    package: Any,
+    *,
+    physical: tuple[float, float, float],
+    acquisition_source: Mapping[str, Any],
+) -> dict[str, Any]:
+    if package.acquisition_reveal_bytes is None:
+        return {"status": "not_measured", "reason": "acquisition_reveal_not_supplied"}
+    reveal = json.loads(package.acquisition_reveal_bytes)
+    support = reveal.get("acquisition_boundary_edge_support") or {}
+    if support.get("status") != "measured":
+        return {
+            "status": "not_measured",
+            "reason": "acquisition_reveal_support_not_measured",
+        }
+    windows = support.get("windows")
+    if (
+        support.get("fit_frozen_before_measurement") is not True
+        or support.get("coordinate_space") != "camera_native_pixels"
+        or _circle(support, label="Citrus image support") != physical
+        or _sha256_hex(
+            support.get("source_observation_sha256"), label="image-support observation"
+        )
+        != _sha256_hex(
+            acquisition_source["source_observation_sha256"],
+            label="Citrus producer observation",
+        )
+        or not isinstance(windows, Mapping)
+        or set(windows) != set(_WINDOW_NAMES)
+        or any(
+            not isinstance(window, Mapping)
+            or window.get("status") != "measured"
+            or window.get("geometry_frozen") is not True
+            for window in windows.values()
+        )
+    ):
+        raise ValueError(
+            "Citrus image support is stale, incomplete, or for the wrong circle."
+        )
+    return {
+        "status": "measured",
+        "windows": {
+            name: {
+                "angular_edge_support_fraction": windows[name][
+                    "angular_edge_support_fraction"
+                ],
+                "median_absolute_radial_offset_px": windows[name][
+                    "median_absolute_radial_offset_px"
+                ],
+            }
+            for name in _WINDOW_NAMES
+        },
+    }
+
+
+def build_arena_geometry_citrus_crosscheck_plan(
+    source_zarr: str | Path,
+    *,
+    acquisition_candidate_run: str,
+    fit_review_run: str,
+    detect_source_group_path: str | None = None,
+) -> ArenaGeometryCitrusCrosscheckPlan:
+    """Plan one content-addressed Citrus-vs-blind-fit cross-check (no writes).
+
+    Missing or invalid Citrus geometry is refused; Citrus geometry declared
+    but not proven applied is recorded explicitly.  Neither case is ever
+    reported as agreement, and no case emits a pass/fail flag.
+    """
+
+    from fisheye.analysis_workflows.materializers import arena_geometry_candidates
+
+    archive = Path(source_zarr).expanduser().resolve()
+    root = open_zarr_root(archive, mode="r")
+    acquisition = _candidate_snapshot(
+        root,
+        run_name=acquisition_candidate_run,
+        expected_kind=ACQUISITION_CANDIDATE_KIND,
+    )
+    record = acquisition["record"]
+    acquisition_source = record["acquisition_source"]
+    citrus_state, reason_codes = _citrus_geometry_state(acquisition_source)
+    blind = _load_blind_fit(archive, _safe_name(fit_review_run, label="fit_review_run"))
+    source = blind["source"]
+    coordinate, arena, video = (
+        arena_geometry_candidates._source_camera_candidate_binding(
+            archive,
+            expected_camera_serial=str(source.get("camera_serial") or ""),
+            fit_source=source,
+            arena_binding=record["arena_binding"],
+        )
+    )
+    if coordinate != record["coordinate_binding"] or arena != record["arena_binding"]:
+        raise ValueError(
+            "Blind fit and Citrus geometry coordinate/arena bindings disagree."
+        )
+    shape = source.get("image_shape_px") or {}
+    if (shape.get("width"), shape.get("height")) != (
+        coordinate["native_width_px"],
+        coordinate["native_height_px"],
+    ) or source.get("pixel_contract") != "orange.camera.mono8.full_frame.v1":
+        raise ValueError("Blind-fit source raster or pixel contract disagrees.")
+    mode = source.get("mode") or "single_video"
+    if mode == "single_video":
+        fingerprint = video.get("file_fingerprint") or {}
+        if (
+            source.get("frame_count") != video.get("total_frames")
+            or source.get("video_size_bytes") != fingerprint.get("size_bytes")
+            or Path(str(source.get("video_path"))).name != video.get("source_video")
+        ):
+            raise ValueError("Blind fit does not bind the recording source video.")
+    elif mode != "clipped_recording":
+        raise ValueError("Unsupported blind-fit source layout.")
+
+    physical = _circle(record["physical_inner_rim"], label="Citrus physical rim")
+    citrus_gate = _circle(record["valid_detection_region"], label="Citrus gate")
+    fitted = blind["fitted"]
+    dx = fitted[0] - physical[0]
+    dy = fitted[1] - physical[1]
+    center_offset = math.hypot(dx, dy)
+    radius_delta = fitted[2] - physical[2]
+    metrics = {
+        "center_offset_native_px": center_offset,
+        "center_offset_x_native_px": dx,
+        "center_offset_y_native_px": dy,
+        "radius_delta_vs_citrus_physical_rim_px": radius_delta,
+        "radius_delta_vs_citrus_detection_gate_px": fitted[2] - citrus_gate[2],
+        "circle_iou_vs_citrus_physical_rim": _circle_iou(physical, fitted),
+        "circle_iou_vs_citrus_detection_gate": _circle_iou(citrus_gate, fitted),
+        "maximum_boundary_separation_vs_citrus_physical_rim_px": center_offset
+        + abs(radius_delta),
+    }
+    operational: Mapping[str, Any] = {
+        "status": "not_measured",
+        "reason": "exact_detection_source_not_supplied",
+    }
+    source_path: str | None = None
+    source_signature: str | None = None
+    if detect_source_group_path is not None:
+        detections = _detection_snapshot(
+            root,
+            source_group_path=detect_source_group_path,
+            coordinate_binding=coordinate,
+        )
+        centers = np.asarray(detections["centers"], dtype=np.float64)
+        if len(centers) == 0 or not np.isfinite(centers).all():
+            raise ValueError(
+                "Gate disagreement requires a nonempty finite exact detection rowset."
+            )
+        source_path = str(detections["group_path"])
+        source_signature = str(detections["signature"])
+        operational = _gate_disagreement(
+            detections, acquisition_gate=citrus_gate, palette_gate=fitted
+        )
+    temporal = blind["metrics"]["temporal"]
+    package = blind["package"]
+    comparison_record = {
+        "schema_id": COMPARISON_RECORD_SCHEMA_ID,
+        "schema_version": CITRUS_CROSSCHECK_RECORD_SCHEMA_VERSION,
+        "comparison_profile": CITRUS_CROSSCHECK_PROFILE_ID,
+        "algorithm_version": CITRUS_CROSSCHECK_ALGORITHM_VERSION,
+        "candidate_bindings": {
+            "acquisition": {
+                key: acquisition[key]
+                for key in (
+                    "run_name",
+                    "candidate_id",
+                    "candidate_kind",
+                    "candidate_record_sha256",
+                )
+            },
+            "palette_blind_fit": {
+                "fit_review_run": package.run_name,
+                "fit_review_record_sha256": package.review_record_sha256,
+                "fit_review_status": package.review_record["review_status"],
+                "fit_report_sha256": blind["fit_report_sha256"],
+                "fit_method": blind["report"].get("fit_method"),
+                "scientific_recipe": _canonical_copy(blind["report"]["scientific_recipe"]),
+                "rim_metrics_source_binding_sha256": blind["metrics"][
+                    "source_binding_sha256"
+                ],
+            },
+        },
+        "citrus_geometry": {
+            "state": citrus_state,
+            "reason_codes": reason_codes,
+            "source_kind": acquisition_source["source_kind"],
+            "artifact_id": acquisition_source["artifact_id"],
+            "source_observation_sha256": acquisition_source["source_observation_sha256"],
+            "source_contract_sha256": acquisition_source["source_contract_sha256"],
+            "registration_id": acquisition_source["registration_id"],
+            "registration_sha256": acquisition_source["registration_sha256"],
+            "citrus_registration_status": acquisition_source[
+                "citrus_registration_status"
+            ],
+            "selected_daily_registration_applied_by_citrus": acquisition_source[
+                "selected_daily_registration_applied_by_citrus"
+            ],
+            "producer_quality_flags": _canonical_copy(
+                acquisition_source["producer_quality_flags"]
+            ),
+            "target_plane": record["physical_inner_rim"]["target_plane"],
+        },
+        "recording_binding": {
+            "arena_binding": _canonical_copy(record["arena_binding"]),
+            "coordinate_binding": _canonical_copy(record["coordinate_binding"]),
+            "bindings_match_exactly": True,
+        },
+        "observed_features": {
+            "citrus": "dish_inner_rim_water_side_edge",
+            "palette_intended_target": blind["report"]["consensus_fit"].get(
+                "intended_target_feature"
+            ),
+            "palette_observed_classification": blind["report"]["consensus_fit"].get(
+                "observed_feature_classification"
+            ),
+            "semantic_compatibility": "projected_edges_unresolved",
+            "radius_delta_semantics": (
+                "raw_projected_edge_difference_not_same_feature_physical_claim"
+            ),
+        },
+        "geometry": {
+            "citrus_physical_inner_rim": _circle_record(physical),
+            "citrus_valid_detection_region": _circle_record(citrus_gate),
+            "palette_blind_fit_boundary": _circle_record(fitted),
+            "palette_diagnostic_gate_derivation": (
+                "blind_fit_boundary_without_added_tolerance"
+            ),
+        },
+        "disagreement_metrics": metrics,
+        "gate_disagreement": operational,
+        "independent_fit_evidence": {
+            "windows": {
+                name: {
+                    key: _canonical_copy(blind["selected"][name][key])
+                    for key in (
+                        "geometry",
+                        "angular_support_fraction",
+                        "visible_angular_fraction",
+                        "longest_unsupported_arc_degrees",
+                        "radial_residual_p95_px",
+                        "quadrant_support_fractions",
+                        "quality_flags",
+                    )
+                }
+                for name in _WINDOW_NAMES
+            },
+            "temporal": _canonical_copy(temporal),
+        },
+        "citrus_boundary_image_support": _citrus_boundary_support(
+            package, physical=physical, acquisition_source=acquisition_source
+        ),
+        "threshold_policy": _canonical_copy(_CITRUS_CROSSCHECK_THRESHOLD_POLICY),
+        "decision": _canonical_copy(_CITRUS_CROSSCHECK_DECISION),
+        "immutability": {
+            "candidates_mutated": False,
+            "raw_detections_mutated": False,
+            "selection_performed": False,
+        },
+        "canonicalization": "canonical_json_sort_keys_v1",
+    }
+    normalized = _canonical_copy(comparison_record)
+    validate_arena_geometry_citrus_crosscheck_record(normalized)
+    digest = _payload_sha256(normalized)
+    comparison_id = f"{CITRUS_CROSSCHECK_ID_PREFIX}{digest[:20]}"
+    provenance = build_writer_run_provenance(
+        command="fisheye.utils.publish_arena_geometry_citrus_crosscheck",
+        params={
+            "comparison_id": comparison_id,
+            "comparison_record_sha256": digest,
+            "comparison_profile": CITRUS_CROSSCHECK_PROFILE_ID,
+        },
+        input_run_ids={
+            "acquisition_candidate": acquisition["run_name"],
+            "acquisition_candidate_record_sha256": acquisition["candidate_record_sha256"],
+            "arena_geometry_fit_review": package.run_name,
+            "arena_geometry_fit_review_record_sha256": package.review_record_sha256,
+            **(
+                {
+                    "detection_source": source_path,
+                    "detection_source_signature": source_signature,
+                }
+                if source_path is not None
+                else {}
+            ),
+        },
+        cwd=Path.cwd(),
+        include_system_context=False,
+    )
+    return ArenaGeometryCitrusCrosscheckPlan(
+        source_zarr=archive,
+        acquisition_candidate_run=acquisition["run_name"],
+        acquisition_candidate_record_sha256=acquisition["candidate_record_sha256"],
+        fit_review_run=package.run_name,
+        fit_review_record_sha256=package.review_record_sha256,
+        fit_report_sha256=blind["fit_report_sha256"],
+        detect_source_group_path=source_path,
+        detect_source_signature=source_signature,
+        comparison_id=comparison_id,
+        comparison_record_sha256=digest,
+        comparison_record=normalized,
+        target_run_path=archive / "analysis" / COMPARISON_RUNS_PARENT / comparison_id,
+        run_provenance=provenance,
+    )
+
+
+def _finite(value: object, *, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label} must be a finite number.")
+    if not math.isfinite(float(value)):
+        raise ValueError(f"{label} must be a finite number.")
+    return float(value)
+
+
+def validate_arena_geometry_citrus_crosscheck_record(record: Mapping[str, Any]) -> None:
+    """Validate the log-only Citrus cross-check grammar (profile v1)."""
+
+    if (
+        record.get("schema_id") != COMPARISON_RECORD_SCHEMA_ID
+        or record.get("schema_version") != CITRUS_CROSSCHECK_RECORD_SCHEMA_VERSION
+        or record.get("comparison_profile") != CITRUS_CROSSCHECK_PROFILE_ID
+        or record.get("algorithm_version") != CITRUS_CROSSCHECK_ALGORITHM_VERSION
+    ):
+        raise ValueError("Unsupported Citrus geometry cross-check record.")
+    bindings = record.get("candidate_bindings")
+    if not isinstance(bindings, Mapping) or set(bindings) != {
+        "acquisition",
+        "palette_blind_fit",
+    }:
+        raise ValueError("Cross-check bindings are incomplete.")
+    acquisition = bindings["acquisition"]
+    if (
+        not isinstance(acquisition, Mapping)
+        or acquisition.get("candidate_kind") != ACQUISITION_CANDIDATE_KIND
+        or acquisition.get("run_name") != acquisition.get("candidate_id")
+    ):
+        raise ValueError("Cross-check acquisition binding is invalid.")
+    _sha256_hex(
+        acquisition.get("candidate_record_sha256"), label="acquisition candidate digest"
+    )
+    blind = bindings["palette_blind_fit"]
+    if not isinstance(blind, Mapping):
+        raise ValueError("Cross-check blind-fit binding is invalid.")
+    for name in ("fit_review_record_sha256", "fit_report_sha256"):
+        _sha256_hex(blind.get(name), label=f"palette_blind_fit.{name}")
+    recipe = blind.get("scientific_recipe")
+    if not isinstance(recipe, Mapping) or recipe.get("recipe_id") != (
+        CITRUS_CROSSCHECK_FIT_RECIPE_ID
+    ):
+        raise ValueError("Cross-check blind fit must use top_rim_preferred_v1.")
+    citrus = record.get("citrus_geometry")
+    if (
+        not isinstance(citrus, Mapping)
+        or citrus.get("source_kind") != CITRUS_CROSSCHECK_SOURCE_KIND
+        or citrus.get("state") not in CITRUS_GEOMETRY_STATES
+    ):
+        raise ValueError("Cross-check does not bind valid Citrus H5 geometry.")
+    expected_state = (
+        "declared_and_applied"
+        if citrus.get("citrus_registration_status") == "exact_match_applied"
+        else "declared_not_proven_applied"
+    )
+    if citrus.get("state") != expected_state:
+        raise ValueError("Cross-check Citrus geometry state disagrees with its status.")
+    features = record.get("observed_features")
+    if (
+        not isinstance(features, Mapping)
+        or features.get("semantic_compatibility") != "projected_edges_unresolved"
+    ):
+        raise ValueError("Cross-check may not claim same-feature semantics.")
+    metrics = record.get("disagreement_metrics")
+    if not isinstance(metrics, Mapping) or set(metrics) != set(
+        _CITRUS_CROSSCHECK_METRIC_FIELDS
+    ):
+        raise ValueError("Cross-check disagreement metrics are incomplete.")
+    for name in _CITRUS_CROSSCHECK_METRIC_FIELDS:
+        _finite(metrics[name], label=f"disagreement_metrics.{name}")
+    gate = record.get("gate_disagreement")
+    if not isinstance(gate, Mapping) or gate.get("status") not in {
+        "measured",
+        "not_measured",
+    }:
+        raise ValueError("Cross-check gate disagreement requires an explicit status.")
+    if record.get("threshold_policy") != _CITRUS_CROSSCHECK_THRESHOLD_POLICY:
+        raise ValueError("Cross-check may not carry a threshold policy.")
+    if record.get("decision") != _CITRUS_CROSSCHECK_DECISION:
+        raise ValueError("Cross-check decision must remain log-only.")
+    if record.get("immutability") != {
+        "candidates_mutated": False,
+        "raw_detections_mutated": False,
+        "selection_performed": False,
+    }:
+        raise ValueError("Cross-check immutability declaration is invalid.")
+    if record.get("canonicalization") != "canonical_json_sort_keys_v1":
+        raise ValueError("Cross-check canonicalization is unsupported.")
+    if _canonical_copy(record) != dict(record):
+        raise ValueError("Cross-check record is not strict canonical JSON data.")
+
+
+def _citrus_crosscheck_run_attrs(
+    plan: ArenaGeometryCitrusCrosscheckPlan,
+) -> dict[str, Any]:
+    return {
+        "schema_id": CITRUS_CROSSCHECK_RUN_SCHEMA_ID,
+        "schema_version": CITRUS_CROSSCHECK_RUN_SCHEMA_VERSION,
+        "comparison_profile": CITRUS_CROSSCHECK_PROFILE_ID,
+        "comparison_id": plan.comparison_id,
+        "comparison_record": _canonical_copy(plan.comparison_record),
+        "comparison_record_sha256": plan.comparison_record_sha256,
+        "acquisition_candidate_run": plan.acquisition_candidate_run,
+        "acquisition_candidate_record_sha256": plan.acquisition_candidate_record_sha256,
+        "fit_review_run": plan.fit_review_run,
+        "fit_review_record_sha256": plan.fit_review_record_sha256,
+        "fit_report_sha256": plan.fit_report_sha256,
+        "detect_source_group_path": plan.detect_source_group_path,
+        "detect_source_signature": plan.detect_source_signature,
+        "run_provenance": _canonical_copy(plan.run_provenance),
+        "comparison_status": plan.comparison_record["decision"]["evidence_outcome"],
+        "citrus_geometry_state": plan.comparison_record["citrus_geometry"]["state"],
+        "stage_selector_eligible": False,
+        "candidate_selected": False,
+        "candidates_mutated": False,
+        "raw_detections_mutated": False,
+        "citrus_geometry_replaced": False,
+    }
+
+
+def validate_arena_geometry_citrus_crosscheck_run(
+    run_path: str | Path,
+    *,
+    expected_plan: ArenaGeometryCitrusCrosscheckPlan,
+    require_complete: bool = False,
+) -> dict[str, Any]:
+    errors: list[str] = []
+    path = Path(run_path).expanduser().resolve()
+    try:
+        group = open_zarr_root(path, mode="r")
+        attrs = dict(group.attrs)
+        for name, value in _citrus_crosscheck_run_attrs(expected_plan).items():
+            if name != "run_provenance" and attrs.get(name) != value:
+                errors.append(f"{name} mismatch")
+        record = attrs.get("comparison_record")
+        if isinstance(record, Mapping):
+            validate_arena_geometry_citrus_crosscheck_record(record)
+            if _payload_sha256(record) != attrs.get("comparison_record_sha256"):
+                errors.append("comparison record digest mismatch")
+        else:
+            errors.append("comparison_record missing")
+        provenance = validate_run_provenance(attrs.get("run_provenance"))
+        if not provenance.valid:
+            errors.extend(f"run provenance: {item}" for item in provenance.errors)
+        if list(group.array_keys()) or list(group.group_keys()):
+            errors.append("cross-check run must be metadata-only")
+        status = attrs.get("palette_run_completion_status")
+        if require_complete and status != "complete":
+            errors.append("cross-check run is not complete")
+        elif status not in {"running", "complete"}:
+            errors.append("cross-check run has invalid completion status")
+        if attrs.get("stage_selector_eligible") is not False:
+            errors.append("cross-check evidence must remain selector-ineligible")
+    except Exception as exc:
+        errors.append(f"{type(exc).__name__}: {exc}")
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "comparison_id": expected_plan.comparison_id,
+        "comparison_record_sha256": expected_plan.comparison_record_sha256,
+        "run_path": str(path),
+    }
+
+
+def _revalidate_citrus_crosscheck_sources(
+    plan: ArenaGeometryCitrusCrosscheckPlan,
+) -> dict[str, Any]:
+    root = open_zarr_root(plan.source_zarr, mode="r")
+    acquisition = _candidate_snapshot(
+        root,
+        run_name=plan.acquisition_candidate_run,
+        expected_kind=ACQUISITION_CANDIDATE_KIND,
+    )
+    blind = _load_blind_fit(plan.source_zarr, plan.fit_review_run)
+    if (
+        acquisition["candidate_record_sha256"] != plan.acquisition_candidate_record_sha256
+        or blind["package"].review_record_sha256 != plan.fit_review_record_sha256
+        or blind["fit_report_sha256"] != plan.fit_report_sha256
+    ):
+        raise RuntimeError("Cross-check sources changed during publication.")
+    if plan.detect_source_group_path is not None:
+        detection = _detection_snapshot(
+            root,
+            source_group_path=plan.detect_source_group_path,
+            coordinate_binding=acquisition["record"]["coordinate_binding"],
+        )
+        if detection["signature"] != plan.detect_source_signature:
+            raise RuntimeError("Detection source changed during cross-check publication.")
+    return {
+        "status": "current",
+        "acquisition_candidate_record_sha256": acquisition["candidate_record_sha256"],
+        "fit_review_record_sha256": plan.fit_review_record_sha256,
+        "detect_source_signature": plan.detect_source_signature,
+    }
+
+
+def publish_arena_geometry_citrus_crosscheck(
+    plan: ArenaGeometryCitrusCrosscheckPlan,
+    *,
+    scratch_root: str | Path,
+    copy_backend: str = "python",
+) -> dict[str, Any]:
+    """Publish immutable selector-ineligible, log-only cross-check evidence."""
+
+    return _publish_metadata_only_comparison_run(
+        source_zarr=plan.source_zarr,
+        comparison_id=plan.comparison_id,
+        target_run_path=plan.target_run_path,
+        run_attrs=_citrus_crosscheck_run_attrs(plan),
+        run_provenance=plan.run_provenance,
+        validate_run=lambda path, require_complete: (
+            validate_arena_geometry_citrus_crosscheck_run(
+                path, expected_plan=plan, require_complete=require_complete
+            )
+        ),
+        revalidate_sources=lambda: _revalidate_citrus_crosscheck_sources(plan),
+        algorithm_version=CITRUS_CROSSCHECK_ALGORITHM_VERSION,
+        scratch_root=scratch_root,
+        copy_backend=copy_backend,
+    )
+
+
 __all__ = [
+    "ArenaGeometryCitrusCrosscheckPlan",
     "ArenaGeometryComparisonPlan",
+    "CITRUS_CROSSCHECK_PROFILE_ID",
+    "CITRUS_CROSSCHECK_RUN_SCHEMA_ID",
     "COMPARISON_RUNS_PARENT",
     "CORROBORATED_ACQUISITION_POLICY_ID",
     "MANUAL_REVIEW_POLICY_ID",
     "SEMANTIC_COMPATIBILITY_STATES",
+    "build_arena_geometry_citrus_crosscheck_plan",
     "build_arena_geometry_comparison_plan",
+    "publish_arena_geometry_citrus_crosscheck",
     "publish_arena_geometry_comparison",
+    "validate_arena_geometry_citrus_crosscheck_record",
+    "validate_arena_geometry_citrus_crosscheck_run",
     "validate_arena_geometry_comparison_record",
     "validate_arena_geometry_comparison_run",
 ]

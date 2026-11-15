@@ -1,5 +1,5 @@
 {
-  "bare_call_count": 214,
+  "bare_call_count": 213,
   "entries": {
     "src/fisheye/analysis/analyze_goodcopbadcop_approach_avoidance.py::roles::735bd058ae5cee80f754": 1,
     "src/fisheye/analysis/analyze_goodcopbadcop_bout_kinematics_distance.py::load::d1aedb517384921480ea": 1,
@@ -18,7 +18,6 @@
     "src/fisheye/analysis/plot_goodcopbadcop_freeze.py::roles::735bd058ae5cee80f754": 1,
     "src/fisheye/analysis/plot_goodcopbadcop_occupancy_heatmaps.py::load_positions::d1aedb517384921480ea": 1,
     "src/fisheye/analysis_workflows/materializers/arena_geometry_candidates.py::_materialize_local_run::a128557035a6b2d1f470": 1,
-    "src/fisheye/analysis_workflows/materializers/arena_geometry_comparison.py::publish_arena_geometry_comparison::18a4499be78084c2debc": 1,
     "src/fisheye/analysis_workflows/materializers/arena_geometry_fit_review.py::_materialize_local_run::a128557035a6b2d1f470": 1,
     "src/fisheye/analysis_workflows/materializers/arena_geometry_selection.py::publish_arena_geometry_selection::18a4499be78084c2debc": 1,
     "src/fisheye/analysis_workflows/materializers/bout_classification_candidate.py::materialize_bout_classification_candidate::402b03b1ab6b48e86def": 1,
