@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orange.requester.v1",
+  "title": "Who sent a request to Orange, as Orange's transport saw it (version 1 DRAFT)",
+  "description": "DRAFT 2026-11-15. Embedded wherever Orange records who asked for an action (first users: orange.empty_background_capture v2 and orange.recording_empty_background v2). It is what the transport observed, never a claim made in the request: a claimed identity (declared_by) is recorded beside it, separately. gui_panel: a button in the Orange GUI; user is the account that started Orange (SUDO_USER under the sudo wrappers, else the real uid's login). local_control_socket: a request on Orange's local-control Unix socket; peer is the kernel's SO_PEERCRED of the connecting process, and a request whose peer the kernel does not report is refused, so peer is never null here. run_spec: an orange_client run that read an experiment spec file; spec_sha256 is of its bytes as read. Same shapes as orange.recording_subject_confirmation v2 requester for gui_panel and local_control_socket.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/gui_panel"
+    },
+    {
+      "$ref": "#/$defs/local_control_socket"
+    },
+    {
+      "$ref": "#/$defs/run_spec"
+    }
+  ],
+  "$defs": {
+    "gui_panel": {
+      "x-orange-cpp-name": "OrangeRequesterV1GuiPanel",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transport",
+        "user"
+      ],
+      "properties": {
+        "transport": {
+          "const": "gui_panel"
+        },
+        "user": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 32,
+          "description": "Login name of the uid (getpwuid). null means the uid has no passwd entry on the host, not that the sender is unknown: for local_control_socket the sender is identified by peer.uid either way."
+        }
+      }
+    },
+    "local_control_socket": {
+      "x-orange-cpp-name": "OrangeRequesterV1LocalControlSocket",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transport",
+        "peer",
+        "request_id",
+        "operation_id",
+        "command_source",
+        "received_at_utc"
+      ],
+      "properties": {
+        "transport": {
+          "const": "local_control_socket"
+        },
+        "peer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "uid",
+            "gid",
+            "pid",
+            "user"
+          ],
+          "properties": {
+            "uid": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "gid": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "pid": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            },
+            "user": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 32,
+              "description": "Login name of the uid (getpwuid). null means the uid has no passwd entry on the host, not that the sender is unknown: for local_control_socket the sender is identified by peer.uid either way."
+            }
+          },
+          "description": "SO_PEERCRED of the connecting process when the request arrived."
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f]+(?![\\s\\S])"
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f]+(?![\\s\\S])"
+        },
+        "command_source": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "The request's own source field, as sent (a claim; may be empty)."
+        },
+        "received_at_utc": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 40,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z(?![\\s\\S])"
+        }
+      }
+    },
+    "run_spec": {
+      "x-orange-cpp-name": "OrangeRequesterV1RunSpec",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transport",
+        "spec_path",
+        "spec_sha256",
+        "user"
+      ],
+      "properties": {
+        "transport": {
+          "const": "run_spec"
+        },
+        "spec_path": {
+          "type": "string",
+          "pattern": "^/[^\\u0000\\r\\n]+(?![\\s\\S])",
+          "description": "Provenance only: the spec file's absolute path on the host."
+        },
+        "spec_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}(?![\\s\\S])",
+          "description": "sha256 of the spec file's bytes as orange_client read them (64 lowercase hex)."
+        },
+        "user": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 32,
+          "description": "The account that ran orange_client (SUDO_USER, else the real uid's login)."
+        }
+      }
+    }
+  }
+}
