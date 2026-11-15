@@ -867,13 +867,15 @@ def _subject_confirmation_origin(recording_dir: Path, item: Mapping[str, Any]) -
             and isinstance(declaration.get("declared_by"), str)
             and requester.get("transport") == "local_control_socket"
             and isinstance(peer, Mapping)
-            and isinstance(peer.get("user"), str)
+            and "user" in peer
+            and isinstance(peer["user"], (str, type(None)))
         ):
             raise ValueError(
                 f"{ORANGE_SUBJECT_CONFIRMATION}: a local_control confirmation needs "
                 "declaration.declared_by and requester.peer.user"
             )
-        # declared_by is the requester's claim; peer.user is the OS account that sent it.
+        # declared_by is the requester's claim; peer.user is the OS account that
+        # sent it (null when the uid has no passwd entry).
         origin["orange_declared_by"] = declaration["declared_by"]
         origin["orange_requester_user"] = peer["user"]
     return origin

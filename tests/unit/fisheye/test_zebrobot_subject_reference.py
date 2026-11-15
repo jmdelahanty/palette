@@ -601,6 +601,8 @@ def test_subject_confirmation_origin_names_who_confirmed(tmp_path, confirmation,
         ({"schema_version": 2, "confirmed_by": "robot"}, "unsupported schema_version"),
         ({**REMOTE_V2, "declaration": None}, "needs declaration.declared_by"),
         ({**REMOTE_V2, "requester": {"transport": "gui_panel", "user": "x"}}, "needs declaration"),
+        ({**REMOTE_V2, "requester": {**REMOTE_V2["requester"], "peer": {"uid": 1000}}},
+         "needs declaration"),
     ],
 )
 def test_an_unreadable_subject_confirmation_refuses(tmp_path, mutate, match):
@@ -611,3 +613,49 @@ def test_an_unreadable_subject_confirmation_refuses(tmp_path, mutate, match):
         _seal_confirmation(plan, {**CONFIRMED_V1, **mutate})
     with pytest.raises(ValueError, match=match):
         importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+
+
+def test_a_null_requester_peer_user_is_recorded(tmp_path):
+    importer, plan = _agreeing_recording(tmp_path)
+    peer = {**REMOTE_V2["requester"]["peer"], "user": None}  # uid without a passwd entry
+    _seal_confirmation(plan, {**REMOTE_V2, "requester": {**REMOTE_V2["requester"], "peer": peer}})
+    importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+    origin = zarr.open_group(str(plan.zarr_path), mode="r").attrs["orange_subject_reference_origin"]
+    assert origin["orange_requester_user"] is None
+
+
+# The first remote start, pancake0 2026_11_14_19_59_22 (no fish, every camera
+# blank), byte for byte: 2-space indent and a trailing newline, as Orange writes it.
+REAL_REMOTE_V2 = json.loads(
+    '{"cameras":{"2010093":{"dish_id":null,"subject_count":null},'
+    '"2010094":{"dish_id":null,"subject_count":null},'
+    '"2010095":{"dish_id":null,"subject_count":null},'
+    '"2010096":{"dish_id":null,"subject_count":null}},'
+    '"config":{"schema_version":1},"confirmed_at_utc":"2026-11-15T00:59:22Z",'
+    '"confirmed_by":"local_control","declaration":{"declared_by":"delahantyj",'
+    '"recording_intent":"recording_only","schema_id":"orange.recording_start_declaration",'
+    '"schema_version":1,"subject_references":{"schema_version":1}},'
+    '"requester":{"command_source":"orange_local_control_client",'
+    '"operation_id":"start-recording-fb5a4792-9dae-42f6-b857-17f48c79ad3b",'
+    '"peer":{"gid":1000,"pid":1928209,"uid":1000,"user":"jeremy"},'
+    '"received_at_utc":"2026-11-15T00:59:22Z",'
+    '"request_id":"fb5a4792-9dae-42f6-b857-17f48c79ad3b","transport":"local_control_socket"},'
+    '"schema_id":"orange.recording_subject_confirmation","schema_version":2}'
+)
+
+
+def test_the_first_real_remote_start_confirmation_is_labelled(tmp_path):
+    from fisheye.utils import import_recording_analysis as importer
+
+    data = (json.dumps(REAL_REMOTE_V2, indent=2) + "\n").encode()
+    digest = hashlib.sha256(data).hexdigest()
+    assert digest == "24a185289b068c519bca8e84b75fe034b16be0ef7fdc77841d02eceb44f23f79"
+    (tmp_path / "subject_confirmation.json").write_bytes(data)
+    item = {"relative_path": "subject_confirmation.json", "sha256": digest, "size_bytes": len(data)}
+    assert importer._subject_confirmation_origin(tmp_path, item) == {
+        "orange_reference_origin": "local_control_declared",
+        "orange_confirmed_by": "local_control",
+        "orange_subject_confirmation_sha256": digest,
+        "orange_declared_by": "delahantyj",
+        "orange_requester_user": "jeremy",
+    }
