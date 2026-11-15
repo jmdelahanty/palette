@@ -15,13 +15,13 @@
     "camera_serial": "2010093",
     "compact_artifacts": {},
     "freshness": {
-     "evaluated_at_utc": "2026-11-15T18:00:00Z",
-     "fit_created_utc": "2026-11-15T17:00:00Z",
+     "evaluated_at_utc": "2026-11-04T02:00:00Z",
+     "fit_created_utc": "2026-11-04T01:00:16Z",
      "rule": "orange_physical_registration_freshness_24h_v1",
      "selection_policy": "accepted_with_group_fit",
      "state": "stale",
-     "valid_from_utc": "2026-11-15T17:00:00Z",
-     "valid_until_utc": "2026-11-16T17:00:00Z"
+     "valid_from_utc": "2026-11-04T01:00:16Z",
+     "valid_until_utc": "2026-11-05T01:00:16Z"
     },
     "manifest": {
      "sha256": "sha256:2824dcdfbe2a249f2247a02f5c051baa859db09934e4821892437a174eb10f66",
@@ -40,7 +40,7 @@
     "recording_blocked": false,
     "recording_snapshot_entry": {
      "acceptance": {
-      "accepted_at_utc": "2026-11-15T17:00:00Z",
+      "accepted_at_utc": "2026-11-04T01:00:16Z",
       "basis": "quality_gate",
       "gate": {
        "camera_serial": "2010093",
@@ -109,7 +109,7 @@
         "chain_depth": 1,
         "rule": "compare_to_last_operator_reviewed_fit"
        },
-       "evaluated_at_utc": "2026-11-15T17:00:00Z",
+       "evaluated_at_utc": "2026-11-04T01:00:16Z",
        "failures": [],
        "fit": {
         "center_px": {
@@ -162,7 +162,7 @@
          "uid": 1000,
          "user": "jeremy"
         },
-        "received_at_utc": "2026-11-15T16:59:58Z",
+        "received_at_utc": "2026-11-04T01:00:14Z",
         "request_id": "r1",
         "transport": "local_control_socket"
        },
@@ -390,7 +390,7 @@
    "status": "resolved"
   }
  },
- "captured_at_utc": "2026-11-15T15:51:41Z",
+ "captured_at_utc": "2026-11-04T02:00:00Z",
  "errors": [],
  "physical_registration_geometry": {
   "available_not_selected_camera_count": 0,
@@ -408,13 +408,13 @@
     "camera_serial": "2010093",
     "compact_artifacts": {},
     "freshness": {
-     "evaluated_at_utc": "2026-11-15T18:00:00Z",
-     "fit_created_utc": "2026-11-15T17:00:00Z",
+     "evaluated_at_utc": "2026-11-04T02:00:00Z",
+     "fit_created_utc": "2026-11-04T01:00:16Z",
      "rule": "orange_physical_registration_freshness_24h_v1",
      "selection_policy": "accepted_with_group_fit",
      "state": "fresh",
-     "valid_from_utc": "2026-11-15T17:00:00Z",
-     "valid_until_utc": "2026-11-16T17:00:00Z"
+     "valid_from_utc": "2026-11-04T01:00:16Z",
+     "valid_until_utc": "2026-11-05T01:00:16Z"
     },
     "manifest": {
      "sha256": "sha256:2824dcdfbe2a249f2247a02f5c051baa859db09934e4821892437a174eb10f66",
@@ -433,7 +433,7 @@
     "recording_blocked": false,
     "recording_snapshot_entry": {
      "acceptance": {
-      "accepted_at_utc": "2026-11-15T17:00:00Z",
+      "accepted_at_utc": "2026-11-04T01:00:16Z",
       "basis": "quality_gate",
       "gate": {
        "camera_serial": "2010093",
@@ -502,7 +502,7 @@
         "chain_depth": 1,
         "rule": "compare_to_last_operator_reviewed_fit"
        },
-       "evaluated_at_utc": "2026-11-15T17:00:00Z",
+       "evaluated_at_utc": "2026-11-04T01:00:16Z",
        "failures": [],
        "fit": {
         "center_px": {
@@ -555,7 +555,7 @@
          "uid": 1000,
          "user": "jeremy"
         },
-        "received_at_utc": "2026-11-15T16:59:58Z",
+        "received_at_utc": "2026-11-04T01:00:14Z",
         "request_id": "r1",
         "transport": "local_control_socket"
        },
@@ -781,7 +781,7 @@
     "status": "selected_resolved"
    }
   },
-  "captured_at_utc": "2026-11-15T15:51:41Z",
+  "captured_at_utc": "2026-11-04T02:00:00Z",
   "errors": [],
   "invalid_selected_camera_count": 0,
   "participating_cameras_only": true,
