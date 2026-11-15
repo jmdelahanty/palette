@@ -474,6 +474,7 @@ def test_v2_app_config_default_that_agrees_records_no_disagreement(tmp_path):
         "no_start_snapshot",
         "operator_confirmed",    # Orange 3b9a754+ seals subject_confirmation.json
         "local_control_declared",  # a remote start's declaration is a claim too
+        "spec_declared",         # so is an experiment spec's fixed.declaration
     ],
 )
 def test_dish_disagreement_still_refuses_unless_default_is_proven(tmp_path, case):
@@ -493,6 +494,8 @@ def test_dish_disagreement_still_refuses_unless_default_is_proven(tmp_path, case
         _seal_confirmation(plan, CONFIRMED_V1)
     elif case == "local_control_declared":
         _seal_confirmation(plan, REMOTE_V2)
+    elif case == "spec_declared":
+        _seal_confirmation(plan, RUN_SPEC_V2)
     if case == "config_not_loaded":
         manifest = json.loads((plan.recording_dir / "recording_manifest.json").read_text())
         item = manifest["source_transfer"]["source_to_parent_files"][0]
@@ -541,6 +544,16 @@ REMOTE_V2 = {
                   "received_at_utc": "2026-11-14T19:59:20Z"},
 }
 
+# Orange 86d02fc: a headless orange_client start whose spec has fixed.declaration.
+RUN_SPEC_V2 = {
+    **REMOTE_V2,
+    "confirmed_by": "run_spec",
+    "requester": {"transport": "run_spec",
+                  "spec_path": "/home/rig/orange/experiment_specs/chaser.json",
+                  "spec_sha256": "c" * 64, "run_stamp": "20261114_195922",
+                  "experiment_id": "chaser_20261114_195922", "user": "rigaccount"},
+}
+
 
 def _seal_confirmation(plan, confirmation, *, tamper=False):
     """Seal a subject_confirmation.json into the parent's transfer mapping."""
@@ -580,6 +593,21 @@ def _agreeing_recording(tmp_path):
                      "orange_confirmed_by": "local_control",
                      "orange_declared_by": "someone@hhmi.org",
                      "orange_requester_user": "rigaccount"}),
+        (RUN_SPEC_V2, {"orange_reference_origin": "spec_declared",
+                       "orange_confirmed_by": "run_spec",
+                       "orange_declared_by": "someone@hhmi.org",
+                       "orange_requester_user": "rigaccount",
+                       "orange_spec_path": "/home/rig/orange/experiment_specs/chaser.json",
+                       "orange_spec_sha256": "c" * 64,
+                       "orange_run_stamp": "20261114_195922",
+                       "orange_experiment_id": "chaser_20261114_195922"}),
+        ({**RUN_SPEC_V2, "requester": {**RUN_SPEC_V2["requester"], "run_stamp": None,
+                                       "experiment_id": "", "user": None}},
+         {"orange_reference_origin": "spec_declared", "orange_confirmed_by": "run_spec",
+          "orange_declared_by": "someone@hhmi.org", "orange_requester_user": None,
+          "orange_spec_path": "/home/rig/orange/experiment_specs/chaser.json",
+          "orange_spec_sha256": "c" * 64, "orange_run_stamp": None,
+          "orange_experiment_id": ""}),
     ],
 )
 def test_subject_confirmation_origin_names_who_confirmed(tmp_path, confirmation, expected):
@@ -603,6 +631,15 @@ def test_subject_confirmation_origin_names_who_confirmed(tmp_path, confirmation,
         ({**REMOTE_V2, "requester": {"transport": "gui_panel", "user": "x"}}, "needs declaration"),
         ({**REMOTE_V2, "requester": {**REMOTE_V2["requester"], "peer": {"uid": 1000}}},
          "needs declaration"),
+        ({"confirmed_by": "run_spec"}, "unsupported schema_version"),  # v1 is panel-only
+        ({**RUN_SPEC_V2, "declaration": None}, "needs declaration"),
+        ({**RUN_SPEC_V2, "requester": REMOTE_V2["requester"]}, "needs declaration"),
+        *[({**RUN_SPEC_V2, "requester": {**RUN_SPEC_V2["requester"], **bad}}, "needs declaration")
+          for bad in ({"spec_sha256": "C" * 64}, {"spec_sha256": "c" * 63},
+                      {"run_stamp": "2026-11-14"}, {"spec_path": None},
+                      {"experiment_id": None}, {"transport": "local_control_socket"})],
+        ({**RUN_SPEC_V2, "requester": {k: v for k, v in RUN_SPEC_V2["requester"].items()
+                                       if k != "user"}}, "needs declaration"),
     ],
 )
 def test_an_unreadable_subject_confirmation_refuses(tmp_path, mutate, match):
