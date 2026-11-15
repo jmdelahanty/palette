@@ -660,6 +660,294 @@
         "title": "CitrusSnapshotResponse",
         "type": "object"
       },
+      "ConstructListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ConstructResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "title": "ConstructListResponse",
+        "type": "object"
+      },
+      "ConstructReferenceResponse": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "doi",
+              "zotero",
+              "addgene",
+              "zfin",
+              "fpbase",
+              "internal"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "value"
+        ],
+        "title": "ConstructReferenceResponse",
+        "type": "object"
+      },
+      "ConstructResponse": {
+        "description": "A construct catalog entry (config/construct_catalog.json).",
+        "properties": {
+          "aliases": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Aliases",
+            "type": "array"
+          },
+          "canonical_name": {
+            "title": "Canonical Name",
+            "type": "string"
+          },
+          "emission_nm": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Emission Nm"
+          },
+          "excitation_nm": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excitation Nm"
+          },
+          "family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family"
+          },
+          "fusion_terminus": {
+            "anyOf": [
+              {
+                "enum": [
+                  "N",
+                  "C",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fusion Terminus"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "linker": {
+            "anyOf": [
+              {
+                "enum": [
+                  "P2A",
+                  "T2A",
+                  "E2A",
+                  "F2A",
+                  "IRES"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Linker"
+          },
+          "localization": {
+            "anyOf": [
+              {
+                "enum": [
+                  "cytosolic",
+                  "nuclear",
+                  "soma",
+                  "membrane",
+                  "synaptic",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Localization"
+          },
+          "marker_promoter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Marker Promoter"
+          },
+          "mechanism": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mechanism"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "payload": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payload"
+          },
+          "readout_fluorophore": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Readout Fluorophore"
+          },
+          "readout_link": {
+            "enum": [
+              "intrinsic",
+              "fusion",
+              "co_expressed",
+              "cis_marker",
+              "none"
+            ],
+            "title": "Readout Link",
+            "type": "string"
+          },
+          "references": {
+            "items": {
+              "$ref": "#/components/schemas/ConstructReferenceResponse"
+            },
+            "title": "References",
+            "type": "array"
+          },
+          "role": {
+            "enum": [
+              "sensor",
+              "effector",
+              "reporter",
+              "marker"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "screen_color": {
+            "anyOf": [
+              {
+                "enum": [
+                  "green",
+                  "red",
+                  "far_red",
+                  "blue",
+                  "yellow",
+                  "photoconvertible"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Screen Color"
+          },
+          "sensor_target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sensor Target"
+          },
+          "variant_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Variant Of"
+          }
+        },
+        "required": [
+          "key",
+          "canonical_name",
+          "role",
+          "readout_link"
+        ],
+        "title": "ConstructResponse",
+        "type": "object"
+      },
       "CrossParentSnapshot": {
         "properties": {
           "identifier": {
@@ -757,6 +1045,36 @@
           "dish_id"
         ],
         "title": "DishDetailResponse",
+        "type": "object"
+      },
+      "DishScreeningCallsResponse": {
+        "properties": {
+          "calls": {
+            "items": {
+              "$ref": "#/components/schemas/ScreeningCallResponse"
+            },
+            "title": "Calls",
+            "type": "array"
+          },
+          "dish_id": {
+            "title": "Dish Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "partial_mixed_sources",
+              "unknown_dish"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dish_id",
+          "status"
+        ],
+        "title": "DishScreeningCallsResponse",
         "type": "object"
       },
       "FishListResponse": {
@@ -938,6 +1256,52 @@
           "recorded_at"
         ],
         "title": "FishRevisionResponse",
+        "type": "object"
+      },
+      "FishScreeningResponse": {
+        "properties": {
+          "calls": {
+            "items": {
+              "$ref": "#/components/schemas/ScreeningCallResponse"
+            },
+            "title": "Calls",
+            "type": "array"
+          },
+          "fish_id": {
+            "title": "Fish Id",
+            "type": "string"
+          },
+          "left_origin_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Left Origin At"
+          },
+          "origin_dish_id": {
+            "title": "Origin Dish Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "partial_mixed_sources",
+              "unknown_dish"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fish_id",
+          "origin_dish_id",
+          "status"
+        ],
+        "title": "FishScreeningResponse",
         "type": "object"
       },
       "FishSubjectResponse": {
@@ -1125,6 +1489,81 @@
         "title": "FishSubjectResponse",
         "type": "object"
       },
+      "FishTimelineResponse": {
+        "properties": {
+          "current_unit_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Unit Id"
+          },
+          "dish_id": {
+            "title": "Dish Id",
+            "type": "string"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/TimelineEntryResponse"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "fish_id": {
+            "title": "Fish Id",
+            "type": "string"
+          },
+          "not_yet_recorded": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Not Yet Recorded",
+            "type": "array"
+          },
+          "origin_dish_id": {
+            "title": "Origin Dish Id",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "subject_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Label"
+          }
+        },
+        "required": [
+          "fish_id",
+          "dish_id",
+          "origin_dish_id",
+          "revision"
+        ],
+        "title": "FishTimelineResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1138,6 +1577,160 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "ScreeningCallResponse": {
+        "description": "What a screening step established for a construct (or pigment).",
+        "properties": {
+          "basis": {
+            "title": "Basis",
+            "type": "string"
+          },
+          "confidence": {
+            "enum": [
+              "high",
+              "medium",
+              "low",
+              "none"
+            ],
+            "title": "Confidence",
+            "type": "string"
+          },
+          "construct_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Construct Key"
+          },
+          "dish_construct": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dish Construct"
+          },
+          "dpf": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dpf"
+          },
+          "established_in_dish": {
+            "title": "Established In Dish",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "construct",
+              "pigment"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "result": {
+            "enum": [
+              "positive",
+              "negative",
+              "pigmented"
+            ],
+            "title": "Result",
+            "type": "string"
+          },
+          "screening_datetime": {
+            "title": "Screening Datetime",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "inherited",
+                  "observed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          }
+        },
+        "required": [
+          "kind",
+          "result",
+          "confidence",
+          "established_in_dish",
+          "screening_datetime",
+          "basis"
+        ],
+        "title": "ScreeningCallResponse",
+        "type": "object"
+      },
+      "TimelineEntryResponse": {
+        "properties": {
+          "at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Lab-local YYYY-MM-DDTHH:MM:SS, or YYYY-MM-DD",
+            "title": "At"
+          },
+          "details": {
+            "title": "Details",
+            "type": "object"
+          },
+          "kind": {
+            "description": "fertilized, screening, registered, placed, edited, recorded, possibly_recorded, ended",
+            "title": "Kind",
+            "type": "string"
+          },
+          "source": {
+            "description": "Table(s) the entry comes from",
+            "title": "Source",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "summary",
+          "source"
+        ],
+        "title": "TimelineEntryResponse",
+        "type": "object"
+      },
       "UsageLinkListResponse": {
         "properties": {
           "items": {
@@ -1149,6 +1742,46 @@
           }
         },
         "title": "UsageLinkListResponse",
+        "type": "object"
+      },
+      "UsageLinkMemberResponse": {
+        "description": "One fish of a group arena, as sealed; ``flag`` says why it needs review.",
+        "properties": {
+          "fish_id": {
+            "title": "Fish Id",
+            "type": "string"
+          },
+          "fish_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fish Revision"
+          },
+          "flag": {
+            "anyOf": [
+              {
+                "enum": [
+                  "dead_at_start",
+                  "not_in_dish_at_start"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flag"
+          }
+        },
+        "required": [
+          "fish_id"
+        ],
+        "title": "UsageLinkMemberResponse",
         "type": "object"
       },
       "UsageLinkResponse": {
@@ -1221,6 +1854,14 @@
               }
             ],
             "title": "Fish Revision"
+          },
+          "members": {
+            "description": "A group arena's fish; empty for individual and plain dish-level links",
+            "items": {
+              "$ref": "#/components/schemas/UsageLinkMemberResponse"
+            },
+            "title": "Members",
+            "type": "array"
           },
           "received_at": {
             "title": "Received At",
@@ -1490,6 +2131,95 @@
           }
         },
         "summary": "List Acquisition Dishes"
+      }
+    },
+    "/constructs": {
+      "get": {
+        "description": "The construct catalog: readout, linkage, localization, references.",
+        "operationId": "list_constructs_constructs_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConstructListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "List Constructs"
+      }
+    },
+    "/constructs/{construct_key}": {
+      "get": {
+        "description": "One catalog entry by key (e.g. ``bark``, ``jgcamp8p``).",
+        "operationId": "get_construct_constructs__construct_key__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "construct_key",
+            "required": true,
+            "schema": {
+              "title": "Construct Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConstructResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found (dish_not_found / fish_not_found)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "Get Construct"
       }
     },
     "/dishes/by-uuid/{dish_uuid}": {
@@ -1851,6 +2581,66 @@
         "summary": "Create Fish For Dish"
       }
     },
+    "/dishes/{dish_id}/screening-calls": {
+      "get": {
+        "description": "Per-construct screening calls established for the fish in a dish.",
+        "operationId": "get_dish_screening_calls_dishes__dish_id__screening_calls_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dish_id",
+            "required": true,
+            "schema": {
+              "title": "Dish Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DishScreeningCallsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found (dish_not_found / fish_not_found)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "Get Dish Screening Calls"
+      }
+    },
     "/fish/{fish_id}": {
       "get": {
         "description": "Fetch a single fish subject by UUID.",
@@ -2052,9 +2842,129 @@
         "summary": "Get Fish Revisions"
       }
     },
+    "/fish/{fish_id}/screening": {
+      "get": {
+        "description": "Per-construct screening calls a fish inherits from its origin dish.\n\nEach call: construct, result (positive | negative | pigmented),\nconfidence, the dish and step that established it, and its basis.\nSee docs/construct_screening_link_design.md.",
+        "operationId": "get_fish_screening_fish__fish_id__screening_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "fish_id",
+            "required": true,
+            "schema": {
+              "title": "Fish Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FishScreeningResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found (dish_not_found / fish_not_found)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "Get Fish Screening"
+      }
+    },
+    "/fish/{fish_id}/timeline": {
+      "get": {
+        "description": "One fish's timeline from MetaZebrobot's records (docs/fish_timeline_design.md).",
+        "operationId": "get_fish_timeline_fish__fish_id__timeline_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "fish_id",
+            "required": true,
+            "schema": {
+              "title": "Fish Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FishTimelineResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Record not found (dish_not_found / fish_not_found)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "Get Fish Timeline"
+      }
+    },
     "/usage-links": {
       "get": {
-        "description": "Links by fish, by dish (including dish-level rows), or open at an instant.",
+        "description": "Links by fish (its own or as a group member), by dish (including\ndish-level rows), or open at an instant.",
         "operationId": "list_usage_links_usage_links_get",
         "parameters": [
           {
@@ -2163,7 +3073,7 @@
         "summary": "List Usage Links"
       },
       "post": {
-        "description": "Record that an arena recording used a dish (and fish), at Start.\n\nIdempotent on ``recording_ref``: an identical replay is 200, a\ndifferent body 409. An existing ref is answered before any dish or\nfish check. No server-filled fields in the request. An optional\n``X-Delivered-By`` header (e.g. ``citrus``, ``palette``) is recorded on\nfirst creation as ``delivered_by`` and isn't compared on replays.",
+        "description": "Record that an arena recording used a dish (and fish), at Start.\n\nIdempotent on ``recording_ref``: an identical replay is 200, a\ndifferent body 409. An existing ref is answered before any dish or\nfish check. No server-filled fields in the request. An optional\n``X-Delivered-By`` header (e.g. ``citrus``, ``palette``) is recorded on\nfirst creation as ``delivered_by`` and isn't compared on replays.\n\nA group arena (``fish_id`` null) may name its ``members``\n(``[{fish_id, fish_revision}]``, as many as ``subject_count``), compared\nas a set on replays. Each must exist; one that was dead or in another\ndish at ``started_at`` is accepted and flagged, never refused.",
         "operationId": "create_usage_link_usage_links_post",
         "requestBody": {
           "content": {
