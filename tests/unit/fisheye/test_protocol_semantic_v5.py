@@ -32,8 +32,8 @@ from fisheye.shared.unified_h5.z_eff import FIXED_STRINGS, GROUP, validate_z_eff
 
 CONTRACTS = resource_files("fisheye.shared").joinpath("contracts")
 PINNED = {
-    # agent-contracts PR #124 head 68d394c, citrus-palette/angles/
-    "citrus_palette_semantic_policy_pairing_v4.json": "f6c9882d77701931a76d50922f4672d02e261c6e23551a58c2e22462bef9a967",
+    # agent-contracts PR #124 merge e35dd7a, citrus-palette/angles/
+    "citrus_palette_semantic_policy_pairing_v4.json": "403a07615481cea8f80108b66cab0b5b04cf1772867aadf8cfbfec66dca4cd04",
     "citrus_palette_semantic_hash_v5_cases.json": "4dbcdcfbb717daacb1286704a8bdea86da7501b7cf81e2d4f7a4ae3353bd9f79",
 }
 

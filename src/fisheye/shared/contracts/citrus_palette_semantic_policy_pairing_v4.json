@@ -2,7 +2,7 @@
   "schema_id": "citrus_palette.stimulus_angle_convention.semantic_policy_pairing",
   "schema_version": 1,
   "revision": 4,
-  "status": "draft",
+  "status": "current",
   "decided": "Jeremy, 2026-11-13: chaser, loom and moving-dot z_eff is computed per arena at START from the rig's measured dish media stack; new identity versions semantic v5 + trial_index v4; no v4-to-v5 relabel",
   "producer": "Citrus PR #114 MERGED as be2cd47 (JohnsonLabJanelia/citrus main be2cd4759843567251427aed15f5e5e4b9a73df4, merge tree identical to head 168027d): v5 recipe 32bfe59, fixture commit b2630f5, z_eff H5 contract 97eb09c, omnifin0 tank-design values 168027d; the fixture and the trial index v4 schema are byte-identical on main",
   "supersedes": "semantic_policy_pairing_v3.json (revision 3). Revisions 2 and 3 are unchanged and stay pinned by whatever already pins them.",
