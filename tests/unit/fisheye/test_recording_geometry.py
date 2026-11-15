@@ -29,6 +29,14 @@ from fisheye.shared.recording_geometry_recovery import (
 )
 
 
+GATE_FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "orange_dish_rim_v4"
+
+
+def _gate_evaluation() -> dict[str, object]:
+    # agent-contracts 3480e3e dish_rim_registration_v4: Orange's C++ gate output.
+    return json.loads((GATE_FIXTURES / "valid" / "evaluation_accepted.json").read_bytes())
+
+
 def _sha(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
@@ -68,14 +76,26 @@ def _rim_entry(
         }
     elif acceptance_basis == "quality_gate":
         del entry["operator_review"]
+        gate = _gate_evaluation()
         entry["acceptance"] = {
             "basis": "quality_gate",
             "accepted_at_utc": "2026-11-15T17:00:00Z",
-            "gate": {"outcome": "accepted"},
+            "gate": gate,
         }
         for name in ("accepted_inner_rim_boundary", "accepted_mask"):
             entry[name]["operator_confirmed"] = False
             entry[name]["accepted_by_operator"] = False
+        # The gate evaluated one real Cam2010093 fit; the entry is that fit.
+        fit = gate["fit"]
+        width, height = fit["image_width_px"], fit["image_height_px"]
+        entry["camera"].update(width=width, height=height)
+        entry["accepted_mask"]["image_shape_px"] = {"width": width, "height": height}
+        entry["accepted_inner_rim_boundary"]["geometry"].update(
+            center_px=dict(fit["center_px"]), radius_px=fit["radius_px"]
+        )
+        entry["valid_detection_region"]["geometry"].update(
+            center_px=dict(fit["center_px"]), radius_px=fit["radius_px"] + gate_radius - 200.0
+        )
     return entry
 
 
@@ -236,7 +256,10 @@ def _write_folder_bundle(
                         "x": {"positive_direction": "right"},
                         "y": {"positive_direction": "down"},
                     },
-                    "image_shape": {"width": 640, "height": 480},
+                    "image_shape": {
+                        "width": entry["camera"]["width"],
+                        "height": entry["camera"]["height"],
+                    },
                 }
             }
         },
@@ -1051,15 +1074,60 @@ def test_folder_loader_refuses_ambiguous_rim_acceptance(
     assert message in result.issues[0].message
 
 
-def test_folder_loader_refuses_gate_accepted_rim_until_palette_recomputes_gate(
+def test_folder_loader_admits_gate_accepted_rim_that_palette_recomputes(
     tmp_path: Path,
 ) -> None:
     _write_folder_bundle(
         tmp_path, contract_version=3, rim_version=4, acceptance_basis="quality_gate"
     )
     result = load_registered_dish_masks_from_recording_folder(tmp_path)
+    assert result.mask_geometry_status is MaskGeometryStatus.VALID, result.issues
+    mask = next(iter(result.masks.values()))
+    assert mask.producer_acceptance_basis == "quality_gate"
+    assert mask.producer_operator_accepted is False
+    assert mask.physical_inner_rim.radius_px == 2158.8
+
+
+def _set_gate(path: tuple[str, ...], value):
+    def mutate(entry: dict) -> None:
+        node = entry["acceptance"]["gate"]
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+
+    return mutate
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda entry: entry["acceptance"].pop("gate"), "lacks acceptance.gate"),
+        (_set_gate(("camera_serial",), "2010094"), "camera_serial is not the observation's camera"),
+        (_set_gate(("fit", "image_width_px"), 4096), "image size is not the observation's camera frame"),
+        # A fit 0.1 px off is a different fit, even though the gate would pass it.
+        (
+            lambda entry: entry["accepted_inner_rim_boundary"]["geometry"].__setitem__("radius_px", 2158.9),
+            "fit is not the observation's accepted inner rim",
+        ),
+        # Consistent with the schema (passed stays true) but below Palette's limit.
+        (_set_gate(("checks", "edge_support", "fraction"), 0.39), "edge_support.passed is True"),
+        (_set_gate(("checks", "first_hough_pass", "hough_pass_index"), 2), "first_hough_pass.passed is True"),
+        (_set_gate(("checks", "change_from_anchor", "center_shift_px"), 0.5), "center_shift_px"),
+        (_set_gate(("gate_version",), 2), "fails its schema"),
+    ],
+)
+def test_folder_loader_refuses_gate_accepted_rim_palette_does_not_recompute(
+    tmp_path: Path, mutate, message: str
+) -> None:
+    _write_folder_bundle(
+        tmp_path, contract_version=3, rim_version=4, acceptance_basis="quality_gate"
+    )
+    _rewrite_contract_entry(tmp_path, mutate)
+    result = load_registered_dish_masks_from_recording_folder(tmp_path)
     assert result.mask_geometry_status is MaskGeometryStatus.INVALID
-    assert "basis 'quality_gate' is not admitted yet" in result.issues[0].message
+    assert result.masks == {}
+    assert "Gate-accepted rim observation refused" in result.issues[0].message
+    assert message in result.issues[0].message
 
 
 @pytest.mark.parametrize(

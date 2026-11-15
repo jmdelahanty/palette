@@ -1,0 +1,665 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "orange.calibration.dish_rim_gate_evaluation.v1",
+ "title": "Orange dish-rim gate evaluation, gate orange_dish_rim_auto_accept_v1 (version 1 DRAFT)",
+ "description": "DRAFT 2026-11-15. One camera's evaluation of a physical dish-rim fit by gate orange_dish_rim_auto_accept_v1 (Orange src/dish_rim_auto_accept.h; limits confirmed by Jeremy 2026-11-15; evidence docs/dish_rim_auto_accept_gate.md). Written by Orange's local-control register_dish_rims (status local_control.dish_rim_registration, every evaluation) and embedded in a gate-accepted rim observation v4 (acceptance.gate, outcome accepted only). The gate's limits are consts: a different limit is a different gate version. Every check carries its thresholds, its measured values and passed; outcome is accepted exactly when failures is empty. Consumer checks JSON Schema cannot express: failures lists exactly the codes of the checks that did not pass (plus fit_not_finite, anchor_fit_missing, anchor_not_operator_reviewed, edge_support_not_measured, rig_config_not_pinned); radius_px lies in [accept_low_px, accept_high_px] when that check passed; expected_low_px = inner_diameter_mm/2 x px_per_mm_low and expected_high_px = inner_diameter_mm/2 x px_per_mm_high, with px_per_mm from inputs.fish_plane_scale by 1/s(z) = 1/s_floor - (z - p_floor - e)/k at z_low_mm = p_floor + wall (1 - 1/n) and z_high_mm = p_floor + wall; accept_low/high are those widened by tolerance_fraction; change px_per_mm is the mean of px_per_mm_low and px_per_mm_high and every _mm value is its _px value divided by it; center_shift_px is the Euclidean distance between fit.center_px and checks.change_from_anchor.anchor.center_px; drift.anchor names the same fit; drift.chain_depth counts the camera's gate acceptances since the anchor, this one included.",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "schema_id",
+  "schema_version",
+  "gate_id",
+  "gate_version",
+  "outcome",
+  "failures",
+  "camera_serial",
+  "evaluated_at_utc",
+  "orange_build",
+  "requester",
+  "declared_by",
+  "inputs",
+  "fit",
+  "checks",
+  "drift"
+ ],
+ "properties": {
+  "schema_id": {
+   "const": "orange.calibration.dish_rim_gate_evaluation"
+  },
+  "schema_version": {
+   "const": 1
+  },
+  "gate_id": {
+   "const": "orange_dish_rim_auto_accept_v1"
+  },
+  "gate_version": {
+   "const": 1
+  },
+  "outcome": {
+   "enum": [
+    "accepted",
+    "refused"
+   ]
+  },
+  "failures": {
+   "type": "array",
+   "uniqueItems": true,
+   "items": {
+    "enum": [
+     "fit_not_finite",
+     "radius_outside_physical_range",
+     "anchor_fit_missing",
+     "center_shift_exceeds_limit",
+     "radius_change_exceeds_limit",
+     "edge_support_not_measured",
+     "edge_support_below_limit",
+     "fallback_hough_pass",
+     "rig_config_not_pinned",
+     "anchor_not_operator_reviewed"
+    ]
+   }
+  },
+  "camera_serial": {
+   "type": "string",
+   "pattern": "^[0-9]{1,20}(?![\\s\\S])"
+  },
+  "evaluated_at_utc": {
+   "type": "string",
+   "minLength": 20,
+   "maxLength": 40,
+   "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z(?![\\s\\S])"
+  },
+  "orange_build": {
+   "type": "object",
+   "required": [
+    "commit",
+    "dirty_tracked"
+   ],
+   "properties": {
+    "commit": {
+     "type": "string",
+     "pattern": "^[0-9a-f]{40}(?![\\s\\S])"
+    },
+    "dirty_tracked": {
+     "type": "boolean"
+    }
+   },
+   "additionalProperties": true,
+   "description": "The evaluating Orange binary's build stamp (recording start snapshot source_version.build)."
+  },
+  "requester": {
+   "$ref": "orange.requester.v1"
+  },
+  "declared_by": {
+   "type": "string",
+   "minLength": 1,
+   "maxLength": 64
+  },
+  "inputs": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "dish",
+    "fish_plane_scale",
+    "rig_config"
+   ],
+   "properties": {
+    "dish": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "inner_diameter_mm",
+      "inner_diameter_source",
+      "wall_height_mm",
+      "wall_height_source",
+      "water_refractive_index"
+     ],
+     "properties": {
+      "inner_diameter_mm": {
+       "const": 80.0
+      },
+      "inner_diameter_source": {
+       "type": "string",
+       "minLength": 1
+      },
+      "wall_height_mm": {
+       "const": 2.8
+      },
+      "wall_height_source": {
+       "type": "string",
+       "minLength": 1
+      },
+      "water_refractive_index": {
+       "const": 1.333
+      }
+     }
+    },
+    "fish_plane_scale": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "path",
+      "sha256",
+      "s_floor_px_per_mm",
+      "k_px",
+      "p_floor_mm",
+      "e_mm"
+     ],
+     "properties": {
+      "path": {
+       "type": "string",
+       "pattern": "^/[^\\u0000\\r\\n]+(?![\\s\\S])"
+      },
+      "sha256": {
+       "type": "string",
+       "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
+      },
+      "s_floor_px_per_mm": {
+       "type": "number",
+       "exclusiveMinimum": 0
+      },
+      "k_px": {
+       "type": "number",
+       "exclusiveMinimum": 0
+      },
+      "p_floor_mm": {
+       "type": "number"
+      },
+      "e_mm": {
+       "type": "number"
+      }
+     },
+     "description": "The accepted orange.calibration.fish_plane_scale v1 file by path and sha256, and this camera's model read from it."
+    },
+    "rig_config": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "status",
+      "rig_id",
+      "rig_geometry_revision",
+      "path",
+      "sha256"
+     ],
+     "properties": {
+      "status": {
+       "type": "string"
+      },
+      "rig_id": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "rig_geometry_revision": {
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "path": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "sha256": {
+       "oneOf": [
+        {
+         "type": "string",
+         "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      }
+     },
+     "description": "The pancakebatter rig file as Orange's rig pin found it (orange.recording.rig_config status, rig_id, rig_geometry_revision, rig_file path and sha256). Not pinned fails the gate (rig_config_not_pinned)."
+    }
+   }
+  },
+  "fit": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "image_width_px",
+    "image_height_px",
+    "center_px",
+    "radius_px"
+   ],
+   "properties": {
+    "image_width_px": {
+     "type": "integer",
+     "minimum": 1
+    },
+    "image_height_px": {
+     "type": "integer",
+     "minimum": 1
+    },
+    "center_px": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "x",
+      "y"
+     ],
+     "properties": {
+      "x": {
+       "type": "number"
+      },
+      "y": {
+       "type": "number"
+      }
+     }
+    },
+    "radius_px": {
+     "type": "number"
+    }
+   },
+   "description": "The detected circle (camera native pixels)."
+  },
+  "checks": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "radius_in_physical_range",
+    "change_from_anchor",
+    "edge_support",
+    "first_hough_pass"
+   ],
+   "properties": {
+    "radius_in_physical_range": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "passed",
+      "radius_px",
+      "radius_mm",
+      "tolerance_fraction",
+      "z_low_mm",
+      "z_high_mm",
+      "px_per_mm_low",
+      "px_per_mm_high",
+      "expected_low_px",
+      "expected_high_px",
+      "accept_low_px",
+      "accept_high_px",
+      "accept_low_mm",
+      "accept_high_mm"
+     ],
+     "properties": {
+      "passed": {
+       "type": "boolean"
+      },
+      "radius_px": {
+       "type": "number"
+      },
+      "radius_mm": {
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "tolerance_fraction": {
+       "const": 0.02
+      },
+      "z_low_mm": {
+       "type": "number"
+      },
+      "z_high_mm": {
+       "type": "number"
+      },
+      "px_per_mm_low": {
+       "type": "number"
+      },
+      "px_per_mm_high": {
+       "type": "number"
+      },
+      "expected_low_px": {
+       "type": "number"
+      },
+      "expected_high_px": {
+       "type": "number"
+      },
+      "accept_low_px": {
+       "type": "number"
+      },
+      "accept_high_px": {
+       "type": "number"
+      },
+      "accept_low_mm": {
+       "type": "number"
+      },
+      "accept_high_mm": {
+       "type": "number"
+      }
+     }
+    },
+    "edge_support": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "passed",
+      "fraction",
+      "min_fraction",
+      "point_count",
+      "min_step_dn",
+      "search_px"
+     ],
+     "properties": {
+      "passed": {
+       "type": "boolean"
+      },
+      "fraction": {
+       "type": [
+        "number",
+        "null"
+       ],
+       "minimum": 0,
+       "maximum": 1
+      },
+      "min_fraction": {
+       "const": 0.4
+      },
+      "point_count": {
+       "const": 720
+      },
+      "min_step_dn": {
+       "const": 12.0
+      },
+      "search_px": {
+       "const": 6.0
+      }
+     },
+     "description": "Fraction of point_count points on the circle whose strongest one-pixel radial step within +/-search_px is at least min_step_dn (full-resolution 8-bit image). null: not measured (fails)."
+    },
+    "first_hough_pass": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "passed",
+      "hough_pass_index",
+      "required_pass_index"
+     ],
+     "properties": {
+      "passed": {
+       "type": "boolean"
+      },
+      "hough_pass_index": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 2
+      },
+      "required_pass_index": {
+       "const": 1
+      }
+     },
+     "description": "1: the detector's first pass found the circle; 2: only its relaxed retry did; 0: unknown."
+    },
+    "change_from_anchor": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "passed",
+      "px_per_mm",
+      "max_center_shift_px",
+      "max_center_shift_mm",
+      "max_radius_change_px",
+      "max_radius_change_mm",
+      "anchor",
+      "center_shift_px",
+      "center_shift_mm",
+      "radius_change_px",
+      "radius_change_mm"
+     ],
+     "properties": {
+      "passed": {
+       "type": "boolean"
+      },
+      "px_per_mm": {
+       "type": "number"
+      },
+      "max_center_shift_px": {
+       "const": 135.0
+      },
+      "max_center_shift_mm": {
+       "type": "number"
+      },
+      "max_radius_change_px": {
+       "const": 35.0
+      },
+      "max_radius_change_mm": {
+       "type": "number"
+      },
+      "center_shift_px": {
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "center_shift_mm": {
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "radius_change_px": {
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "radius_change_mm": {
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "anchor": {
+       "oneOf": [
+        {
+         "type": "null"
+        },
+        {
+         "type": "object",
+         "additionalProperties": false,
+         "required": [
+          "artifact_id",
+          "observation_sha256",
+          "created_utc",
+          "acceptance_basis",
+          "center_px",
+          "radius_px"
+         ],
+         "properties": {
+          "artifact_id": {
+           "type": "string",
+           "minLength": 1
+          },
+          "observation_sha256": {
+           "type": "string",
+           "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
+          },
+          "created_utc": {
+           "type": "string",
+           "minLength": 20,
+           "maxLength": 40,
+           "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z(?![\\s\\S])"
+          },
+          "acceptance_basis": {
+           "enum": [
+            "operator_review",
+            "quality_gate"
+           ]
+          },
+          "center_px": {
+           "type": "object",
+           "additionalProperties": false,
+           "required": [
+            "x",
+            "y"
+           ],
+           "properties": {
+            "x": {
+             "type": "number"
+            },
+            "y": {
+             "type": "number"
+            }
+           }
+          },
+          "radius_px": {
+           "type": "number"
+          }
+         }
+        }
+       ],
+       "description": "The anchor: the camera's newest compatible OPERATOR-REVIEWED fit (Jeremy 2026-11-15: never an earlier gate-accepted fit), bound by its observation's sha256. null: none, so a person reviews (anchor_fit_missing). A basis other than operator_review fails (anchor_not_operator_reviewed)."
+      }
+     },
+     "description": "Centre shift and radius change against the anchor, in px and in mm (px / px_per_mm, the rim's mean scale), with the limits in both."
+    }
+   }
+  },
+  "drift": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "rule",
+    "anchor",
+    "chain_depth"
+   ],
+   "properties": {
+    "rule": {
+     "const": "compare_to_last_operator_reviewed_fit",
+     "description": "Jeremy 2026-11-15: every gate acceptance is compared with the last operator-reviewed fit, never with an earlier gate acceptance; no limit on the depth."
+    },
+    "anchor": {
+     "oneOf": [
+      {
+       "type": "null"
+      },
+      {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "artifact_id",
+        "observation_sha256",
+        "created_utc",
+        "acceptance_basis"
+       ],
+       "properties": {
+        "artifact_id": {
+         "type": "string",
+         "minLength": 1
+        },
+        "observation_sha256": {
+         "type": "string",
+         "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
+        },
+        "created_utc": {
+         "type": "string",
+         "minLength": 20,
+         "maxLength": 40,
+         "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z(?![\\s\\S])"
+        },
+        "acceptance_basis": {
+         "enum": [
+          "operator_review",
+          "quality_gate"
+         ]
+        }
+       }
+      }
+     ]
+    },
+    "chain_depth": {
+     "type": [
+      "integer",
+      "null"
+     ],
+     "minimum": 1,
+     "description": "Gate acceptances of this camera since the anchor, counting this one. null without an anchor."
+    }
+   }
+  }
+ },
+ "allOf": [
+  {
+   "if": {
+    "properties": {
+     "outcome": {
+      "const": "accepted"
+     }
+    }
+   },
+   "then": {
+    "properties": {
+     "failures": {
+      "maxItems": 0
+     },
+     "checks": {
+      "properties": {
+       "radius_in_physical_range": {
+        "properties": {
+         "passed": {
+          "const": true
+         }
+        }
+       },
+       "change_from_anchor": {
+        "properties": {
+         "passed": {
+          "const": true
+         }
+        }
+       },
+       "edge_support": {
+        "properties": {
+         "passed": {
+          "const": true
+         }
+        }
+       },
+       "first_hough_pass": {
+        "properties": {
+         "passed": {
+          "const": true
+         }
+        }
+       }
+      }
+     },
+     "inputs": {
+      "properties": {
+       "rig_config": {
+        "properties": {
+         "status": {
+          "const": "pinned"
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "if": {
+    "properties": {
+     "outcome": {
+      "const": "refused"
+     }
+    }
+   },
+   "then": {
+    "properties": {
+     "failures": {
+      "minItems": 1
+     }
+    }
+   }
+  }
+ ]
+}
