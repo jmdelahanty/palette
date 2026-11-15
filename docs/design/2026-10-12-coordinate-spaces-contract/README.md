@@ -2,7 +2,8 @@
 
 - **Status:** draft proposal. Jeremy asked for it on 2026-10-12. Palette drafts
   it here. Orange and Citrus answered the questions in §7 (2026-10-12/13,
-  updated 2026-11-14). Once they agree, it
+  updated 2026-11-14). Jeremy decided the four open items on 2026-11-15
+  (§10). Once the producers agree, it
   moves to agent-contracts as a three-party contract (proposed home:
   `systems/coordinate_spaces_v1/`).
 - **Owner:** Jeremy Delahanty. **Last reviewed:** 2026-11-14 (citations
@@ -350,6 +351,9 @@ reported by Citrus.
 
 ### What still blocks the move to agent-contracts (2026-11-14)
 
+> *Update (2026-11-15):* Jeremy decided all four items in point 1 below. See §10
+> for the decisions and what still remains.
+
 No producer question blocks the contract text any more. What remains:
 1. **Decisions for Jeremy:**
    - the Q-C5 design (declare at Fit, refuse at Promote, recheck at START);
@@ -367,6 +371,8 @@ Producer build items (Citrus's parser fix in Q-C2, the parity fields in the geom
    - The §6a xrandr parser fix.
    - The §6b agent-contracts one-line fix.
    - Stamp `orientation_status = "orientation_unverified"` on geometry runs from all current recordings, so nothing claims verified orientation.
+     *Superseded 2026-11-15 (§10):* the status is derived per recording by one
+     resolver. Existing runs are not stamped.
 2. **Answers to §7** (received 2026-10-12/13 and updated 2026-11-14; what still
    blocks is listed at the end of §7), then the agent-contracts PR
    `systems/coordinate_spaces_v1/`, containing:
@@ -438,3 +444,42 @@ All other citations, including every `AC:` one, still hold.
 - **Dish geometry** (`1bad4def`): `exact_match_applied` now comes from Citrus's
   runtime geometry contract. That concerns registration status, not
   orientation, so it does not change any point here.
+
+## 10. Decisions and status (2026-11-15)
+
+Palette owner of this contract from 2026-11-15: the `coordinate_spaces`
+session, handed over by PR-monitor.
+
+**Jeremy's decisions (2026-11-15, given directly in the Palette owner session):**
+
+| Item | Decision |
+|---|---|
+| Q-C5 handedness | **Approved** as designed: declare at Fit, refuse at Promote (`declared_parity_mismatch`, `declared_parity_undeclared`), recheck at START. Palette does not trust the producer's `status` alone: it requires `"agrees"`, recomputes sign(det) from the active homography (with the `w(p) > 0` check), parses the xrandr reflection itself, and requires the record's `rig_file_sha256` and `rig_geometry_revision` to equal the recording's `/metadata/rig/pancakebatter_rig_file` pin. Approving the design does not approve Citrus #115 for merge. |
+| Q-O3 `camera_geometry_v1` | **Not built for now.** Palette computes `recorded_space_parity` from `camera_runtime.<serial>.sensor_pipeline` (v3) plus the `rig.yml` pinned in `session.rig_config`. The record gets built when a camera with ReverseX/Y, binning or decimation nodes, or a ventral or mirrored rig, appears. |
+| §6c arena origin | **Accept an integral float (`640.0`) and refuse a fractional one (`640.5`); never round.** The field becomes integer in Citrus's next geometry schema version. The legacy path already enforced this. The unified-H5 path is palette#451. |
+| 10-17/18 phototaxis sessions | omnifin0's camera cannot see the projection, so they cannot be verified from their own frames. Jeremy states the projector has not flipped or changed orientation since October. Run the §5 asymmetric-pattern check on omnifin0 while the NIR filters are off. That check plus this statement lifts `orientation_unverified` for those sessions. |
+| `orientation_unverified` (§8 step 1) | **Derived, not stamped.** One resolver reports `orientation_status` per recording: verified only when a checked orientation evidence record exists for it, otherwise unverified. It may be projected into the registry. No existing run is mutated. New runs record the status in provenance when produced. |
+
+**§6 fixes:**
+- §6a xrandr token: palette#450, approved by Jeremy to merge on green.
+- §6b `detect_bbox_read.md:128`: agent-contracts#131, a draft. Crimson main `01b424b` has no bbox `pixel_convention` check, so no reader changes.
+- §6c: palette#451.
+- §6d: not started.
+
+**Citrus #115 (draft `ce8d959`):**
+- It writes `/geometry/calibration/declared_orientation`, schema `citrus.declared_orientation_check` v1.
+- Its agent-contracts home is `citrus-palette/coordinate_spaces_v1/citrus_declared_orientation_check_v1.schema.json`, plus an admission note like z_eff's: an attrs-only group under `/geometry/calibration` rides v7. Palette vendors the schema only after that entry exists.
+- #115 also changes Citrus's `selected_output_transform_token` to the current rotation. That matches palette#450. Files sealed before #115 need no change: Palette never trusted that attr alone, and all 236 legacy H5s re-derive `normal`/unreflected from their sealed raw block.
+
+**New open point: presentation parity.**
+- #115's rule is `sign(det) = handedness × presentation_parity × xrandr_reflection`, with `presentation_parity = −1`. That value is a Citrus code constant (`presentation_mapping_contract.cpp`, `display_reflection = [[1,0,0],[0,−1,H],[0,0,1]]`), not a measurement.
+- omnifin0's `rig.yml` also declares a vertical firmware flip. So "−1 × vertical flip" and "+1 × no flip" give the same det, and the det cannot tell them apart.
+- If the presentation reflection really is applied at scan-out, then `citrus.display_canvas_px` is bottom-left-origin in xrandr output pixels, and the §2 row ("top-left of … one xrandr output") is wrong.
+- omnifin0 fits made before 2026-08-10 have det > 0 under the same presentation code, and nothing explains that yet.
+- Check proposed to Citrus: render a marker at canvas (0, 0) and capture DP-2's X screen. It needs no camera or filters, but it is a rig session, so it needs Jeremy's OK after Orange's hold clears.
+
+**Still blocking the move to agent-contracts:**
+- the presentation-parity check above and the asymmetric-pattern check;
+- fixtures with one preserved rig and one reflected rig;
+- a physical read-off of omnifin0's mirror count;
+- a home for the three-party registry and transform-record schemas. palette-agent-contracts notes that `systems/` holds links only, so the `systems/coordinate_spaces_v1/` proposed in the Status line needs replacing.
