@@ -3,7 +3,7 @@
 - **Status:** proposal for review. Nothing has moved yet.
 - **Owner:** Jeremy Delahanty.
 - **Snapshot:** Palette `main` at `b04ec0d4` (refreshed 2026-11-14; first made at `d7797af1`, 2026-10-07). See [Refresh 2026-11-14](#refresh-2026-11-14).
-- **Builds on:** the shared docs contract in agent-contracts PR #62 (`docs-contract/`), which is not merged yet. Frontmatter waits for it.
+- **Builds on:** the shared docs contract in agent-contracts PR #62 (`docs-contract/`), merged 2026-10-07. Frontmatter uses its schema.
 - **Manifest:** [`manifest.csv`](manifest.csv). One row per doc, sorted needs_decision → merge → archive → keep. GitHub renders it as a searchable table.
 
 ## Goal
@@ -172,7 +172,7 @@ These came up across batches and should be fixed while the core is built.
 1. Edit `manifest.csv` directly, or tell an agent which rows change and what each `needs_decision` row resolves to.
 2. **Archive commit:** `git mv` each approved archive row into `docs/archive/`, fix the 9 references above and the AGENTS.md `sandbox_zarr_fallback` link in the same commit, and run the link and census checks. One commit, reversible with `git revert`.
 3. **Merge commits:** one per owner doc, so each merge can be reviewed against what it absorbs.
-4. **Core pages:** written after the agent-contracts docs contract merges, with frontmatter from that schema.
+4. **Core pages:** written with frontmatter from the agent-contracts docs contract (PR #62, merged 2026-10-07).
 
 ## Refresh 2026-11-14
 
@@ -192,6 +192,7 @@ Refreshed against `main` at `b04ec0d4` after about 110 merged PRs. No docs were 
     - `row-scoped-staleness`: step 1 has partly landed in #291.
     - `chaser_stimulus_camera_temporal_projection_audit`, `native_tensorrt_inference_todo`, `multicamera_3d_analysis_todo`, `web_labeling_admin_correction_review_design`, `keypoint_multi_skeleton_todo` and `error_budget_policy` (the `check_import_profile` claim was wrong).
 - **References:** now computed with the fixed rule above. The old `registry_query_since_filter` hit was a test function name, not a doc reference, so that row was dropped from the table. Two rows were added: `crimson_stimulus_step_read_contract` and `merged_pose_detect_recovery_full_2026_09_14`.
+- **Docs contract:** agent-contracts PR #62 merged on 2026-10-07, so core pages and frontmatter are no longer blocked on it.
 - **Still stale on main:**
   - `AGENTS.md` still links `docs/sandbox_zarr_fallback.md`, which is archived.
   - `README.md`'s CI badge still says `sun`.
