@@ -70,6 +70,8 @@ def _fixture(
     listed_events=EVENTS,
     commit=COMMIT,
     sidecar_present=True,
+    source_commit=None,
+    sidecar_extra=b"",
 ):
     path = emit_fixture(tmp_path, "base")
     with h5py.File(path, "r+") as h5:
@@ -88,6 +90,10 @@ def _fixture(
             sidecar += (
                 f"events_sha256: {hashlib.sha256(listed_events).hexdigest()}\n".encode()
             )
+        sidecar += sidecar_extra
+        if source_commit is None:
+            # What PinRigFile records: the sidecar's commit, only when full.
+            source_commit = commit if sidecar_present and len(commit) == 40 else ""
         group.attrs.update(
             {
                 "status": status,
@@ -95,9 +101,7 @@ def _fixture(
                 "rig_id": rig_id,
                 "rig_geometry_revision": 10,
                 "lookup": "installed",
-                "source_commit": (
-                    commit if sidecar_present and len(commit) == 40 else ""
-                ),
+                "source_commit": source_commit,
                 "installed_at": installed if sidecar_present else "",
             }
         )
@@ -217,3 +221,156 @@ def test_scalar_string_fixture_matches_citrus_digest_vector():
     assert _entry("events_file", EVENTS)["content_sha256"] == (
         "sha256:1ad00b4ff07d4710f23896c7b9723cfaf995f1cd901e7e7b038e0ddedac21f0f"
     )
+
+
+# Enforcement correction: ``source_commit`` is "the sidecar's ``commit``,
+# recorded only when it is a full sha" (Citrus docs/Understanding_H5_Log.md and
+# RigBinding::PinRigFile at dbf2ee9). The sidecar dataset is covered by the
+# sealed dependency manifest; the group attribute is not, so the attribute
+# must agree with the sealed bytes.
+CONTRADICTS = "rig_provenance_source_commit_contradicts_sidecar"
+UNVERIFIABLE = "rig_provenance_source_commit_unverifiable"
+PINNED_WITHOUT = "rig_provenance_pinned_without_source_commit"
+
+
+def _replace_sidecar(h5, raw):
+    target = f"{GROUP}/sidecar"
+    manifest = json.loads(h5[MANIFEST][()])
+    del h5[target]
+    ds = h5.create_dataset(target, data=raw, dtype=h5py.string_dtype("utf-8"))
+    ds.attrs.update({"checksum_algorithm": "sha256", "checksum_sha256": digest(raw)})
+    entries = manifest["dependencies"]
+    index = next(i for i, row in enumerate(entries) if row.get("path") == target)
+    entries[index] = _entry("sidecar", raw)
+    _seal_manifest(h5, manifest)
+
+
+def test_absent_rig_provenance_is_unchanged(tmp_path):
+    path = emit_fixture(tmp_path, "base")
+    with h5py.File(path) as h5:
+        assert "/metadata/rig" not in h5 or GROUP not in h5
+    result = _admit(path)
+    assert result.dependency_count == 90
+    assert not any(node.startswith(GROUP) for node in result.node_kinds)
+
+
+@pytest.mark.parametrize(
+    ("status", "options"),
+    [
+        ("pinned", {}),
+        ("pinned", {"commit": "1" * 40}),  # all digits stays a YAML string
+        ("rig_file_sidecar_mismatch", {"events": EVENTS + b"# appended\n"}),
+        ("rig_file_sidecar_invalid", {"commit": "abcdef0"}),
+        ("rig_file_sidecar_missing", {"sidecar_present": False}),
+    ],
+)
+def test_consistent_source_commit_is_admitted(tmp_path, status, options):
+    result = _admit(_fixture(tmp_path, status=status, **options))
+    assert not result.selector_eligible
+
+
+def test_quoted_sidecar_commit_is_the_same_scalar(tmp_path):
+    path = _fixture(tmp_path, commit=f'"{COMMIT}"', source_commit=COMMIT)
+    _admit(path)
+
+
+@pytest.mark.parametrize("status", ["pinned", "rig_file_sidecar_mismatch"])
+@pytest.mark.parametrize(
+    "attribute",
+    ["b" * 40, COMMIT.upper(), COMMIT[:7], COMMIT + "\n", " " + COMMIT[1:]],
+)
+def test_contradictory_source_commit_is_refused(tmp_path, status, attribute):
+    path = _fixture(tmp_path, status=status, source_commit=attribute)
+    with pytest.raises(UnifiedH5ContractError, match=CONTRADICTS):
+        _admit(path)
+
+
+@pytest.mark.parametrize(
+    "sidecar_options",
+    [
+        {"commit": "abcdef0"},  # the sidecar's own commit is not a full sha
+        {"sidecar_extra": b"commit: [unterminated\n"},  # does not parse
+    ],
+)
+def test_source_commit_beyond_an_invalid_sidecar_is_refused(tmp_path, sidecar_options):
+    path = _fixture(
+        tmp_path,
+        status="rig_file_sidecar_invalid",
+        source_commit=COMMIT,
+        **sidecar_options,
+    )
+    with pytest.raises(UnifiedH5ContractError, match=CONTRADICTS):
+        _admit(path)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"- " + COMMIT.encode() + b"\n", b"commit: {sha: x}\n", b""],
+)
+def test_source_commit_against_a_sidecar_without_a_commit_is_refused(tmp_path, raw):
+    path = _fixture(tmp_path)
+    with h5py.File(path, "r+") as h5:
+        _replace_sidecar(h5, raw)
+    with pytest.raises(UnifiedH5ContractError, match=CONTRADICTS):
+        _admit(path)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"status": "rig_file_sidecar_missing", "sidecar_present": False},
+        {"sidecar_extra": b"#\0"},  # recorded only as a digest, never as bytes
+    ],
+)
+def test_source_commit_without_stored_sidecar_is_refused(tmp_path, options):
+    path = _fixture(tmp_path, source_commit=COMMIT, **options)
+    with h5py.File(path) as h5:
+        assert f"{GROUP}/sidecar" not in h5
+    with pytest.raises(UnifiedH5ContractError, match=UNVERIFIABLE):
+        _admit(path)
+
+
+def test_pinned_without_source_commit_is_refused(tmp_path):
+    path = _fixture(tmp_path, source_commit="")
+    with pytest.raises(UnifiedH5ContractError, match=PINNED_WITHOUT):
+        _admit(path)
+
+
+def test_attribute_tamper_with_fresh_receipt_is_refused(tmp_path):
+    # PR #424's separate probe: an attribute edit after sealing, then a fresh
+    # whole-file receipt. That passed before; the cross-check now refuses it.
+    path = _fixture(tmp_path)
+    with h5py.File(path, "r+") as h5:
+        h5[GROUP].attrs["source_commit"] = "b" * 40
+    with pytest.raises(UnifiedH5ContractError, match=CONTRADICTS):
+        _admit(path)
+
+
+def test_attribute_tamper_with_original_receipt_still_fails_byte_gate(tmp_path):
+    path = _fixture(tmp_path)
+    receipt = synthetic_receipt_for_mutated_test_file(path, "base")
+    with h5py.File(path, "r+") as h5:
+        h5[GROUP].attrs["source_commit"] = "b" * 40
+    with pytest.raises(
+        UnifiedH5ContractError, match="external_h5_(size|byte_digest)_mismatch"
+    ):
+        _admit(path, receipt)
+
+
+def test_resealed_sidecar_tamper_is_refused(tmp_path):
+    # The sidecar bytes are swapped and the manifest resealed, so the inner
+    # integrity gate passes. The unchanged attribute now names another commit.
+    path = _fixture(tmp_path)
+    with h5py.File(path, "r+") as h5:
+        raw = h5[f"{GROUP}/sidecar"][()].replace(COMMIT.encode(), b"c" * 40)
+        _replace_sidecar(h5, raw)
+    with pytest.raises(UnifiedH5ContractError, match=CONTRADICTS):
+        _admit(path)
+
+
+def test_admitted_claims_keep_their_shape(tmp_path):
+    # The check only refuses: an admitted file's claim keys are unchanged.
+    base = _admit(emit_fixture(tmp_path / "base", "base"))
+    pinned = _admit(_fixture(tmp_path / "pinned"))
+    assert set(pinned.manifest_claims()) == set(base.manifest_claims())
+    assert pinned.dependency_count == base.dependency_count + 3
