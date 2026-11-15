@@ -578,8 +578,8 @@ def _import_delivery(
             raise
 
 
-def _memo_record(memo) -> dict[str, int]:
-    return {"hits": memo.hits, "misses": memo.misses, "unsettled": memo.unsettled}
+def _memo_record(memo) -> dict[str, Any]:
+    return memo.report()
 
 
 def _import_under_lock(

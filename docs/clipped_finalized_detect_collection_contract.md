@@ -3,7 +3,7 @@
 version: 1
 status: active
 implementation: partial
-last_verified: 2026-08-27
+last_verified: 2026-11-13
 purpose: Define how consumers resolve finalized clipped refined-detect collections to parent frames, clip-local video frames, and refined detection rows.
 -->
 
@@ -23,10 +23,17 @@ include:
 
 ## Implementation Status
 
-The video-backed reviewer implements the complete video-review discovery and
+The video-backed reviewer implements the video-review discovery order and
 required-column path described below, including the root
-`recording_frame_index_path` authority and required `video_path`. The
-standalone `resolve_clipped_refined_detect_collection` utility currently
+`recording_frame_index_path` authority and required `video_path`. Since
+2026-11-13 it also rejects duplicate selected `(camera_serial, clip_id)` pairs;
+uses `parent_frame_index` when the column is present and refuses null values in
+it; derives `recording_frame_id - 1` with a logged warning when the column is
+absent (never the row position); and requires every positive source-geometry
+declaration on the first selected refined run, its detect run, and the root to
+agree, ignoring `inference_width`/`inference_height`. It reads geometry from
+the first selected run only and does not compare geometry across all selected
+clips. The standalone `resolve_clipped_refined_detect_collection` utility currently
 implements explicit-path and collection-plan discovery only, treats
 `video_path` as optional in its generic frame/run mapping, and does not itself
 materialize the `recording_frame_id - 1` compatibility projection. Callers
@@ -249,3 +256,6 @@ Before treating a clipped finalized collection as reviewable:
 
 The 2026-08-27 verification passed the focused finalized-collection, resolver,
 proxy-video, sharded-submission, and video-review backend suites (36 tests).
+The 2026-11-13 verification added reviewer tests for duplicate selected pairs,
+the `recording_frame_id - 1` fallback and its row-alignment refusal, null
+`parent_frame_index` values, and conflicting source geometry.

@@ -12,6 +12,7 @@ Transport verification and a parent plan are NOT scientific/media admission.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import copy
 import csv
 from dataclasses import dataclass
 import datetime as dt
@@ -19,6 +20,7 @@ from functools import lru_cache
 import hashlib
 from importlib.resources import files as resource_files
 import json
+import logging
 import os
 import re
 import stat
@@ -336,6 +338,72 @@ class _DigestMemo:
         self.hits = 0
         self.misses = 0
         self.unsettled = 0
+        # Which files were unsettled, how old they were and a few examples,
+        # so a job's status explains its ``unsettled`` count.
+        self._unsettled_files: set[tuple[int, int]] = set()
+        self._unsettled_age_ns: tuple[int, int] | None = None
+        self.unsettled_sample: list[dict[str, Any]] = []
+        # Validated frame maps (``frame_map`` without a row callback), keyed by
+        # (device, inode, kind, previous, crop_offset) under the same rules.
+        self._frame_maps: dict[tuple, tuple[tuple[int, int, int, int, int], dict]] = {}
+        self.frame_map_hits = 0
+        self.frame_map_misses = 0
+        self.frame_map_unsettled = 0
+
+    def _note_unsettled(self, info: os.stat_result, label: str) -> int:
+        """Count an entry that was not kept; return its age in nanoseconds."""
+
+        age = _now_ns() - info.st_ctime_ns
+        self._unsettled_files.add((info.st_dev, info.st_ino))
+        low, high = self._unsettled_age_ns or (age, age)
+        self._unsettled_age_ns = (min(low, age), max(high, age))
+        if len(self.unsettled_sample) < UNSETTLED_SAMPLE_SIZE:
+            self.unsettled_sample.append({"path": label, "age_s": age / 10**9})
+        _log.debug("not memoized, unsettled (ctime %.3f s ago): %s", age / 10**9, label)
+        return age
+
+    def report(self) -> dict[str, Any]:
+        """The counters for a job status; ``hits``/``misses``/``unsettled`` first."""
+
+        with self._lock:
+            ages = self._unsettled_age_ns
+            return {
+                "hits": self.hits,
+                "misses": self.misses,
+                "unsettled": self.unsettled,
+                "unsettled_files": len(self._unsettled_files),
+                "unsettled_age_s": (
+                    None if ages is None else {"min": ages[0] / 10**9, "max": ages[1] / 10**9}
+                ),
+                "unsettled_sample": list(self.unsettled_sample),
+                "frame_maps": {
+                    "hits": self.frame_map_hits,
+                    "misses": self.frame_map_misses,
+                    "unsettled": self.frame_map_unsettled,
+                },
+            }
+
+    def lookup_frame_map(self, info: os.stat_result, key: tuple) -> dict | None:
+        signature = _stat_signature(info)
+        with self._lock:
+            entry = self._frame_maps.get(signature[:2] + key)
+            if entry is not None and entry[0] == signature:
+                self.frame_map_hits += 1
+                return entry[1]
+            self.frame_map_misses += 1
+            return None
+
+    def record_frame_map(
+        self, info: os.stat_result, key: tuple, mapping: dict, label: str
+    ) -> None:
+        if not _settled(info):
+            with self._lock:
+                self.frame_map_unsettled += 1
+                self._note_unsettled(info, label)
+            return
+        signature = _stat_signature(info)
+        with self._lock:
+            self._frame_maps[signature[:2] + key] = (signature, copy.deepcopy(mapping))
 
     def lookup(self, info: os.stat_result) -> str | None:
         signature = _stat_signature(info)
@@ -347,14 +415,15 @@ class _DigestMemo:
             self.misses += 1
             return None
 
-    def record(self, info: os.stat_result, sha256: str) -> None:
+    def record(self, info: os.stat_result, sha256: str, label: str = "") -> None:
         # Filesystem timestamps tick coarsely (milliseconds). A file whose
         # ctime is still within the settle window of now could be rewritten in
         # the same tick with an unchanged signature, so its digest is not kept;
         # a later pass hashes it again and records it once it has settled.
-        if _now_ns() - info.st_ctime_ns < DIGEST_MEMO_SETTLE_NS:
+        if not _settled(info):
             with self._lock:
                 self.unsettled += 1
+                self._note_unsettled(info, label)
             return
         signature = _stat_signature(info)
         with self._lock:
@@ -364,12 +433,19 @@ class _DigestMemo:
 # A file modified in the last few seconds is hashed again on the next pass; a
 # generous window also covers NFS server/client clock offsets.
 DIGEST_MEMO_SETTLE_NS = 5 * 10**9
+# How many unsettled entries a memo describes by path and age in its report.
+UNSETTLED_SAMPLE_SIZE = 16
 
 
 def _now_ns() -> int:
     return time.time_ns()
 
 
+def _settled(info: os.stat_result) -> bool:
+    return _now_ns() - info.st_ctime_ns >= DIGEST_MEMO_SETTLE_NS
+
+
+_log = logging.getLogger(__name__)
 _digest_memo_state = threading.local()
 
 
@@ -441,7 +517,7 @@ def file_ref(root: Path, relative: str) -> dict:
             return {"path": relative, "size_bytes": before.st_size, "sha256": known}
     sha256, after = _sha256_of_regular_file(path, relative, before)
     if memo is not None:
-        memo.record(after, sha256)
+        memo.record(after, sha256, relative)
     return {"path": relative, "size_bytes": after.st_size, "sha256": sha256}
 
 
@@ -991,7 +1067,35 @@ def frame_map(
     It does not change the transport serialization/digest or clock claim. A
     callback writer must remain unpublished until the complete map and immutable
     source generation have been revalidated.
+
+    Inside a :func:`digest_memo` block a map without a callback is parsed once
+    per unchanged file and arguments, under the digest memo's stat-identity and
+    settle rules; a callback always streams the rows from the file.
     """
+    memo = active_digest_memo()
+    if on_row is not None or memo is None:
+        return _frame_map_rows(path, kind, previous, crop_offset, on_row)
+    key = (kind, previous, crop_offset)
+    before = path.lstat()
+    known = memo.lookup_frame_map(before, key)
+    if known is not None:
+        return copy.deepcopy(known)
+    mapping = _frame_map_rows(path, kind, previous, crop_offset, None)
+    after = path.lstat()
+    if _stat_signature(before) == _stat_signature(after):
+        memo.record_frame_map(after, key, mapping, str(path))
+    return mapping
+
+
+def _frame_map_rows(
+    path: Path,
+    kind: str,
+    previous: int,
+    crop_offset: int,
+    on_row: Callable[[int, int, int, int], None] | None,
+) -> dict:
+    """Parse and validate every row of ``path`` (see :func:`frame_map`)."""
+
     count = first = last = gaps = 0
     mapping_hash = hashlib.sha256()
     with path.open("r", encoding="utf-8", newline="") as stream:

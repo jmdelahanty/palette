@@ -337,62 +337,26 @@ scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jere
 # Dry run — preview plans
 scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jeremy/recordings \
   --recursive --dry-run --json
-
-# Apply — run detections with registry-backed model resolution
-scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jeremy/recordings \
-  --recursive --apply \
-  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite
-
-# Registry mode — only process recordings not yet detected
-scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jeremy/recordings \
-  --source registry \
-  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
-  --apply
 ```
+
+`run_detections_batch` is a planner only. `--apply` was retired on 2026-11-13
+(it refuses with a pointer to the artifact route): flat `detect_runs`
+publication has refused since 2026-08-14 (`05f133a4`), so `--apply` could only
+fail. Run detection through the artifact-first route below.
 
 It plans directly against `*_analysis.zarr` targets and skips archives that
 already have `detect_runs/latest` unless `--overwrite` is set.
 
-### LSF submit script
+### Retired: `submit_detect_batches_bsub.sh`
 
-```bash
-./scripts/submit_detect_batches_bsub.sh \
-  --root /groups/johnson/johnsonlab/jeremy/recordings \
-  --source registry \
-  --batch-size 15 \
-  --max-active 2 \
-  --queue short \
-  --ncores 4 \
-  --mem-gb 16 \
-  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
-  --require-tuning \
-  --dry-run
-```
-
-**Key options:**
-
-| Flag               | Default | Description                                      |
-|--------------------|---------|--------------------------------------------------|
-| `--root`           | `/groups/johnson/johnsonlab/jeremy/recordings` | Root recordings directory             |
-| `--source`         | `filesystem` | Discovery source (`filesystem` or `registry`) |
-| `--batch-size`     | `10`    | Analysis zarrs per batch job                     |
-| `--max-active`     | `2`     | Max concurrent jobs in array                     |
-| `--queue`          | *(default)* | LSF queue name                               |
-| `--ncores`         | `4`     | Cores per job                                    |
-| `--mem-gb`         | `16`    | Memory per job in GB                             |
-| `--registry`       | `/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite` | Registry path       |
-| `--config`         | `configs/fisheye/default.yaml` | Detection config     |
-| `--set-id`         | *(none)* | Detect model set filter                         |
-| `--require-tuning` | off     | Skip zarrs without detection_tuning              |
-| `--overwrite`      | off     | Rerun even if detect_runs/latest exists          |
-| `--dry-run`        | off     | Print manifests + commands; do not submit        |
-
-**Execution model:** Each batch job calls `run_detections_batch --apply` with
-a batch of Zarr paths. The runner resolves a registered model and its SHA-256,
-streams the canonical PRFS video, builds and validates the complete run under
-node-local scratch, then atomically publishes and activates the run. Direct
-writes into an existing canonical analysis Zarr are rejected before mutation.
-See `docs/detection_publication_contract.md`.
+`scripts/submit_detect_batches_bsub.sh` is retired (2026-11-13) and exits
+before submitting anything. Each of its jobs ran `run_detections_batch
+--apply`, which has refused every recording since flat `detect_runs`
+publication was retired on 2026-08-14 (`05f133a4`). Use
+`scripts/submit_detect_artifact_bsub.sh` for one recording, or the
+artifact-chain submitter `scripts/submit_detect_artifact_quality_refine_bsub.sh`
+described below for registry-scoped runs with quality and refinement. See
+`docs/detection_publication_contract.md`.
 
 Compute-only detection smoke:
 
@@ -1118,10 +1082,14 @@ target `subject_mask_runs` and `refined_subject_masks_runs`.
 To process all four stages sequentially using registry-backed discovery:
 
 ```bash
-# 1. Detection — no prerequisites
-./scripts/submit_detect_batches_bsub.sh \
-  --source registry --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
-  --batch-size 15 --max-active 2
+# 1. Detection — no prerequisites. Artifact-first chain (detect, import,
+#    validate, quality, refine); see "Chained Detect, Quality, And Refine
+#    Submission" below. Omit --submit for a dry run.
+./scripts/submit_detect_artifact_quality_refine_bsub.sh \
+  --root /groups/johnson/johnsonlab/jeremy/recordings \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --run-id detect_quality_refine_$(date -u +%Y%m%dT%H%M%SZ) \
+  --submit
 
 # 2. Crop — requires detect='ok'
 ./scripts/submit_crop_batches_bsub.sh \
@@ -1147,10 +1115,11 @@ then can be re-submitted.
 
 ### Scoping to a subset
 
-All submit scripts accept registry filters:
+The batch submit scripts accept registry filters (the detection chain accepts
+only `--path-contains`):
 
 ```bash
-./scripts/submit_detect_batches_bsub.sh \
+./scripts/submit_crop_batches_bsub.sh \
   --source registry \
   --rig-id rig_01 \
   --arena-id arena_A \
@@ -1195,7 +1164,7 @@ but does not submit to LSF. Use this to verify the target list before
 committing:
 
 ```bash
-./scripts/submit_detect_batches_bsub.sh --source registry --dry-run
+./scripts/submit_crop_batches_bsub.sh --source registry --dry-run
 ```
 
 ### Stable run IDs
@@ -1203,7 +1172,7 @@ committing:
 Use `--run-id` for deterministic reruns:
 
 ```bash
-./scripts/submit_detect_batches_bsub.sh --run-id my_rerun_001 --dry-run
+./scripts/submit_crop_batches_bsub.sh --run-id my_rerun_001 --dry-run
 ```
 
 ### Chained Detect, Quality, And Refine Submission

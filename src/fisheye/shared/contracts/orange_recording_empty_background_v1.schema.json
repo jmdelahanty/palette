@@ -1,0 +1,366 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orange.recording_empty_background.v1",
+  "title": "Orange recording empty-background binding (start-snapshot block; version 1 DRAFT)",
+  "description": "DRAFT 2026-11-02. recording_snapshot_start.json session.empty_background, written on EVERY recording, in one of two shapes chosen by capture_selected. false (no_capture): no capture was offered or the operator chose none; every recording camera is not_selected, a declared absence. true (capture_attached): the capture's descriptor is copied byte for byte to empty_background/background.json and each camera's median to empty_background/<image.relative_path>, for attached AND settings_changed cameras (Jeremy 2026-11-02: a settings drift is copied and flagged, never dropped; Palette refuses it unless the consumer handles the listed differences); no camera is not_selected. cameras is keyed by exact camera serial, one entry per recording camera (at least one), so every image in the recording copy maps to exactly one status. Frame rate is recorded in the descriptor and not checked. Consumer checks JSON Schema cannot express: an image's relative_path names its map key's serial; a copied image's sha256 equals the descriptor's for the same camera.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/no_capture"
+    },
+    {
+      "$ref": "#/$defs/capture_attached"
+    }
+  ],
+  "$defs": {
+    "no_capture": {
+      "x-orange-cpp-name": "OrangeRecordingEmptyBackgroundV1NoCapture",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capture_selected",
+        "cameras"
+      ],
+      "properties": {
+        "capture_selected": {
+          "const": false
+        },
+        "cameras": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "pattern": "^[0-9]{1,20}(?![\\s\\S])"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "not_selected",
+                "description": "No capture is attached to this recording."
+              }
+            }
+          },
+          "description": "Every recording camera, each not_selected."
+        }
+      }
+    },
+    "capture_attached": {
+      "x-orange-cpp-name": "OrangeRecordingEmptyBackgroundV1CaptureAttached",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capture_selected",
+        "selection_source",
+        "scene_unchanged_confirmed",
+        "capture_id",
+        "source_descriptor_path",
+        "descriptor",
+        "cameras"
+      ],
+      "properties": {
+        "capture_selected": {
+          "const": true
+        },
+        "selection_source": {
+          "enum": [
+            "gui_operator",
+            "headless_spec"
+          ]
+        },
+        "scene_unchanged_confirmed": {
+          "const": true,
+          "description": "GUI: the operator confirmed per recording that the scene is unchanged since the capture apart from adding the fish. Headless: naming the capture in the spec is the confirmation."
+        },
+        "capture_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_-]+(?![\\s\\S])"
+        },
+        "source_descriptor_path": {
+          "type": "string",
+          "pattern": "^/[^\\u0000\\r\\n]+(?![\\s\\S])",
+          "description": "Provenance only: the descriptor's path in the host's background store at record start. Readers must not resolve it; the recording copy (descriptor) and its sha256 are authoritative."
+        },
+        "descriptor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relative_path",
+            "size_bytes",
+            "sha256"
+          ],
+          "properties": {
+            "relative_path": {
+              "const": "empty_background/background.json"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 67108864
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
+            }
+          }
+        },
+        "cameras": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "pattern": "^[0-9]{1,20}(?![\\s\\S])"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "attached",
+                  "settings_changed",
+                  "missing_in_capture",
+                  "copy_failed"
+                ],
+                "description": "attached: settings match, image copied. settings_changed: image copied, settings_differences lists each checked setting that differs. missing_in_capture: the capture has no image for this camera, either because the camera is absent from the descriptor's cameras[] or because its capture_status there is failed; in the latter case failure_reason is that entry's failure_reason copied verbatim. copy_failed: the copy into the recording or its sha256 check failed; failure_reason says why."
+              },
+              "image": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "relative_path",
+                  "size_bytes",
+                  "sha256"
+                ],
+                "properties": {
+                  "relative_path": {
+                    "type": "string",
+                    "pattern": "^Cam[0-9]{1,20}_empty_background\\.png(?![\\s\\S])"
+                  },
+                  "size_bytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 67108864
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
+                  }
+                },
+                "description": "The copy at empty_background/<relative_path>; byte-identical to the capture's image for this camera (same relative_path, size_bytes and sha256 as the descriptor's entry; a consumer check)."
+              },
+              "settings_differences": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "setting",
+                    "capture_value",
+                    "recording_value"
+                  ],
+                  "properties": {
+                    "setting": {
+                      "enum": [
+                        "exposure_us",
+                        "gain",
+                        "iris",
+                        "focus",
+                        "width",
+                        "height",
+                        "offset_x",
+                        "offset_y"
+                      ]
+                    },
+                    "capture_value": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    },
+                    "recording_value": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 18446744073709551615
+                    }
+                  },
+                  "description": "One differing checked setting. Every checked setting is an unsigned integer at the source (see the descriptor's camera_configuration), so capture_value and recording_value have the same integer type as the matching camera_configuration field. pixel_format is Mono8 on both sides by schema, so it never appears here."
+                }
+              },
+              "failure_reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "attached"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "image"
+                  ]
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "attached"
+                    }
+                  }
+                },
+                "then": {
+                  "not": {
+                    "required": [
+                      "settings_differences"
+                    ]
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "attached"
+                    }
+                  }
+                },
+                "then": {
+                  "not": {
+                    "required": [
+                      "failure_reason"
+                    ]
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "settings_changed"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "image",
+                    "settings_differences"
+                  ]
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "settings_changed"
+                    }
+                  }
+                },
+                "then": {
+                  "not": {
+                    "required": [
+                      "failure_reason"
+                    ]
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "missing_in_capture"
+                    }
+                  }
+                },
+                "then": {
+                  "not": {
+                    "required": [
+                      "image"
+                    ]
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "missing_in_capture"
+                    }
+                  }
+                },
+                "then": {
+                  "not": {
+                    "required": [
+                      "settings_differences"
+                    ]
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "copy_failed"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "failure_reason"
+                  ]
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "copy_failed"
+                    }
+                  }
+                },
+                "then": {
+                  "not": {
+                    "required": [
+                      "image"
+                    ]
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "copy_failed"
+                    }
+                  }
+                },
+                "then": {
+                  "not": {
+                    "required": [
+                      "settings_differences"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "description": "Every recording camera, with its result against the attached capture."
+        }
+      }
+    }
+  }
+}
