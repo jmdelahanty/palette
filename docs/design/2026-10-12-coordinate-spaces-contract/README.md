@@ -495,7 +495,7 @@ Run on Jeremy's go. Rig `omnifin0`, `rig_geometry_revision` 16, rig file
     - 2010095 `1176435b…` (`bd7f865a…`);
     - 2010096 `af9058c4…` (`c48385b4…`).
   - Orange's camera centroids were thresholded at 153 DN on saturated disks, so they may be biased by up to one pixel. The result JSON does not pin the rig revision; revision 16 comes from the host at 17:29Z.
-- **Scan-out:** `xwd` of X screen `:1.1` (1920×1080) at 17:33:52Z, scene presented at 17:33:51.351Z; rig GUI `fde5467`. Files on pancake0: `screen_1_1.xwd` sha256 `74d30722bbe78f51a871751ec4ccc74607caa85f1096867ab8ec932c91c4e0de`, a PNG copy `ab1978e99ef085165e398d41cfef281d91eb3064f9677bf3f334fc60b9e33130`, and the scene status. They currently sit in a Citrus agent scratchpad and need staging somewhere durable.
+- **Scan-out:** `xwd` of X screen `:1.1` (1920×1080) at 17:33:52Z, scene presented at 17:33:51.351Z; rig GUI `fde5467`. Files on pancake0: `screen_1_1.xwd` sha256 `74d30722bbe78f51a871751ec4ccc74607caa85f1096867ab8ec932c91c4e0de`, a PNG copy `ab1978e99ef085165e398d41cfef281d91eb3064f9677bf3f334fc60b9e33130`, and the scene status. Staged durably on pancake0 at `/mnt/Data2/palette_delivery/omnifin0-orientation-check-20261115/` with the scene status (`scene_status.json` sha256 `387f1400e333b844fb7647e28a1a4ca6fc08ee06d0d887d2d25e5cf34bbcb393`), Citrus logs, `README.md` and `SHA256SUMS` (12 entries). Copying them to `/groups` is Jeremy's call.
 - **Active homographies:** set `calgrp_2026_11_13T00_27_59Z` (`homography_grid_projected_surface_g4`). Per arena, `homography_arena_N_<serial>.yml`, sha256s:
   - arena 1: `033f7b05…`, det −6.397e−3;
   - arena 2: `7da8a26f…`, det −6.379e−3;
