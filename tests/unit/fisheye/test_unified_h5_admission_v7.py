@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import h5py
+import numpy as np
 import pytest
 
 from fisheye.shared.unified_h5 import UnifiedH5ContractError
@@ -264,3 +266,32 @@ def test_a_phototaxis_v1_witness_has_no_overlay_and_is_unaffected():
         assert validate_video_overlay_states(h5, binding, camera_serial="CAM-42") == {
             "rows": 0, "superseded_box_rows": 0,
         }
+
+
+def _static_inputs_with_origin(tmp_path, axis, delta):
+    from fisheye.shared.unified_h5.geometry import INPUT, _matrix, _validate_static_inputs
+
+    copy = tmp_path / RIG
+    shutil.copyfile(OVERLAY / RIG, copy)
+    definition = contract("experimental_h5_geometry_v1.json")
+    with h5py.File(copy, "r+") as h5:
+        attrs = h5[INPUT].attrs
+        name = f"effective_arena_origin_{axis}_px"
+        original = attrs[name]
+        assert attrs[name].dtype == np.dtype("<f8")
+        attrs[name] = np.float64(float(original) + delta)
+        matrices = [_matrix(h5, INPUT + "/" + m) for m in definition["matrices"]]
+        _validate_static_inputs(h5, matrices)
+
+
+@pytest.mark.parametrize("axis", ["x", "y"])
+def test_arena_origin_integral_float_is_accepted(tmp_path, axis):
+    # palette#377 section 6c: Citrus stores the integer origin as <f8 (640.0).
+    _static_inputs_with_origin(tmp_path, axis, 0.0)
+
+
+@pytest.mark.parametrize("axis", ["x", "y"])
+@pytest.mark.parametrize("delta", [0.5, 0.25, 1e-9])
+def test_arena_origin_fractional_value_is_refused(tmp_path, axis, delta):
+    with pytest.raises(UnifiedH5ContractError, match="geometry_arena_origin_not_integral"):
+        _static_inputs_with_origin(tmp_path, axis, delta)
