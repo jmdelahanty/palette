@@ -829,7 +829,29 @@ _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 _RUN_STAMP = re.compile(r"[0-9]{8}_[0-9]{6}")
 
 
-def _declaring_requester(confirmed_by: str, requester: Mapping[str, Any]) -> dict[str, Any] | None:
+def _sealed_spec_copy(recording_dir: Path, sealed: Mapping[str, dict], requester: Mapping[str, Any]) -> str | None:
+    """The organized path of the sealed run_spec copy, or None if it is not proven.
+
+    Orange copies the spec bytes it ran to ``run_spec/<spec_sha256>.json`` in
+    the recording folder; the sealer's inventory covers it, so it is the
+    authority for ``spec_sha256`` (Jeremy, 2026-11-14).
+    """
+
+    sha = requester["spec_sha256"]
+    source_path = f"run_spec/{sha}.json"
+    item = sealed.get(source_path)
+    if requester.get("spec_copy_relative_path") != source_path or item is None or item["sha256"] != sha:
+        return None
+    path = Path(recording_dir) / item["relative_path"]
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != sha or len(data) != item["size_bytes"]:
+        raise ValueError(f"{source_path} differs from the sealed inventory: {path}")
+    return item["relative_path"]
+
+
+def _declaring_requester(
+    confirmed_by: str, requester: Mapping[str, Any], *, recording_dir: Path, sealed: Mapping[str, dict]
+) -> dict[str, Any] | None:
     """Recorded requester fields for a declared start, or None if malformed."""
 
     def nullable_str(value: Any) -> bool:
@@ -851,12 +873,16 @@ def _declaring_requester(confirmed_by: str, requester: Mapping[str, Any]) -> dic
             or not isinstance(requester.get("experiment_id"), str)
             or "user" not in requester or not nullable_str(requester["user"])):
         return None
-    # The spec is not sealed: spec_path/spec_sha256 name the experiment_specs/
-    # file orange_client read, a recorded claim that intake cannot check yet.
+    spec_copy = _sealed_spec_copy(recording_dir, sealed, requester)
+    if spec_copy is None:
+        return None
+    # spec_path names the experiment_specs/ file orange_client read (provenance);
+    # the sealed copy proves spec_sha256.
     return {
         "orange_requester_user": requester["user"],
         "orange_spec_path": requester["spec_path"],
         "orange_spec_sha256": sha,
+        "orange_spec_copy_path": spec_copy,
         "orange_run_stamp": stamp,
         "orange_experiment_id": requester["experiment_id"],
     }
@@ -871,14 +897,16 @@ def _sealed_json(recording_dir: Path, item: Mapping[str, Any], *, name: str) -> 
     return json.loads(data), digest
 
 
-def _subject_confirmation_origin(recording_dir: Path, item: Mapping[str, Any]) -> dict[str, Any]:
+def _subject_confirmation_origin(recording_dir: Path, sealed: Mapping[str, dict]) -> dict[str, Any]:
     """Origin of a sealed ``subject_confirmation.json``: who confirmed, and how.
 
     Either way each camera's reference is a per-camera claim, so the caller's
     strict cross-check is unchanged; only the recorded label differs.
     """
 
-    confirmation, digest = _sealed_json(recording_dir, item, name=ORANGE_SUBJECT_CONFIRMATION)
+    confirmation, digest = _sealed_json(
+        recording_dir, sealed[ORANGE_SUBJECT_CONFIRMATION], name=ORANGE_SUBJECT_CONFIRMATION
+    )
     if not isinstance(confirmation, Mapping) or (
         confirmation.get("schema_id") != ORANGE_SUBJECT_CONFIRMATION_SCHEMA_ID
     ):
@@ -900,7 +928,8 @@ def _subject_confirmation_origin(recording_dir: Path, item: Mapping[str, Any]) -
         declaration = confirmation.get("declaration")
         requester = confirmation.get("requester")
         recorded = _declaring_requester(
-            confirmed_by, requester if isinstance(requester, Mapping) else {}
+            confirmed_by, requester if isinstance(requester, Mapping) else {},
+            recording_dir=recording_dir, sealed=sealed,
         )
         if not (isinstance(declaration, Mapping)
                 and isinstance(declaration.get("declared_by"), str) and recorded is not None):
@@ -943,7 +972,7 @@ def _orange_reference_origin(
         # Orange 3b9a754+: every camera's dish was confirmed or declared at
         # start (a blank camera row deliberately follows the default), so it
         # is an observation that must agree.
-        return _subject_confirmation_origin(recording_dir, sealed[ORANGE_SUBJECT_CONFIRMATION])
+        return _subject_confirmation_origin(recording_dir, sealed)
     item = sealed.get("recording_snapshot_start.json")
     if item is None:
         return unproven

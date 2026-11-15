@@ -545,33 +545,45 @@ REMOTE_V2 = {
 }
 
 # Orange 86d02fc: a headless orange_client start whose spec has fixed.declaration.
+# The spec bytes it ran are sealed at run_spec/<spec_sha256>.json.
+SPEC_BYTES = b'{"experiment_id": "chaser", "fixed": {"declaration": {}}}\n'
+SPEC_SHA = hashlib.sha256(SPEC_BYTES).hexdigest()
 RUN_SPEC_V2 = {
     **REMOTE_V2,
     "confirmed_by": "run_spec",
     "requester": {"transport": "run_spec",
                   "spec_path": "/home/rig/orange/experiment_specs/chaser.json",
-                  "spec_sha256": "c" * 64, "run_stamp": "20261114_195922",
+                  "spec_sha256": SPEC_SHA, "spec_copy_relative_path": f"run_spec/{SPEC_SHA}.json",
+                  "run_stamp": "20261114_195922",
                   "experiment_id": "chaser_20261114_195922", "user": "rigaccount"},
 }
 
 
-def _seal_confirmation(plan, confirmation, *, tamper=False):
-    """Seal a subject_confirmation.json into the parent's transfer mapping."""
+def _seal_file(plan, source_path, data, *, tamper=False):
+    """Seal one source file into the parent's transfer mapping, as organized."""
 
-    relative = "raw/acquisition/subject_confirmation.json"
+    relative = f"raw/acquisition/{source_path}"
     path = plan.recording_dir / relative
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(confirmation).encode()
     path.write_bytes(data + b" " if tamper else data)
     manifest_path = plan.recording_dir / "recording_manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest.setdefault("source_transfer", {}).setdefault("source_to_parent_files", []).append({
         "relative_path": relative,
-        "source": {"path": "subject_confirmation.json",
+        "source": {"path": source_path,
                    "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)},
     })
     manifest_path.write_text(json.dumps(manifest))
     return hashlib.sha256(data).hexdigest()
+
+
+def _seal_confirmation(plan, confirmation, *, tamper=False, spec=SPEC_BYTES):
+    """Seal a subject_confirmation.json (and a run_spec's spec copy)."""
+
+    if confirmation.get("confirmed_by") == "run_spec" and spec is not None:
+        _seal_file(plan, f"run_spec/{hashlib.sha256(spec).hexdigest()}.json", spec)
+    return _seal_file(plan, "subject_confirmation.json", json.dumps(confirmation).encode(),
+                      tamper=tamper)
 
 
 def _agreeing_recording(tmp_path):
@@ -598,7 +610,8 @@ def _agreeing_recording(tmp_path):
                        "orange_declared_by": "someone@hhmi.org",
                        "orange_requester_user": "rigaccount",
                        "orange_spec_path": "/home/rig/orange/experiment_specs/chaser.json",
-                       "orange_spec_sha256": "c" * 64,
+                       "orange_spec_sha256": SPEC_SHA,
+                       "orange_spec_copy_path": f"raw/acquisition/run_spec/{SPEC_SHA}.json",
                        "orange_run_stamp": "20261114_195922",
                        "orange_experiment_id": "chaser_20261114_195922"}),
         ({**RUN_SPEC_V2, "requester": {**RUN_SPEC_V2["requester"], "run_stamp": None,
@@ -606,7 +619,9 @@ def _agreeing_recording(tmp_path):
          {"orange_reference_origin": "spec_declared", "orange_confirmed_by": "run_spec",
           "orange_declared_by": "someone@hhmi.org", "orange_requester_user": None,
           "orange_spec_path": "/home/rig/orange/experiment_specs/chaser.json",
-          "orange_spec_sha256": "c" * 64, "orange_run_stamp": None,
+          "orange_spec_sha256": SPEC_SHA,
+          "orange_spec_copy_path": f"raw/acquisition/run_spec/{SPEC_SHA}.json",
+          "orange_run_stamp": None,
           "orange_experiment_id": ""}),
     ],
 )
@@ -635,7 +650,10 @@ def test_subject_confirmation_origin_names_who_confirmed(tmp_path, confirmation,
         ({**RUN_SPEC_V2, "declaration": None}, "needs declaration"),
         ({**RUN_SPEC_V2, "requester": REMOTE_V2["requester"]}, "needs declaration"),
         *[({**RUN_SPEC_V2, "requester": {**RUN_SPEC_V2["requester"], **bad}}, "needs declaration")
-          for bad in ({"spec_sha256": "C" * 64}, {"spec_sha256": "c" * 63},
+          for bad in ({"spec_sha256": SPEC_SHA.upper()}, {"spec_sha256": SPEC_SHA[:63]},
+                      {"spec_sha256": "c" * 64},  # names a spec that was not sealed
+                      {"spec_copy_relative_path": None},
+                      {"spec_copy_relative_path": f"other/{SPEC_SHA}.json"},
                       {"run_stamp": "2026-11-14"}, {"spec_path": None},
                       {"experiment_id": None}, {"transport": "local_control_socket"})],
         ({**RUN_SPEC_V2, "requester": {k: v for k, v in RUN_SPEC_V2["requester"].items()
@@ -689,10 +707,24 @@ def test_the_first_real_remote_start_confirmation_is_labelled(tmp_path):
     assert digest == "24a185289b068c519bca8e84b75fe034b16be0ef7fdc77841d02eceb44f23f79"
     (tmp_path / "subject_confirmation.json").write_bytes(data)
     item = {"relative_path": "subject_confirmation.json", "sha256": digest, "size_bytes": len(data)}
-    assert importer._subject_confirmation_origin(tmp_path, item) == {
+    assert importer._subject_confirmation_origin(tmp_path, {"subject_confirmation.json": item}) == {
         "orange_reference_origin": "local_control_declared",
         "orange_confirmed_by": "local_control",
         "orange_subject_confirmation_sha256": digest,
         "orange_declared_by": "delahantyj",
         "orange_requester_user": "jeremy",
     }
+
+
+@pytest.mark.parametrize("spec, tamper", [(None, False), (b"{}\n", False), (SPEC_BYTES, True)])
+def test_a_run_spec_without_its_sealed_spec_bytes_refuses(tmp_path, spec, tamper):
+    importer, plan = _agreeing_recording(tmp_path)
+    if tamper:
+        _seal_confirmation(plan, RUN_SPEC_V2, spec=None)
+        _seal_file(plan, f"run_spec/{SPEC_SHA}.json", SPEC_BYTES, tamper=True)
+        match = "differs from the sealed inventory"
+    else:
+        _seal_confirmation(plan, RUN_SPEC_V2, spec=spec)  # none, or another spec
+        match = "needs declaration"
+    with pytest.raises(ValueError, match=match):
+        importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
