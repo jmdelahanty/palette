@@ -94,7 +94,7 @@ One canonical id per space. Every space is 2-D, +x right, +y down, units px unle
 | `camera.crop_px.v1` | Orange | one crop window inside `camera.recorded_px` | A pure translation by the window origin. Orange clamps the window inside the frame, and both origin ints must be declared as the crop's top-left. |
 | `palette.roi_px.v1` | Palette | Palette's requested ROI window inside `camera.recorded_px` | A translation, zero-padded outside the frame (`requested_window_zero_padded_v1`). Not the same rule as Orange's clamping; each declares its own. |
 | `palette.model_input_px.v1` | Palette | the detector or pose model input tensor | A scale and translation from `palette.roi_px` or `camera.recorded_px`, declared per run. |
-| `citrus.display_canvas_px.v1` | Citrus | the logical final display canvas Citrus renders into (= one xrandr output's `W×H`) | The homography's destination. Extent comes from the session's `stimulus_output_{width,height}`, which must equal xrandr `W×H` (§5). |
+| `citrus.display_canvas_px.v1` | Citrus | the logical final display canvas Citrus renders into (= one xrandr output's `W×H`), **y-reflected relative to scan-out** (measured 2026-11-15, §10) | The homography's destination. Extent comes from the session's `stimulus_output_{width,height}`, which must equal xrandr `W×H` (§5). Canvas `(x, y)` is shown at scan-out `(x, H − 1 − y)` (pixel-centre indices), so canvas `(0, 0)` is the scan-out's **bottom-left**. |
 | `citrus.framebuffer_px.v1` | Citrus | the OpenGL framebuffer | Declared by Citrus as the canvas reflected once vertically (`presentation.py:132-140`). |
 | `citrus.stimulus_video_px.v1` | Citrus | the encoded stimulus video raster | Declared as reflected once (`presentation.py:123-131`). |
 | `citrus.arena_canvas_px.v1` | Citrus | the active arena rectangle inside `citrus.display_canvas_px` | A translation by the arena origin. The origin must be integer px (§6c). |
@@ -471,12 +471,51 @@ session, handed over by PR-monitor.
 - Its agent-contracts home is `citrus-palette/coordinate_spaces_v1/citrus_declared_orientation_check_v1.schema.json`, plus an admission note like z_eff's: an attrs-only group under `/geometry/calibration` rides v7. Palette vendors the schema only after that entry exists.
 - #115 also changes Citrus's `selected_output_transform_token` to the current rotation. That matches palette#450. Files sealed before #115 need no change: Palette never trusted that attr alone, and all 236 legacy H5s re-derive `normal`/unreflected from their sealed raw block.
 
-**New open point: presentation parity.**
+**Presentation parity: resolved by measurement (see "Orientation check" below).** Kept for the record:
 - #115's rule is `sign(det) = handedness × presentation_parity × xrandr_reflection`, with `presentation_parity = −1`. That value is a Citrus code constant (`presentation_mapping_contract.cpp`, `display_reflection = [[1,0,0],[0,−1,H],[0,0,1]]`), not a measurement.
 - omnifin0's `rig.yml` also declares a vertical firmware flip. So "−1 × vertical flip" and "+1 × no flip" give the same det, and the det cannot tell them apart.
 - If the presentation reflection really is applied at scan-out, then `citrus.display_canvas_px` is bottom-left-origin in xrandr output pixels, and the §2 row ("top-left of … one xrandr output") is wrong.
 - omnifin0 fits made before 2026-08-10 have det > 0 under the same presentation code, and nothing explains that yet.
 - Check proposed to Citrus: render a marker at canvas (0, 0) and capture DP-2's X screen. It needs no camera or filters, but it is a rig session, so it needs Jeremy's OK after Orange's hold clears.
+
+### Orientation check, omnifin0, 2026-11-15 (NIR filters off)
+
+Run on Jeremy's go. Rig `omnifin0`, `rig_geometry_revision` 16, rig file
+`sha256:1934857fe156e7d3aa3873602760b67ce3ae1e74be181a8ddbd0e9df3f0c0332`.
+
+**Pattern.** Citrus `static_dots`, white on black, in every arena: a 6 mm disk at the `top_left` preset and a 3 mm disk at `top_right`.
+
+**Evidence (held by its producers; nothing is transferred yet, which is Jeremy's to start):**
+- **Camera:** Orange guided capture, calibration session `calsess_2026_11_15T17_29_47Z_shadow`, commissioning record `omnifin0_20261115T172434Z_orientation_check_nir_filters_off_static_dots` step 02; 10 frames per camera at 10 ms, plus `black_reference`. Orange holds the files and their shas.
+- **Scan-out:** `xwd` of X screen `:1.1` (1920×1080) at 17:33:52Z, scene presented at 17:33:51.351Z; rig GUI `fde5467`. Files on pancake0: `screen_1_1.xwd` sha256 `74d30722bbe78f51a871751ec4ccc74607caa85f1096867ab8ec932c91c4e0de`, a PNG copy `ab1978e99ef085165e398d41cfef281d91eb3064f9677bf3f334fc60b9e33130`, and the scene status. They currently sit in a Citrus agent scratchpad and need staging somewhere durable.
+- **Active homographies:** set `calgrp_2026_11_13T00_27_59Z` (`homography_grid_projected_surface_g4`). Per arena, `homography_arena_N_<serial>.yml`, sha256s:
+  - arena 1: `033f7b05…`, det −6.397e−3;
+  - arena 2: `7da8a26f…`, det −6.379e−3;
+  - arena 3: `a8e7dea6…`, det −6.391e−3;
+  - arena 4: `720d5c13…`, det −6.381e−3.
+
+**Per-dot measurements** (canvas centre from the scene status; scan-out centroid from the xwd; camera centroid from Orange):
+
+| Arena (camera) | Dot | Canvas centre | Scan-out | Camera px |
+|---|---|---|---|---|
+| 1 (2010093) | tl | (186.7, 264.7) | (186.8, 814.2) | (1390, 3114) |
+| 1 (2010093) | tr | (324.0, 262.0) | (323.9, 816.9) | (3119, 3149) |
+| 2 (2010094) | tl | (642.7, 270.7) | (642.8, 808.2) | (1405, 3088) |
+| 2 (2010094) | tr | (780.0, 268.0) | (780.0, 811.0) | (3127, 3124) |
+| 3 (2010095) | tl | (1107.6, 264.6) | (1107.7, 814.3) | (1368, 3108) |
+| 3 (2010095) | tr | (1245.0, 262.0) | (1245.2, 817.2) | (3092, 3139) |
+| 4 (2010096) | tl | (1579.5, 255.5) | (1579.6, 823.4) | (1378, 3099) |
+| 4 (2010096) | tr | (1717.2, 252.8) | (1717.2, 826.2) | (3099, 3125) |
+
+**Findings:**
+1. **Presentation parity is −1, measured.** On scan-out, every blob sits at `y = 1079 − canvas_y` (±0.1 px) with x unchanged, and the blob pixel counts equal the scene's. §2 is corrected above. #115's `kPresentationParity = −1` is confirmed, and the vertical firmware flip is now pinned separately from it.
+2. **Camera ↔ canvas handedness: x preserved, y reflected (det < 0) on all four arenas.**
+   - Through the active 11-13 homographies, every camera blob lands within 1.6 px of its canvas centre, with `w` = 0.996–1.000 (Citrus).
+   - Palette checked independently with the homography sealed in the 10-17/18 phototaxis H5s, which is the same matrix in every Citrus H5 from 2026-10-09 to 2026-11-06, det < 0. It maps today's camera blobs onto the commanded dots within 0.2–8 px (≤ about 2 mm at about 4.2 canvas px/mm). Every dot lands in its commanded corner.
+   - The residual is the known November projector move (0.65–2.0 mm), a translation rather than a flip.
+3. **10-17/18 phototaxis sessions.** Per Jeremy's decision, this check plus his statement that projector orientation did not change since October lifts `orientation_unverified` for the camera ↔ canvas link of those sessions.
+4. **Still declared only: camera parity relative to the dish.** This check shows camera and projected canvas agree. It does not show the camera image is unmirrored relative to the fish. If it were, stimuli would still land on the body-frame "left", but that would be anatomical right. That link rests on Q-O2/Q-O4 (no ReverseX/Y nodes, dorsal view, `rig.yml` mirror count 0). A printed asymmetric target in a dish would measure it. Whether to require that is Jeremy's call.
+5. *Unrelated:* Cam2010096 has a saturated spot near (754, 345) that is also in `black_reference`, so it is not from the projector.
 
 **Still blocking the move to agent-contracts:**
 - the presentation-parity check above and the asymmetric-pattern check;
