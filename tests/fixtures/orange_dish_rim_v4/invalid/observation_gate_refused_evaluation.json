@@ -1,0 +1,535 @@
+{
+ "acceptance": {
+  "accepted_at_utc": "2026-11-04T01:00:16Z",
+  "basis": "quality_gate",
+  "gate": {
+   "camera_serial": "2010093",
+   "checks": {
+    "change_from_anchor": {
+     "anchor": {
+      "acceptance_basis": "operator_review",
+      "artifact_id": "dishrim_2026-11-04T01_00_16Z_2010093",
+      "center_px": {
+       "x": 2245.810546875,
+       "y": 2198.994140625
+      },
+      "created_utc": "2026-11-04T01:00:16Z",
+      "observation_sha256": "sha256:ae2f3f3867078df4d08ecd3832bf361db5ece7d018f13d9acaf4a7e183b81c26",
+      "radius_px": 2165.671875
+     },
+     "center_shift_mm": 0.0002258343586566157,
+     "center_shift_px": 0.012065191571310132,
+     "max_center_shift_mm": 2.526908772102699,
+     "max_center_shift_px": 135.0,
+     "max_radius_change_mm": 0.6551244964710701,
+     "max_radius_change_px": 35.0,
+     "passed": false,
+     "px_per_mm": 53.42495997101763,
+     "radius_change_mm": 4.517141896426642,
+     "radius_change_px": 241.328125
+    },
+    "edge_support": {
+     "fraction": 0.15,
+     "min_fraction": 0.4,
+     "min_step_dn": 12.0,
+     "passed": false,
+     "point_count": 720,
+     "search_px": 6.0
+    },
+    "first_hough_pass": {
+     "hough_pass_index": 2,
+     "passed": false,
+     "required_pass_index": 1
+    },
+    "radius_in_physical_range": {
+     "accept_high_mm": 40.800000000000004,
+     "accept_high_px": 2182.768670502868,
+     "accept_low_mm": 39.199999999999996,
+     "accept_low_px": 2091.346962617183,
+     "expected_high_px": 2139.9692848067334,
+     "expected_low_px": 2134.0275128746766,
+     "passed": false,
+     "px_per_mm_high": 53.49923212016833,
+     "px_per_mm_low": 53.35068782186692,
+     "radius_mm": 45.05384751445331,
+     "radius_px": 2407.0,
+     "tolerance_fraction": 0.02,
+     "z_high_mm": 10.93,
+     "z_low_mm": 8.82947486871718
+    }
+   },
+   "declared_by": "delahantyj",
+   "drift": {
+    "anchor": {
+     "acceptance_basis": "operator_review",
+     "artifact_id": "dishrim_2026-11-04T01_00_16Z_2010093",
+     "created_utc": "2026-11-04T01:00:16Z",
+     "observation_sha256": "sha256:ae2f3f3867078df4d08ecd3832bf361db5ece7d018f13d9acaf4a7e183b81c26"
+    },
+    "chain_depth": 1,
+    "rule": "compare_to_last_operator_reviewed_fit"
+   },
+   "evaluated_at_utc": "2026-11-04T01:00:16Z",
+   "failures": [
+    "radius_outside_physical_range",
+    "radius_change_exceeds_limit",
+    "edge_support_below_limit",
+    "fallback_hough_pass"
+   ],
+   "fit": {
+    "center_px": {
+     "x": 2245.8,
+     "y": 2199.0
+    },
+    "image_height_px": 4512,
+    "image_width_px": 4512,
+    "radius_px": 2407.0
+   },
+   "gate_id": "orange_dish_rim_auto_accept_v1",
+   "gate_version": 1,
+   "inputs": {
+    "dish": {
+     "inner_diameter_mm": 80.0,
+     "inner_diameter_source": "hardware_library tank.fish_imaging.palm1/palm2 inner_diameter (e024fcb): declared by the dish design, not calipered",
+     "wall_height_mm": 2.8,
+     "wall_height_source": "hardware_library tank.fish_imaging.palm1/palm2 wall_height: calipered by the rig admin 2026-11-14",
+     "water_refractive_index": 1.333
+    },
+    "fish_plane_scale": {
+     "e_mm": 1.5,
+     "k_px": 40360.772210471114,
+     "p_floor_mm": 8.13,
+     "path": "/home/jeremy/orange_data/calibrations/commissioning/omnifin0_20261113T230405Z_wet_commissioning_holder_check_fish_plane_scale_/steps/08_fish_plane_scale/fish_plane_scale.json",
+     "s_floor_px_per_mm": 53.407201731165216,
+     "sha256": "sha256:47a9f05038cb015fc17a27e33c1a0280f15e1348154f7664f16e819871833b10"
+    },
+    "rig_config": {
+     "path": "/etc/pancakebatter/rigs/omnifin0.yml",
+     "rig_geometry_revision": 16,
+     "rig_id": "omnifin0",
+     "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "status": "pinned"
+    }
+   },
+   "orange_build": {
+    "available": true,
+    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "commit_short": "aaaaaaa",
+    "dirty_tracked": false
+   },
+   "outcome": "refused",
+   "requester": {
+    "command_source": "orange_local_control_client",
+    "operation_id": "op1",
+    "peer": {
+     "gid": 1000,
+     "pid": 4242,
+     "uid": 1000,
+     "user": "jeremy"
+    },
+    "received_at_utc": "2026-11-04T01:00:14Z",
+    "request_id": "r1",
+    "transport": "local_control_socket"
+   },
+   "schema_id": "orange.calibration.dish_rim_gate_evaluation",
+   "schema_version": 1
+  }
+ },
+ "accepted_experimental_area_boundary": {
+  "accepted_at_utc": "2026-11-04T01:00:16Z",
+  "accepted_by_operator": true,
+  "alias_of": "accepted_inner_rim_boundary",
+  "asserts_citrus_acceptance": false,
+  "boundary_inclusion_policy": "follow_observed_inner_rim_without_silent_offset",
+  "camera_scale": {
+   "accepted_radius_px": 2165.671875,
+   "comparison_reference": {
+    "authoritative_for_dish_top_rim": false,
+    "pixels_per_mm": 52.731327056884766,
+    "purpose": "cross_plane_diagnostic_only",
+    "target_plane": "projected_surface"
+   },
+   "coordinate_space": "camera_native_pixels",
+   "derivation": "accepted_camera_radius_px_divided_by_physical_inner_radius_mm",
+   "mm_per_pixel": 0.01847001868646422,
+   "physical_radius_mm": 40.0,
+   "pixels_per_mm": 54.141796875,
+   "target_plane": "dish_top_rim"
+  },
+  "compatibility_alias": true,
+  "coordinate_space": "camera_native_pixels",
+  "geometry": {
+   "center_px": {
+    "x": 2245.810546875,
+    "y": 2198.994140625
+   },
+   "radius_px": 2165.671875,
+   "type": "circle"
+  },
+  "interpretation": "compatibility_alias_of_accepted_inner_rim_boundary",
+  "operator_adjustment_px": {
+   "center_dx": 0.0,
+   "center_dy": 0.0,
+   "radius_delta": 0.0
+  },
+  "operator_boundary_target": "dish_inner_rim_water_side_edge",
+  "operator_confirmed": true,
+  "physical_geometry": {
+   "center_mm": {
+    "x": 0.0,
+    "y": 0.0
+   },
+   "coordinate_space": "dish_top_rim_mm",
+   "diameter_mm": 80.0,
+   "dimension_source": "/home/jeremy/citrus/targets/rigs/omnifin0/shadow/shadow.json#dish_config.dimensions.diameter_mm",
+   "dish_design_id": "palm1",
+   "radius_mm": 40.0,
+   "type": "circle"
+  },
+  "physical_target": "dish_top_rim",
+  "region": "water_accessible_footprint",
+  "role": "citrus_experimental_area_boundary",
+  "source_boundary": "observed_boundary",
+  "target_feature": "dish_inner_rim_water_side_edge",
+  "target_plane": "dish_top_rim"
+ },
+ "accepted_inner_rim_boundary": {
+  "accepted_at_utc": "2026-11-04T01:00:16Z",
+  "accepted_by_operator": false,
+  "boundary_inclusion_policy": "follow_observed_inner_rim_without_silent_offset",
+  "camera_scale": {
+   "accepted_radius_px": 2165.671875,
+   "comparison_reference": {
+    "authoritative_for_dish_top_rim": false,
+    "pixels_per_mm": 52.731327056884766,
+    "purpose": "cross_plane_diagnostic_only",
+    "target_plane": "projected_surface"
+   },
+   "coordinate_space": "camera_native_pixels",
+   "derivation": "accepted_camera_radius_px_divided_by_physical_inner_radius_mm",
+   "mm_per_pixel": 0.01847001868646422,
+   "physical_radius_mm": 40.0,
+   "pixels_per_mm": 54.141796875,
+   "target_plane": "dish_top_rim"
+  },
+  "coordinate_space": "camera_native_pixels",
+  "geometry": {
+   "center_px": {
+    "x": 2245.810546875,
+    "y": 2198.994140625
+   },
+   "radius_px": 2165.671875,
+   "type": "circle"
+  },
+  "interpretation": "operator_confirmed_dish_inner_rim_water_side_edge",
+  "operator_adjustment_px": {
+   "center_dx": 0.0,
+   "center_dy": 0.0,
+   "radius_delta": 0.0
+  },
+  "operator_boundary_target": "dish_inner_rim_water_side_edge",
+  "operator_confirmed": false,
+  "physical_geometry": {
+   "center_mm": {
+    "x": 0.0,
+    "y": 0.0
+   },
+   "coordinate_space": "dish_top_rim_mm",
+   "diameter_mm": 80.0,
+   "dimension_source": "/home/jeremy/citrus/targets/rigs/omnifin0/shadow/shadow.json#dish_config.dimensions.diameter_mm",
+   "dish_design_id": "palm1",
+   "radius_mm": 40.0,
+   "type": "circle"
+  },
+  "physical_target": "dish_top_rim",
+  "region": "water_accessible_footprint",
+  "role": "orange_physical_boundary_evidence",
+  "source_boundary": "observed_boundary",
+  "target_feature": "dish_inner_rim_water_side_edge",
+  "target_plane": "dish_top_rim"
+ },
+ "accepted_mask": {
+  "accepted_at_utc": "2026-11-04T01:00:16Z",
+  "accepted_by_operator": false,
+  "center_px": {
+   "x": 2245.810546875,
+   "y": 2198.994140625
+  },
+  "coordinate_space": "camera_native_pixels",
+  "derived_from": "accepted_inner_rim_boundary",
+  "image_shape_px": {
+   "height": 4512,
+   "width": 4512
+  },
+  "operator_adjustment_px": {
+   "center_dx": 0.0,
+   "center_dy": 0.0,
+   "radius_delta": 16.904353665071895
+  },
+  "operator_confirmed": false,
+  "physical_radius_mm": 40.312223728076475,
+  "physical_scale_ref": "accepted_inner_rim_boundary.camera_scale",
+  "radius_px": 2182.576228665072,
+  "shape": "circle",
+  "source_array_role": "images_full",
+  "source_image_index": 0
+ },
+ "arena_context": {
+  "arena_id": "arena_1",
+  "associated_image_set_artifact_id": "Cam2010093_arena_1",
+  "camera_serial": "2010093",
+  "canvas_id": "shadow",
+  "citrus_camera_id": "2010093",
+  "citrus_config_ref": {
+   "config_name": "arena_1",
+   "path": "/home/jeremy/citrus/targets/rigs/omnifin0/shadow/shadow.json",
+   "source": "spatial_layout_import"
+  },
+  "citrus_homography_ref": {
+   "available": true,
+   "direction": "camera_view_px_to_final_display_canvas_px",
+   "source": "citrus_homography_sidecar"
+  },
+  "rig_id": "omnifin0",
+  "spatial_layout_registration": {
+   "accepted_circle_source": "orange_spatial_layout_runtime.outer_geometry",
+   "authority": "orange_review_context_only",
+   "editor_parameters": {
+    "centroid_gate_outset_px": 16.904353665071895,
+    "edge_margin_px": 0.0,
+    "rotation_deg_clockwise": 0.0,
+    "scale_px_per_layout_unit": 11.269569110047929,
+    "translate_x_px": 306.36454396170825,
+    "translate_y_px": 306.36454396170825
+   },
+   "hough_circle_source": "orange_spatial_layout_ui_cached_hough_scaled_to_full_resolution",
+   "schema_id": "orange.spatial_layout.registration_snapshot",
+   "schema_version": 1,
+   "semantics": "view_registration_used_to_render_accepted_dish_fit_at_save_time",
+   "view_registration": {
+    "camera_to_layout_matrix": [
+     0.0887345372511538,
+     0.0,
+     -27.185116038602942,
+     0.0,
+     0.0887345372511538,
+     -27.185116038602942,
+     0.0,
+     0.0,
+     1.0
+    ],
+    "fit_point_count": 0,
+    "layout_coordinate_space": "layout_units",
+    "layout_to_camera_matrix": [
+     11.269569110047929,
+     0.0,
+     306.36454396170825,
+     0.0,
+     11.269569110047929,
+     306.36454396170825,
+     0.0,
+     0.0,
+     1.0
+    ],
+    "orientation_status": "unknown",
+    "residual_px": 0.0,
+    "source": "manual_fit",
+    "type": "similarity"
+   }
+  }
+ },
+ "artifact_id": "dishrim_2026-11-04T01_00_16Z_2010093",
+ "artifacts": {
+  "checksum_algorithm": "fnv1a64",
+  "image_set_path": "image_set.json",
+  "observation_path": "observation.json",
+  "registration_hough_overlay_checksum": "fnv1a64:78b75a0dfb4459b6",
+  "registration_hough_overlay_path": "overlays/registration_hough_overlay.png",
+  "review_overlay_checksum": "fnv1a64:78b75a0dfb4459b6",
+  "review_overlay_path": "overlays/top_rim_fit.png",
+  "source_frame_checksum": "fnv1a64:bf54fd57bc2ff7b4",
+  "source_frame_path": "captures/source_frame.png",
+  "valid_detection_overlay_checksum": "fnv1a64:78b75a0dfb4459b6",
+  "valid_detection_overlay_path": "overlays/valid_detection_region.png"
+ },
+ "boundary_interpretation": {
+  "accepted_boundary_field": "accepted_inner_rim_boundary",
+  "accepted_boundary_role": "orange_physical_boundary_evidence",
+  "accepted_boundary_semantics": "operator_confirmed_dish_inner_rim_water_side_edge",
+  "boundary_inclusion_policy": "follow_observed_inner_rim_without_silent_offset",
+  "citrus_runtime_mapping_status": "proposal_pending_citrus_acceptance",
+  "observed_boundary_surface": "dish_top_rim",
+  "operator_boundary_target": "dish_inner_rim_water_side_edge",
+  "region": "water_accessible_footprint",
+  "target_feature": "dish_inner_rim_water_side_edge",
+  "target_plane": "dish_top_rim",
+  "valid_detection_region_policy": "derived_by_outward_offset_for_bounding_box_centroid_forgiveness"
+ },
+ "calibration_ref": {
+  "artifact_id": "dishrim_2026-11-04T01_00_16Z_2010093",
+  "artifact_schema_id": "orange.calibration.dish_top_rim_observation",
+  "artifact_schema_version": 3,
+  "fingerprint": "fnv1a64:5eab264d20cc8dad"
+ },
+ "camera": {
+  "height": 4512,
+  "name": "Cam2010093",
+  "pixel_format": "Mono8",
+  "serial": "2010093",
+  "width": 4512
+ },
+ "capture": {
+  "capture_mode": "operator_group_temporal_mean",
+  "dish_fill_state": "unknown",
+  "exposure_us": 100.0,
+  "filter_state": "installed: HOYA Creative Filter Infrared R72 67 mm (Kenko Tokina)",
+  "first_camera_frame_id": 14608,
+  "first_stream_frame_id": 14608,
+  "frame_rate_hz": 100.0,
+  "illumination": {
+   "center_wavelength_nm": 855.0,
+   "source": "custom_ttl_nir_strobe",
+   "spectrum": "narrowband_nir",
+   "wavelength_confidence": "nominal"
+  },
+  "last_camera_frame_id": 17558,
+  "last_stream_frame_id": 17558,
+  "light_handling": "keep_or_restore_mapped_pulse",
+  "light_state": "ttl_nir_strobe_active",
+  "operation_id": "spatial_layout_top_rim_dishrim_2026-11-04T01_00_16Z_2010093",
+  "projector_state": "black_reference",
+  "projector_visible_to_camera": false,
+  "requires_camera_mount_unchanged": true,
+  "requires_filter_reinstalled_repeatably": false,
+  "runtime_filter_state": "installed: HOYA Creative Filter Infrared R72 67 mm (Kenko Tokina)",
+  "source_frame_count": 60,
+  "temporal_compositing_method": "temporal_mean_stream_frames_v1"
+ },
+ "circle_detection": {
+  "detected_circle": {
+   "center_px": {
+    "x": 2245.810546875,
+    "y": 2198.994140625
+   },
+   "radius_px": 2165.671875
+  },
+  "detected_circle_source": "orange_guided_daily_registration_cached_hough_full_resolution",
+  "hough_params": {
+   "detection_scale": 0.45390070921985815,
+   "dp": 1.25,
+   "max_detection_dimension_px": 2048,
+   "max_radius_px": 2211,
+   "min_dist_px": 902.4000000000001,
+   "min_radius_px": 812,
+   "param1": 120.0,
+   "param2": 30.0,
+   "radius_adjustment_px": 0.0
+  },
+  "image_shape_px": {
+   "height": 4512,
+   "width": 4512
+  },
+  "method": "orange_acquisition_circle_hough_operator_confirmed_inner_rim_v2",
+  "source_array_role": "images_full",
+  "source_image_index": 0
+ },
+ "compatibility_exports": {
+  "palette_dish_mask_v2": {
+   "available": true,
+   "mapping": "orange_circle_mask_to_palette_dish_mask_v2",
+   "path": "exports/palette_dish_mask_v2.json",
+   "target": "analysis_metadata.attrs.dish_mask"
+  },
+  "spatial_dish_mask_runtime_v1": {
+   "available": true,
+   "mapping": "orange_top_rim_observation_to_spatial_dish_mask_runtime_v1",
+   "path": "exports/spatial_dish_mask_runtime_v1.json",
+   "target": "dish_mask_runtime.json"
+  }
+ },
+ "created_utc": "2026-11-04T01:00:16Z",
+ "observed_boundary": {
+  "coordinate_space": "camera_native_pixels",
+  "geometry": {
+   "center_px": {
+    "x": 2245.810546875,
+    "y": 2198.994140625
+   },
+   "radius_px": 2165.671875,
+   "type": "circle"
+  },
+  "region": "water_accessible_footprint",
+  "surface": "dish_top_rim",
+  "target_feature": "dish_inner_rim_water_side_edge",
+  "target_plane": "dish_top_rim"
+ },
+ "physical_target": "dish_top_rim",
+ "quality": {
+  "detector": "hough_circle",
+  "operator_confirmed": false,
+  "quality_flags": []
+ },
+ "registration_products": {
+  "physical_registration": {
+   "authority": "orange",
+   "citrus_required": false,
+   "coordinate_space": "camera_native_pixels",
+   "product_id": "daily_physical_dish_registration",
+   "runtime_selection_status": "not_selected_by_artifact_writer",
+   "status": "accepted"
+  },
+  "projection_registration": {
+   "authority": "citrus",
+   "product_id": "daily_projection_registration",
+   "reason": "physical_artifact_writer_does_not_select_projection_runtime",
+   "status": "available_not_selected"
+  }
+ },
+ "review_artifacts": {
+  "registration_hough_overlay_checksum": "fnv1a64:78b75a0dfb4459b6",
+  "registration_hough_overlay_checksum_algorithm": "fnv1a64",
+  "registration_hough_overlay_path": "overlays/registration_hough_overlay.png",
+  "top_rim_overlay_checksum": "fnv1a64:78b75a0dfb4459b6",
+  "top_rim_overlay_checksum_algorithm": "fnv1a64",
+  "top_rim_overlay_path": "overlays/top_rim_fit.png",
+  "valid_detection_overlay_checksum": "fnv1a64:78b75a0dfb4459b6",
+  "valid_detection_overlay_checksum_algorithm": "fnv1a64",
+  "valid_detection_overlay_path": "overlays/valid_detection_region.png"
+ },
+ "runtime_verification": {
+  "reason": "runtime_850nm_rim_not_verified",
+  "status": "unknown"
+ },
+ "schema_id": "orange.calibration.dish_top_rim_observation",
+ "schema_version": 4,
+ "software": {
+  "orange_git_commit": "",
+  "orange_git_dirty_tracked": false,
+  "orange_version": ""
+ },
+ "source_frames": [
+  {
+   "checksum": "fnv1a64:bf54fd57bc2ff7b4",
+   "checksum_algorithm": "fnv1a64",
+   "path": "captures/source_frame.png",
+   "role": "source_frame"
+  }
+ ],
+ "valid_detection_region": {
+  "centroid_gate_outset_mm": 0.3122237280764778,
+  "centroid_gate_outset_px": 16.904353665071895,
+  "coordinate_space": "camera_native_pixels",
+  "derived_from": "accepted_inner_rim_boundary",
+  "erosion_px": 0.0,
+  "geometry": {
+   "center_px": {
+    "x": 2245.810546875,
+    "y": 2198.994140625
+   },
+   "radius_px": 2182.576228665072,
+   "type": "circle"
+  },
+  "offset_direction": "outward",
+  "purpose": "bounding_box_centroid_detection_gating"
+ }
+}

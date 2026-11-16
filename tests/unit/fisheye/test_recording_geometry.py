@@ -29,6 +29,14 @@ from fisheye.shared.recording_geometry_recovery import (
 )
 
 
+GATE_FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "orange_dish_rim_v4"
+
+
+def _gate_evaluation() -> dict[str, object]:
+    # agent-contracts 3480e3e dish_rim_registration_v4: Orange's C++ gate output.
+    return json.loads((GATE_FIXTURES / "valid" / "evaluation_accepted.json").read_bytes())
+
+
 def _sha(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
@@ -48,6 +56,57 @@ def _rim_entry(
     source_path: str = "/orange/immutable/observation.json",
     gate_radius: float = 205.0,
     rim_version: int = 2,
+    acceptance_basis: str | None = None,
+) -> dict[str, object]:
+    entry = _rim_entry_body(
+        camera=camera,
+        arena=arena,
+        source_sha=source_sha,
+        source_path=source_path,
+        gate_radius=gate_radius,
+        rim_version=rim_version,
+    )
+    # Rim observation v4 (agent-contracts #133) declares its acceptance.
+    if acceptance_basis is None and rim_version == 4:
+        acceptance_basis = "operator_review"
+    if acceptance_basis == "operator_review":
+        entry["acceptance"] = {
+            "basis": "operator_review",
+            "accepted_at_utc": "2026-11-04T01:00:16Z",
+        }
+    elif acceptance_basis == "quality_gate":
+        del entry["operator_review"]
+        gate = _gate_evaluation()
+        entry["acceptance"] = {
+            "basis": "quality_gate",
+            "accepted_at_utc": "2026-11-15T17:00:00Z",
+            "gate": gate,
+        }
+        for name in ("accepted_inner_rim_boundary", "accepted_mask"):
+            entry[name]["operator_confirmed"] = False
+            entry[name]["accepted_by_operator"] = False
+        # The gate evaluated one real Cam2010093 fit; the entry is that fit.
+        fit = gate["fit"]
+        width, height = fit["image_width_px"], fit["image_height_px"]
+        entry["camera"].update(width=width, height=height)
+        entry["accepted_mask"]["image_shape_px"] = {"width": width, "height": height}
+        entry["accepted_inner_rim_boundary"]["geometry"].update(
+            center_px=dict(fit["center_px"]), radius_px=fit["radius_px"]
+        )
+        entry["valid_detection_region"]["geometry"].update(
+            center_px=dict(fit["center_px"]), radius_px=fit["radius_px"] + gate_radius - 200.0
+        )
+    return entry
+
+
+def _rim_entry_body(
+    *,
+    camera: str,
+    arena: str,
+    source_sha: str,
+    source_path: str,
+    gate_radius: float,
+    rim_version: int,
 ) -> dict[str, object]:
     return {
         "artifact_schema_id": "orange.calibration.dish_top_rim_observation",
@@ -110,9 +169,12 @@ def _write_folder_bundle(
     contract_version: int = 1,
     assets_version: int | None = None,
     rim_version: int | None = None,
+    acceptance_basis: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     # Contract v2 (Orange bb6c4f5) binds assets v2 and rim observation v3.
-    assets_version = contract_version if assets_version is None else assets_version
+    # Contract v3 (agent-contracts #133) keeps assets v2 and admits rim v3 or v4.
+    if assets_version is None:
+        assets_version = min(contract_version, 2)
     rim_version = contract_version + 1 if rim_version is None else rim_version
     root.mkdir(parents=True, exist_ok=True)
     assets = root / "recording_geometry_assets"
@@ -125,7 +187,12 @@ def _write_folder_bundle(
     observation_path.write_bytes(observation_bytes)
     observation_sha = _sha(observation_bytes)
 
-    entry = _rim_entry(source_sha=observation_sha, gate_radius=gate_radius, rim_version=rim_version)
+    entry = _rim_entry(
+        source_sha=observation_sha,
+        gate_radius=gate_radius,
+        rim_version=rim_version,
+        acceptance_basis=acceptance_basis,
+    )
     manifest = {
         "schema_id": "orange.recording.geometry_assets",
         "schema_version": assets_version,
@@ -189,7 +256,10 @@ def _write_folder_bundle(
                         "x": {"positive_direction": "right"},
                         "y": {"positive_direction": "down"},
                     },
-                    "image_shape": {"width": 640, "height": 480},
+                    "image_shape": {
+                        "width": entry["camera"]["width"],
+                        "height": entry["camera"]["height"],
+                    },
                 }
             }
         },
@@ -646,6 +716,8 @@ def _citrus_daily(**changes: object) -> dict[str, object]:
         "registration_id": "dailyreg-1",
         "registration_checksum_valid": True,
         "target": {"arena_id": "arena_1", "camera_id": "2010093"},
+        "translation_matches_runtime": True,
+        "canonical_geometry_preserved": True,
     }
     for key, value in changes.items():
         if value is _ABSENT:
@@ -688,6 +760,12 @@ def test_h5_loader_hashes_exact_payload_and_reconciles_runtime(tmp_path: Path) -
         ({"target": {"arena_id": "arena_2", "camera_id": "2010093"}}, CitrusRegistrationStatus.CAMERA_ARENA_TARGET_MISSING, True),
         ({"target": {"arena_id": "arena_1", "camera_id": "2010094"}}, CitrusRegistrationStatus.CAMERA_ARENA_TARGET_MISSING, True),
         ({"registration_checksum_valid": False}, CitrusRegistrationStatus.CHECKSUM_MISMATCH, True),
+        # The runtime arena geometry must be the base plus exactly the sealed
+        # translation, with nothing else changed (Citrus's own measurement).
+        ({"translation_matches_runtime": False}, CitrusRegistrationStatus.INVALID, True),
+        ({"canonical_geometry_preserved": False}, CitrusRegistrationStatus.INVALID, True),
+        ({"translation_matches_runtime": _ABSENT}, CitrusRegistrationStatus.MISSING, True),
+        ({"canonical_geometry_preserved": _ABSENT}, CitrusRegistrationStatus.MISSING, True),
     ],
 )
 def test_h5_loader_takes_applied_only_from_citrus_runtime_contract(
@@ -709,6 +787,18 @@ def test_h5_loader_takes_applied_only_from_citrus_runtime_contract(
     assert result.issues[0].code == status.value
     with pytest.raises(RecordingGeometryError, match="did not exactly match"):
         load_registered_dish_masks_from_citrus_h5(path, policy=GeometryLoadPolicy.REQUIRED)
+
+
+@pytest.mark.parametrize("override", ["translation_overlay_applied", "commissioned_base_geometry"])
+def test_h5_loader_does_not_read_override_status(tmp_path: Path, override: str) -> None:
+    # Citrus's override_status restates applied (session_logger.cpp b01eddb);
+    # the exact match rests on the terms Citrus measured, not on this label.
+    path = tmp_path / "experiment.h5"
+    _write_h5(path, unified=True, citrus_daily=_citrus_daily(override_status=override))
+
+    (mask,) = load_registered_dish_masks_from_citrus_h5(path).masks.values()
+
+    assert mask.citrus_registration_status is CitrusRegistrationStatus.EXACT_MATCH_APPLIED
 
 
 def test_h5_loader_without_runtime_contract_is_not_applied(tmp_path: Path) -> None:
@@ -832,7 +922,7 @@ def test_h5_loader_refuses_ambiguous_runtime_namespace(
 
 @pytest.mark.parametrize(
     ("scope_version", "contract_version"),
-    [(1, 1), (2, 1), (2, 2)],
+    [(1, 1), (2, 1), (2, 2), (3, 1), (3, 2), (3, 3)],
 )
 def test_h5_loader_reads_scope_v2_like_v1(
     tmp_path: Path, scope_version: int, contract_version: int
@@ -856,7 +946,8 @@ def test_h5_loader_reads_scope_v2_like_v1(
         (1, 1, None, "cannot reference"),
         (2, 2, 1, "another version than /recording_geometry_contract"),
         (2, 1, 2, "another version than /recording_geometry_contract"),
-        (3, 1, 1, "version 1 or 2"),
+        (3, 3, 2, "another version than /recording_geometry_contract"),
+        (4, 1, 1, "version 1 or 2 or 3"),
     ],
 )
 def test_h5_loader_refuses_mismatched_scope_versions(
@@ -915,7 +1006,10 @@ def test_folder_loader_reads_a_v2_geometry_contract_like_v1(tmp_path: Path) -> N
         (2, 2, 2, "must embed dish rim observation version 3"),
         (1, 1, 3, "must embed dish rim observation version 2"),
         (2, 1, 3, "asset manifest must be"),
-        (3, 3, 4, "version 1 or 2"),
+        (3, 2, 2, "must embed dish rim observation version 3 or 4"),
+        (3, 3, 4, "asset manifest must be"),
+        (2, 2, 4, "must embed dish rim observation version 3"),
+        (4, 2, 4, "version 1 or 2 or 3"),
     ],
 )
 def test_folder_loader_refuses_mismatched_geometry_versions(
@@ -928,3 +1022,150 @@ def test_folder_loader_refuses_mismatched_geometry_versions(
     assert result.mask_geometry_status is MaskGeometryStatus.INVALID
     assert result.masks == {}
     assert message in result.issues[0].message
+
+
+@pytest.mark.parametrize("rim_version", [3, 4])
+def test_folder_loader_reads_a_v3_geometry_contract_like_v2(
+    tmp_path: Path, rim_version: int
+) -> None:
+    # agent-contracts #133: contract v3 keeps assets v2 and admits rim v3 or a
+    # v4 rim with an explicit operator_review acceptance.
+    _write_folder_bundle(tmp_path / "v2", contract_version=2)
+    _write_folder_bundle(tmp_path / "v3", contract_version=3, rim_version=rim_version)
+    old = load_registered_dish_masks_from_recording_folder(tmp_path / "v2")
+    new = load_registered_dish_masks_from_recording_folder(tmp_path / "v3")
+    assert new.mask_geometry_status is MaskGeometryStatus.VALID, new.issues
+    (a,), (b,) = old.masks.values(), new.masks.values()
+    assert (a.physical_inner_rim, a.valid_detection_gate) == (
+        b.physical_inner_rim,
+        b.valid_detection_gate,
+    )
+    assert b.producer_operator_accepted is True
+    assert b.producer_acceptance_basis == "operator_review"
+
+
+def _rewrite_contract_entry(root: Path, mutate) -> None:
+    contract_path = root / "recording_geometry_contract.json"
+    contract = json.loads(contract_path.read_bytes())
+    entry = contract["daily_registration_geometry"]["cameras"]["2010093"]["recording_snapshot_entry"]
+    mutate(entry)
+    payload = _json_bytes(contract, newline=True)
+    contract_path.write_bytes(payload)
+    snapshot_path = root / "recording_snapshot.json"
+    snapshot = json.loads(snapshot_path.read_bytes())
+    snapshot["recording_geometry_contract"]["sha256"] = _sha(payload)
+    snapshot_path.write_bytes(_json_bytes(snapshot, newline=True))
+
+
+def _drop(name):
+    return lambda entry: entry.pop(name)
+
+
+def _set_review(value):
+    return lambda entry: entry.__setitem__("operator_review", value)
+
+
+def _set_basis(value):
+    return lambda entry: entry["acceptance"].__setitem__("basis", value)
+
+
+def _add_acceptance(entry):
+    entry["acceptance"] = {"basis": "operator_review", "accepted_at_utc": "2026-11-04T01:00:16Z"}
+
+
+@pytest.mark.parametrize(
+    ("rim_version", "mutate", "message"),
+    [
+        (4, _drop("acceptance"), "rim observation acceptance"),
+        (4, _set_review({"accepted": False}), "operator_review lacks operator acceptance"),
+        (4, _drop("operator_review"), "operator_review lacks operator acceptance"),
+        (4, _set_basis("human_glance"), "acceptance basis 'human_glance' is unknown"),
+        (3, _add_acceptance, "version 3 must not carry acceptance"),
+    ],
+)
+def test_folder_loader_refuses_ambiguous_rim_acceptance(
+    tmp_path: Path, rim_version: int, mutate, message: str
+) -> None:
+    _write_folder_bundle(tmp_path, contract_version=3, rim_version=rim_version)
+    _rewrite_contract_entry(tmp_path, mutate)
+    result = load_registered_dish_masks_from_recording_folder(tmp_path)
+    assert result.mask_geometry_status is MaskGeometryStatus.INVALID
+    assert result.masks == {}
+    assert message in result.issues[0].message
+
+
+def test_folder_loader_admits_gate_accepted_rim_that_palette_recomputes(
+    tmp_path: Path,
+) -> None:
+    _write_folder_bundle(
+        tmp_path, contract_version=3, rim_version=4, acceptance_basis="quality_gate"
+    )
+    result = load_registered_dish_masks_from_recording_folder(tmp_path)
+    assert result.mask_geometry_status is MaskGeometryStatus.VALID, result.issues
+    mask = next(iter(result.masks.values()))
+    assert mask.producer_acceptance_basis == "quality_gate"
+    assert mask.producer_operator_accepted is False
+    assert mask.physical_inner_rim.radius_px == 2158.8
+
+
+def _set_gate(path: tuple[str, ...], value):
+    def mutate(entry: dict) -> None:
+        node = entry["acceptance"]["gate"]
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+
+    return mutate
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda entry: entry["acceptance"].pop("gate"), "lacks acceptance.gate"),
+        (_set_gate(("camera_serial",), "2010094"), "camera_serial is not the observation's camera"),
+        (_set_gate(("fit", "image_width_px"), 4096), "image size is not the observation's camera frame"),
+        # A fit 0.1 px off is a different fit, even though the gate would pass it.
+        (
+            lambda entry: entry["accepted_inner_rim_boundary"]["geometry"].__setitem__("radius_px", 2158.9),
+            "fit is not the observation's accepted inner rim",
+        ),
+        # Consistent with the schema (passed stays true) but below Palette's limit.
+        (_set_gate(("checks", "edge_support", "fraction"), 0.39), "edge_support.passed is True"),
+        (_set_gate(("checks", "first_hough_pass", "hough_pass_index"), 2), "first_hough_pass.passed is True"),
+        (_set_gate(("checks", "change_from_anchor", "center_shift_px"), 0.5), "center_shift_px"),
+        (_set_gate(("gate_version",), 2), "fails its schema"),
+    ],
+)
+def test_folder_loader_refuses_gate_accepted_rim_palette_does_not_recompute(
+    tmp_path: Path, mutate, message: str
+) -> None:
+    _write_folder_bundle(
+        tmp_path, contract_version=3, rim_version=4, acceptance_basis="quality_gate"
+    )
+    _rewrite_contract_entry(tmp_path, mutate)
+    result = load_registered_dish_masks_from_recording_folder(tmp_path)
+    assert result.mask_geometry_status is MaskGeometryStatus.INVALID
+    assert result.masks == {}
+    assert "Gate-accepted rim observation refused" in result.issues[0].message
+    assert message in result.issues[0].message
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        _set_review({"accepted": True}),
+        lambda entry: entry["accepted_mask"].__setitem__("accepted_by_operator", True),
+        lambda entry: entry["accepted_inner_rim_boundary"].__setitem__("operator_confirmed", True),
+        lambda entry: entry.__setitem__("quality", {"operator_confirmed": True}),
+    ],
+)
+def test_gate_accepted_rim_never_reads_as_a_human_review(tmp_path: Path, mutate) -> None:
+    # The ac#133 contract_v3_quality_gate_selection fixture (f9e1058) carried
+    # true operator flags on a quality_gate entry; Palette refuses that shape.
+    _write_folder_bundle(
+        tmp_path, contract_version=3, rim_version=4, acceptance_basis="quality_gate"
+    )
+    _rewrite_contract_entry(tmp_path, mutate)
+    result = load_registered_dish_masks_from_recording_folder(tmp_path)
+    assert result.mask_geometry_status is MaskGeometryStatus.INVALID
+    assert "carries operator review or operator flags" in result.issues[0].message

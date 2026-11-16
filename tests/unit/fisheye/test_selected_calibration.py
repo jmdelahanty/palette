@@ -632,6 +632,144 @@ def test_display_builder_rejects_wrong_paths_or_ambiguous_output_block(
         _display_evidence(**overrides)
 
 
+_SUPPORTED_LIST = "(normal left inverted right x axis y axis)"
+_VERBOSE_IDENTITY_TRANSFORM = (
+    "\tTransform:  1.000000 0.000000 0.000000\n"
+    "\t            0.000000 1.000000 0.000000\n"
+    "\t            0.000000 0.000000 1.000000\n"
+    "\t           filter: \n"
+)
+
+
+def _block(header: str, body: str = "   1920x1080     60.00*+\n") -> bytes:
+    return (header + "\n" + body).encode("utf-8")
+
+
+def test_display_token_is_current_rotation_for_historical_unrotated_header() -> None:
+    """Preservation: a header admitted before the fix yields the same fields."""
+
+    evidence = _display_evidence()
+    assert evidence.selected_output_transform_token == "normal"
+    assert evidence.selected_output_transform_raw == (
+        "normal left inverted right x axis y axis"
+    )
+    assert dict(evidence.display_group_attrs) == SOURCE_DISPLAY_ATTRS
+    reparsed = parse_selected_display_source_evidence(evidence.to_dict())
+    assert reparsed.to_dict() == evidence.to_dict()
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        f"DP-3 connected primary 1920x1080+3840+0 {_SUPPORTED_LIST} 0mm x 0mm",
+        # A reflected-capable output that is currently unreflected may still
+        # print "normal" explicitly; it is the same current state.
+        f"DP-3 connected 1920x1080+3840+0 normal {_SUPPORTED_LIST} 0mm x 0mm",
+    ],
+)
+def test_display_builder_accepts_primary_and_explicit_normal(header: str) -> None:
+    evidence = _display_evidence(selected_output_block_raw=_block(header))
+    assert evidence.selected_output_transform_token == "normal"
+    assert evidence.selected_output_first_line == header
+    reparsed = parse_selected_display_source_evidence(evidence.to_dict())
+    assert reparsed.to_dict() == evidence.to_dict()
+
+
+def test_display_builder_accepts_verbose_header_with_identity_transform() -> None:
+    header = (
+        f"DP-3 connected primary 1920x1080+3840+0 (0x48) normal {_SUPPORTED_LIST}"
+        " 527mm x 296mm"
+    )
+    evidence = _display_evidence(
+        selected_output_block_raw=_block(
+            header,
+            "\tIdentifier: 0x42\n" + _VERBOSE_IDENTITY_TRANSFORM,
+        )
+    )
+    assert evidence.selected_output_transform_token == "normal"
+    reparsed = parse_selected_display_source_evidence(evidence.to_dict())
+    assert reparsed.to_dict() == evidence.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("header", "message"),
+    [
+        # A rotated output prints its rotation before the supported list.
+        (f"DP-3 connected 1080x1920+3840+0 left {_SUPPORTED_LIST} 0mm x 0mm", "rotated"),
+        (f"DP-3 connected 1920x1080+3840+0 inverted {_SUPPORTED_LIST} 0mm x 0mm", "rotated"),
+        (f"DP-3 connected 1080x1920+3840+0 right {_SUPPORTED_LIST} 0mm x 0mm", "rotated"),
+        # A reflection is printed after the rotation, even when unrotated.
+        (
+            f"DP-3 connected 1920x1080+3840+0 normal X axis {_SUPPORTED_LIST} 0mm x 0mm",
+            "reflected",
+        ),
+        (
+            f"DP-3 connected 1920x1080+3840+0 normal Y axis {_SUPPORTED_LIST} 0mm x 0mm",
+            "reflected",
+        ),
+        (
+            f"DP-3 connected 1920x1080+3840+0 normal X and Y axis {_SUPPORTED_LIST}"
+            " 0mm x 0mm",
+            "reflected",
+        ),
+        (
+            f"DP-3 connected primary 1080x1920+3840+0 (0x48) left X axis"
+            f" {_SUPPORTED_LIST} 0mm x 0mm",
+            "rotated",
+        ),
+        # Verbose output always prints the current rotation.
+        (f"DP-3 connected 1920x1080+3840+0 (0x48) {_SUPPORTED_LIST} 0mm x 0mm", "omits"),
+        # Words that are neither a rotation nor a reflection.
+        (f"DP-3 connected 1920x1080+3840+0 sideways {_SUPPORTED_LIST} 0mm x 0mm", "malformed"),
+        # The current rotation must be one the output supports.
+        ("DP-3 connected 1920x1080+3840+0 (left inverted right) 0mm x 0mm", "supported"),
+        ("DP-3 connected 1920x1080+3840+0 (normal sideways) 0mm x 0mm", "supported-rotation"),
+    ],
+)
+def test_display_builder_refuses_rotated_reflected_or_unparsable_header(
+    header: str,
+    message: str,
+) -> None:
+    with pytest.raises(SelectedCalibrationError, match=message):
+        _display_evidence(selected_output_block_raw=_block(header))
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (
+            "\tTransform:  1.000000 0.000000 0.000000\n"
+            "\t            0.000000 -1.000000 1080.000000\n"
+            "\t            0.000000 0.000000 1.000000\n",
+            "not the identity",
+        ),
+        (
+            "\tTransform:  1.000000 0.000000 0.000000\n"
+            "\t            0.000000 1.000000\n"
+            "\t            0.000000 0.000000 1.000000\n",
+            "malformed",
+        ),
+        ("\tTransform:  1.000000 0.000000 0.000000\n", "truncated"),
+        (_VERBOSE_IDENTITY_TRANSFORM * 2, "ambiguous"),
+        ("\tIdentifier: 0x42\n", "omits its Transform"),
+    ],
+)
+def test_display_builder_refuses_non_identity_or_malformed_verbose_transform(
+    body: str,
+    message: str,
+) -> None:
+    header = f"DP-3 connected 1920x1080+3840+0 (0x48) normal {_SUPPORTED_LIST} 0mm x 0mm"
+    with pytest.raises(SelectedCalibrationError, match=message):
+        _display_evidence(selected_output_block_raw=_block(header, body))
+
+
+def test_display_attrs_token_must_be_in_supported_list() -> None:
+    attrs = dict(SOURCE_DISPLAY_ATTRS)
+    attrs["selected_output_transform_raw"] = "left inverted right"
+    with pytest.raises(SelectedCalibrationError, match="not among the rotations"):
+        _display_evidence(display_group_attrs=attrs)
+
+
 def test_homography_builder_binds_independent_numeric_yaml_and_lineage() -> None:
     evidence = SOURCE_HOMOGRAPHY
     assert evidence.numeric_matrix_sha256 == homography_matrix_sha256(

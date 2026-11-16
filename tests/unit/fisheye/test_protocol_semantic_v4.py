@@ -170,7 +170,7 @@ def test_v4_is_refused_under_the_legacy_binding():
 
 def test_an_unknown_policy_is_refused():
     trial = CASES["solid_gray016_1h"]["v4_120"]["protocol_trial_index_json"]
-    text = _mutated("solid_gray016_1h", "v4_120", lambda s: s.update(normalization_policy="citrus.protocol.semantic.v5"))
+    text = _mutated("solid_gray016_1h", "v4_120", lambda s: s.update(normalization_policy="citrus.protocol.semantic.v6"))
     with pytest.raises(ProtocolSemanticContractError, match="normalization_policy must be"):
         _validate(text, trial)
 

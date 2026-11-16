@@ -24,8 +24,8 @@ def validate_protocol(
 
     ``stimulus_angle_convention`` is the admitted binding's
     (``validate_capacity_preflight(h5)["stimulus_angle_convention"]``); it
-    selects the protocol contract (semantic v2 or recipes v3/v4 / trial index v3
-    for ``atan2_negative_y_x_degrees``). The recorded rates must agree with the
+    selects the protocol contract (semantic v2 or recipes v3/v4 with trial index
+    v3, or recipe v5 with trial index v4, for ``atan2_negative_y_x_degrees``). The recorded rates must agree with the
     identity's render rate (``validate_render_rate``). When omitted it is resolved from the
     file's capacity preflight binding, and a file without one is legacy
     (its admission revision predates capacity preflights). Likewise

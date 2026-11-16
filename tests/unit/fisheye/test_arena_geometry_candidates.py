@@ -330,6 +330,99 @@ def _clipped_palette_fit_inputs(
     return fit_report, montage, clip_index, snapshot
 
 
+def _physical_bound_mask() -> BoundRegisteredDishMask:
+    # A mask the folder loader chose from Orange's physical registration: its
+    # registration identity is the rim observation (recording_geometry #456).
+    bound = _bound_mask()
+    mask = replace(
+        bound.mask,
+        registration_id=bound.mask.artifact_id,
+        registration_sha256=bound.mask.source_observation_sha256,
+        source_kind="orange_recording_folder",
+        source_location="/recording",
+        producer_contract_linkage_status="producer_native",
+        recovery_receipt_sha256=None,
+        registration_source="physical_registration",
+        selection_record_sha256="sha256:" + "f" * 64,
+    )
+    return replace(bound, mask=mask)
+
+
+def test_physical_registration_mask_writes_candidate_record_v2() -> None:
+    record = mod.build_acquisition_geometry_candidate_record(
+        _physical_bound_mask(), recovery_binding=None
+    )
+
+    assert record["schema_version"] == 2
+    source = record["acquisition_source"]
+    assert source["registration_source"] == "physical_registration"
+    assert source["selection_record_sha256"] == "sha256:" + "f" * 64
+    assert source["registration_id"] == source["artifact_id"]
+    assert source["registration_sha256"] == source["source_observation_sha256"]
+    mod.validate_arena_geometry_candidate_record(record)
+
+
+def test_daily_mask_still_writes_candidate_record_v1_unchanged() -> None:
+    record = mod.build_acquisition_geometry_candidate_record(
+        _bound_mask(), recovery_binding=_recovery_binding()
+    )
+    assert record["schema_version"] == 1
+    assert "registration_source" not in record["acquisition_source"]
+    assert "selection_record_sha256" not in record["acquisition_source"]
+
+
+def _v2_source_mutation(key: str, value: object):
+    def mutate(record: dict) -> None:
+        if value is _DROP:
+            del record["acquisition_source"][key]
+        else:
+            record["acquisition_source"][key] = value
+
+    return mutate
+
+
+_DROP = object()
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (_v2_source_mutation("registration_source", "daily_registration"), "only for a physical_registration"),
+        (_v2_source_mutation("registration_source", _DROP), "only for a physical_registration"),
+        (_v2_source_mutation("selection_record_sha256", None), "selection_record_sha256"),
+        (_v2_source_mutation("selection_record_sha256", _DROP), "selection_record_sha256"),
+        (_v2_source_mutation("registration_id", "dailyreg-1"), "identity is not its rim observation"),
+        (_v2_source_mutation("registration_sha256", "sha256:" + "b" * 64), "identity is not its rim observation"),
+        (_v2_source_mutation("source_kind", "citrus_h5"), "only from an Orange recording folder"),
+        (lambda record: record.__setitem__("schema_version", 3), "Unsupported arena-geometry candidate schema"),
+    ],
+)
+def test_candidate_record_v2_is_validated(mutate, message: str) -> None:
+    record = mod.build_acquisition_geometry_candidate_record(
+        _physical_bound_mask(), recovery_binding=None
+    )
+    mutate(record)
+    with pytest.raises(RecordingGeometryError, match=message):
+        mod.validate_arena_geometry_candidate_record(record)
+
+
+@pytest.mark.parametrize("key", ["registration_source", "selection_record_sha256"])
+def test_candidate_record_v1_cannot_name_a_source(key: str) -> None:
+    record = mod.build_acquisition_geometry_candidate_record(
+        _bound_mask(), recovery_binding=_recovery_binding()
+    )
+    record["acquisition_source"][key] = "physical_registration"
+    with pytest.raises(RecordingGeometryError, match="v1 cannot name a registration source"):
+        mod.validate_arena_geometry_candidate_record(record)
+
+
+def test_unknown_registration_source_is_refused() -> None:
+    bound = _physical_bound_mask()
+    bound = replace(bound, mask=replace(bound.mask, registration_source="manual"))
+    with pytest.raises(RecordingGeometryError, match="Unknown acquisition registration source"):
+        mod.build_acquisition_geometry_candidate_record(bound, recovery_binding=None)
+
+
 def test_candidate_record_keeps_physical_rim_gate_and_selection_distinct() -> None:
     record = mod.build_acquisition_geometry_candidate_record(
         _bound_mask(),
@@ -531,6 +624,50 @@ def test_plan_producer_native_folder_candidate_without_recovery_receipt(
         "recording_snapshot_geometry_pointer",
         "orange_recording_geometry_contract",
     ]
+
+
+def test_plan_producer_native_folder_candidate_from_physical_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recording = tmp_path / "recording"
+    source_zarr = recording / "zarr" / "recording_analysis.zarr"
+    source_zarr.parent.mkdir(parents=True)
+    contract = recording / "recording_geometry_contract.json"
+    contract.write_text('{"contract":"exact"}\n', encoding="utf-8")
+    contract_sha = hashlib.sha256(contract.read_bytes()).hexdigest()
+    (recording / "recording_snapshot.json").write_text(
+        json.dumps(
+            {
+                "recording_geometry_contract": {
+                    "relative_path": contract.name,
+                    "sha256": "sha256:" + contract_sha,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    mask = replace(_physical_bound_mask().mask, source_location=str(recording.resolve()))
+    monkeypatch.setattr(
+        mod,
+        "load_registered_dish_masks_from_recording_folder",
+        lambda *_args, **_kwargs: _producer_collection(mask),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_bind_mask_to_zarr",
+        lambda _source, selected: replace(_bound_mask(), mask=selected),
+    )
+
+    plan = mod.plan_producer_native_acquisition_geometry_candidate(
+        source_zarr=source_zarr,
+        recording_folder=recording,
+        camera_serial="2010093",
+        arena_id="arena_1",
+    )
+
+    assert plan.candidate_record["schema_version"] == 2
+    assert plan.candidate_record["acquisition_source"]["registration_source"] == "physical_registration"
 
 
 def test_plan_producer_native_folder_uses_fixed_organized_bundle(

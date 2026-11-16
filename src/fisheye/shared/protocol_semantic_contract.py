@@ -87,14 +87,48 @@ PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY = "citrus.protocol.semantic.v4"
 STIMULUS_RENDER_RATE_KEY = "stimulus_render_rate_hz"
 ADMITTED_STIMULUS_RENDER_RATES_HZ = frozenset({120, 240})
 PRE_V4_STIMULUS_RENDER_RATE_HZ = 120
+# Semantic recipe v5 (pairing revision 4, semantic_policy_pairing_v4.json;
+# Citrus #114, be2cd47): v4 with, on every chaser step, ``z_eff`` removed and
+# ``z_eff_source = "arena_media_stack"`` hashed, because Citrus now computes
+# z_eff per arena at START from the rig's measured media stack. v5 is the only
+# policy paired with trial index v4 (target ``z_eff_mm`` -> ``z_eff_source``).
+# There is no v4-to-v5 relabel: the rendered stimulus differs. The per-arena
+# value is a recording fact in /geometry/calibration/z_eff.
+PROTOCOL_SEMANTIC_RECIPE_V5_NORMALIZATION_POLICY = "citrus.protocol.semantic.v5"
+Z_EFF_SOURCE_ARENA_MEDIA_STACK = "arena_media_stack"
 PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICIES = (
     PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY,
     PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY,
     PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY,
+    PROTOCOL_SEMANTIC_RECIPE_V5_NORMALIZATION_POLICY,
 )
 CHASER_STIMULUS_MODE_ID = 12
 PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION = 3
 PROTOCOL_TRIAL_INDEX_ANGLE_V1_NORMALIZATION_POLICY = "citrus.protocol.trial_index.v3"
+PROTOCOL_TRIAL_INDEX_RECIPE_V5_SCHEMA_VERSION = 4
+PROTOCOL_TRIAL_INDEX_RECIPE_V5_NORMALIZATION_POLICY = "citrus.protocol.trial_index.v4"
+# Under angle_v1 the semantic policy fixes the trial index version; any other
+# pairing is corruption.
+PROTOCOL_TRIAL_INDEX_BY_ANGLE_V1_POLICY = MappingProxyType(
+    {
+        PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY: (
+            PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION,
+            PROTOCOL_TRIAL_INDEX_ANGLE_V1_NORMALIZATION_POLICY,
+        ),
+        PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY: (
+            PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION,
+            PROTOCOL_TRIAL_INDEX_ANGLE_V1_NORMALIZATION_POLICY,
+        ),
+        PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY: (
+            PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION,
+            PROTOCOL_TRIAL_INDEX_ANGLE_V1_NORMALIZATION_POLICY,
+        ),
+        PROTOCOL_SEMANTIC_RECIPE_V5_NORMALIZATION_POLICY: (
+            PROTOCOL_TRIAL_INDEX_RECIPE_V5_SCHEMA_VERSION,
+            PROTOCOL_TRIAL_INDEX_RECIPE_V5_NORMALIZATION_POLICY,
+        ),
+    }
+)
 
 # Reactive phototaxis v1 (agent-contracts #98 revision 5): a PHOTOTAXIS step
 # whose two-tone split follows the fish's midline declares
@@ -566,11 +600,15 @@ def _validate_heading_split_step(
             f"{name} with fill type heading_split requires features.fill.style "
             "and features.reactive."
         )
-    _require_exact(
-        trial_schema_version,
+    # Trial index v4 is a copy of v3 apart from chaser z_eff, so both carry it.
+    if trial_schema_version not in (
         PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION,
-        name=f"{name} trial index schema_version for fill type heading_split",
-    )
+        PROTOCOL_TRIAL_INDEX_RECIPE_V5_SCHEMA_VERSION,
+    ):
+        raise ProtocolSemanticContractError(
+            f"{name} trial index schema_version for fill type heading_split "
+            "must be 3 or 4."
+        )
     _require_exact(
         stimulus_mode_id,
         HEADING_SPLIT_STIMULUS_MODE_ID,
@@ -697,17 +735,35 @@ def _scaled_mm(value: object, *, name: str, positive: bool) -> None:
 
 
 def _validate_recipe_v3_chaser_parameters(
-    parameters: object, *, step_index: int
+    parameters: object, *, step_index: int, recipe_v5: bool = False
 ) -> None:
-    """The four chaser fields semantic recipe v3 newly hashes are well formed."""
+    """The four chaser fields semantic recipe v3 newly hashes are well formed.
+
+    Recipe v5 replaces ``z_eff`` with ``z_eff_source``; the other three stay.
+    """
 
     name = f"semantic step {step_index}.parameters"
     if not isinstance(parameters, Mapping):
         raise ProtocolSemanticContractError(f"{name} must be one object.")
-    if "z_eff" not in parameters:
-        raise ProtocolSemanticContractError(f"{name}.z_eff is required by recipe v3.")
-    if parameters["z_eff"] is not None:
-        _scaled_mm(parameters["z_eff"], name=f"{name}.z_eff", positive=True)
+    if recipe_v5:
+        if "z_eff" in parameters:
+            raise ProtocolSemanticContractError(
+                f"{name}.z_eff must be absent under recipe v5."
+            )
+        _require_exact(
+            parameters.get("z_eff_source"),
+            Z_EFF_SOURCE_ARENA_MEDIA_STACK,
+            name=f"{name}.z_eff_source",
+        )
+    else:
+        if "z_eff_source" in parameters:
+            raise ProtocolSemanticContractError(
+                f"{name}.z_eff_source is allowed only under recipe v5."
+            )
+        if "z_eff" not in parameters:
+            raise ProtocolSemanticContractError(f"{name}.z_eff is required by recipe v3.")
+        if parameters["z_eff"] is not None:
+            _scaled_mm(parameters["z_eff"], name=f"{name}.z_eff", positive=True)
     _scaled_mm(
         parameters.get("target_radius"), name=f"{name}.target_radius", positive=False
     )
@@ -828,7 +884,30 @@ def _validate_recipe_v4_render_rate(identity: object) -> None:
     if type(rate) is not int or rate not in ADMITTED_STIMULUS_RENDER_RATES_HZ:
         raise ProtocolSemanticContractError(
             f"identity.{STIMULUS_RENDER_RATE_KEY} must be one JSON integer in "
-            f"{sorted(ADMITTED_STIMULUS_RENDER_RATES_HZ)} under recipe v4."
+            f"{sorted(ADMITTED_STIMULUS_RENDER_RATES_HZ)} under recipes v4 and v5."
+        )
+
+
+def _validate_trial_target_z_eff(
+    features: Mapping[str, Any], *, step_index: int, trial_schema_version: int
+) -> None:
+    """Trial index v4 replaces chaser ``target.z_eff_mm`` with ``z_eff_source``."""
+
+    name = f"trial step {step_index}.features.target"
+    target = features.get("target")
+    if trial_schema_version == PROTOCOL_TRIAL_INDEX_RECIPE_V5_SCHEMA_VERSION:
+        if not isinstance(target, Mapping) or "z_eff_mm" in target:
+            raise ProtocolSemanticContractError(
+                f"{name} must be one object without z_eff_mm under trial index v4."
+            )
+        _require_exact(
+            target.get("z_eff_source"),
+            Z_EFF_SOURCE_ARENA_MEDIA_STACK,
+            name=f"{name}.z_eff_source",
+        )
+    elif isinstance(target, Mapping) and "z_eff_source" in target:
+        raise ProtocolSemanticContractError(
+            f"{name}.z_eff_source is allowed only under trial index v4."
         )
 
 
@@ -848,9 +927,10 @@ def validate_protocol_semantic_snapshot(
     ``stimulus_angle_convention`` is the convention the recording's admitted
     binding fixed (never read from the payloads). Under
     ``STIMULUS_ANGLE_CONVENTION`` the snapshot must be v2 with semantic policy
-    v2, recipe v3 or recipe v4 and trial index v3, each declaring that id
-    (recipes v3 and v4 also require their well-formed chaser fields, and v4
-    its integer ``identity.stimulus_render_rate_hz``); under the legacy default
+    v2, recipe v3 or recipe v4 with trial index v3, or recipe v5 with trial
+    index v4, each declaring that id (recipes v3-v5 also require their
+    well-formed chaser fields, v5 its ``z_eff_source`` in place of ``z_eff``,
+    and v4/v5 the integer ``identity.stimulus_render_rate_hz``); under the legacy default
     the historical contract applies unchanged. ``admits_heading_split`` is
     likewise fixed by the admitted binding: only admission revision 6 admits a
     reactive heading-split step, and no binding sets it yet.
@@ -900,8 +980,12 @@ def validate_protocol_semantic_snapshot(
         name="protocol_semantic_json.schema_version",
     )
     semantic_policy = semantic.get("normalization_policy")
-    # Recipe v4 hashes everything v3 does, so it carries v3's chaser checks.
-    recipe_v4 = angle_v1 and semantic_policy == PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY
+    # Recipes v4 and v5 hash everything v3 does (v5 with z_eff_source in place
+    # of z_eff), so they carry v3's chaser checks.
+    recipe_v5 = angle_v1 and semantic_policy == PROTOCOL_SEMANTIC_RECIPE_V5_NORMALIZATION_POLICY
+    recipe_v4 = recipe_v5 or (
+        angle_v1 and semantic_policy == PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY
+    )
     if recipe_v4 or (
         angle_v1 and semantic_policy == PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY
     ):
@@ -928,14 +1012,17 @@ def validate_protocol_semantic_snapshot(
         minimum=1,
     )
     if angle_v1:
+        expected_trial_version, expected_trial_policy = (
+            PROTOCOL_TRIAL_INDEX_BY_ANGLE_V1_POLICY[semantic_policy]
+        )
         _require_exact(
             trial_schema_version,
-            PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION,
+            expected_trial_version,
             name="protocol_trial_index_json.schema_version",
         )
         _require_exact(
             trial.get("normalization_policy"),
-            PROTOCOL_TRIAL_INDEX_ANGLE_V1_NORMALIZATION_POLICY,
+            expected_trial_policy,
             name="protocol_trial_index_json.normalization_policy",
         )
         for name, payload in (
@@ -974,7 +1061,7 @@ def validate_protocol_semantic_snapshot(
         _validate_recipe_v4_render_rate(identity)
     elif isinstance(identity, Mapping) and STIMULUS_RENDER_RATE_KEY in identity:
         raise ProtocolSemanticContractError(
-            f"identity.{STIMULUS_RENDER_RATE_KEY} is allowed only under recipe v4."
+            f"identity.{STIMULUS_RENDER_RATE_KEY} is allowed only under recipe v4 or v5."
         )
     semantic_steps = identity.get("steps") if isinstance(identity, Mapping) else None
     trial_steps = trial.get("steps")
@@ -1098,7 +1185,13 @@ def validate_protocol_semantic_snapshot(
         )
         if recipe_v3 and semantic_mode_id == CHASER_STIMULUS_MODE_ID:
             _validate_recipe_v3_chaser_parameters(
-                semantic_step.get("parameters"), step_index=expected_index
+                semantic_step.get("parameters"),
+                step_index=expected_index,
+                recipe_v5=recipe_v5,
+            )
+        if angle_v1 and semantic_mode_id == CHASER_STIMULUS_MODE_ID:
+            _validate_trial_target_z_eff(
+                features, step_index=expected_index, trial_schema_version=trial_schema_version
             )
         if semantic_mode_id == 4:
             parameters = semantic_step.get("parameters")
@@ -1511,6 +1604,9 @@ __all__ = [
     "PROTOCOL_SEMANTIC_JSON_H5_PATH",
     "PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY",
     "PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY",
+    "PROTOCOL_SEMANTIC_RECIPE_V5_NORMALIZATION_POLICY",
+    "PROTOCOL_TRIAL_INDEX_BY_ANGLE_V1_POLICY",
+    "Z_EFF_SOURCE_ARENA_MEDIA_STACK",
     "ADMITTED_STIMULUS_RENDER_RATES_HZ",
     "PRE_V4_STIMULUS_RENDER_RATE_HZ",
     "PROTOCOL_TRIAL_INDEX_JSON_H5_PATH",

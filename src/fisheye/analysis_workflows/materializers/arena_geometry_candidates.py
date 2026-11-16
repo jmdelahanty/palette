@@ -32,6 +32,8 @@ from fisheye.shared.pixel_frame_authority import (
     load_source_camera_pixel_frame_authority,
 )
 from fisheye.shared.recording_geometry import (
+    REGISTRATION_SOURCE_DAILY,
+    REGISTRATION_SOURCE_PHYSICAL,
     BoundRegisteredDishMask,
     GeometryLoadPolicy,
     MaskGeometryStatus,
@@ -61,6 +63,16 @@ from fisheye.shared.zarr_run_completion import (
 
 CANDIDATE_RECORD_SCHEMA_ID = "palette.arena_geometry_candidate_record"
 CANDIDATE_RECORD_SCHEMA_VERSION = 1
+# Acquisition record v2 (2026-11-15) = v1 plus acquisition_source
+# registration_source and selection_record_sha256. It is written only for a
+# mask from Orange's physical registration, whose registration_id/sha256 are
+# the rim observation's, not a Citrus daily registration's. Daily-sourced
+# records stay v1, byte-for-byte; reviewed Palette records stay v1.
+ACQUISITION_RECORD_PHYSICAL_SCHEMA_VERSION = 2
+ACQUISITION_RECORD_SCHEMA_VERSIONS = frozenset(
+    {CANDIDATE_RECORD_SCHEMA_VERSION, ACQUISITION_RECORD_PHYSICAL_SCHEMA_VERSION}
+)
+_V2_SOURCE_FIELDS = ("registration_source", "selection_record_sha256")
 CANDIDATE_RUN_SCHEMA_ID = "palette.arena_geometry_candidate_run"
 CANDIDATE_RUN_SCHEMA_VERSION = 1
 ACQUISITION_CANDIDATE_KIND = "acquisition_registered_dish"
@@ -158,9 +170,17 @@ def build_acquisition_geometry_candidate_record(
     if type(bound_mask) is not BoundRegisteredDishMask:
         raise RecordingGeometryError("A bound registered dish mask is required.")
     mask = bound_mask.mask
+    if mask.registration_source == REGISTRATION_SOURCE_DAILY:
+        schema_version = CANDIDATE_RECORD_SCHEMA_VERSION
+    elif mask.registration_source == REGISTRATION_SOURCE_PHYSICAL:
+        schema_version = ACQUISITION_RECORD_PHYSICAL_SCHEMA_VERSION
+    else:
+        raise RecordingGeometryError(
+            f"Unknown acquisition registration source {mask.registration_source!r}."
+        )
     record = {
         "schema_id": CANDIDATE_RECORD_SCHEMA_ID,
-        "schema_version": CANDIDATE_RECORD_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "candidate_kind": CANDIDATE_KIND,
         "arena_binding": {
             "rig_id": mask.key.rig_id,
@@ -225,6 +245,9 @@ def build_acquisition_geometry_candidate_record(
         },
         "canonicalization": "canonical_json_sort_keys_v1",
     }
+    if schema_version == ACQUISITION_RECORD_PHYSICAL_SCHEMA_VERSION:
+        record["acquisition_source"]["registration_source"] = mask.registration_source
+        record["acquisition_source"]["selection_record_sha256"] = mask.selection_record_sha256
     normalized = _canonical_copy(record)
     validate_acquisition_geometry_candidate_record(normalized)
     return normalized
@@ -235,7 +258,7 @@ def validate_acquisition_geometry_candidate_record(record: Mapping[str, Any]) ->
 
     if (
         record.get("schema_id") != CANDIDATE_RECORD_SCHEMA_ID
-        or record.get("schema_version") != CANDIDATE_RECORD_SCHEMA_VERSION
+        or record.get("schema_version") not in ACQUISITION_RECORD_SCHEMA_VERSIONS
     ):
         raise RecordingGeometryError("Unsupported arena-geometry candidate schema.")
     if record.get("candidate_kind") != CANDIDATE_KIND:
@@ -342,6 +365,31 @@ def validate_acquisition_geometry_candidate_record(record: Mapping[str, Any]) ->
             source.get("registration_sha256"),
             label="acquisition_source.registration_sha256",
         )
+    if record.get("schema_version") == CANDIDATE_RECORD_SCHEMA_VERSION:
+        # v1 is always a Citrus daily registration; it never names a source.
+        if any(name in source for name in _V2_SOURCE_FIELDS):
+            raise RecordingGeometryError("Acquisition candidate v1 cannot name a registration source.")
+    else:
+        if source.get("registration_source") != REGISTRATION_SOURCE_PHYSICAL:
+            raise RecordingGeometryError(
+                "Acquisition candidate v2 is written only for a physical_registration source."
+            )
+        _required_sha256(
+            source.get("selection_record_sha256"),
+            label="acquisition_source.selection_record_sha256",
+        )
+        # A physical registration is identified by its rim observation.
+        if (
+            source.get("registration_id") != source.get("artifact_id")
+            or source.get("registration_sha256") != source.get("source_observation_sha256")
+        ):
+            raise RecordingGeometryError(
+                "Physical-registration candidate identity is not its rim observation."
+            )
+        if source.get("source_kind") != "orange_recording_folder":
+            raise RecordingGeometryError(
+                "Physical-registration candidates come only from an Orange recording folder."
+            )
     recovery = source.get("recovery_binding")
     if recovery is not None:
         recovery_map = _required_mapping(recovery, label="recovery_binding")

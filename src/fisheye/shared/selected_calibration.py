@@ -38,7 +38,8 @@ The schema intentionally has one authority and no compatibility fallbacks::
       attrs:
         selected_output_name = <output identity>
         selected_output_geometry = <canonical WxH+X+Y>
-        selected_output_transform_token = "normal"
+        selected_output_transform_token = "normal"  (current rotation; the
+            output must also be unreflected with an identity verbose Transform)
         source_display_dataset_path = "/display_snapshot/selected_output_block"
         source_display_dataset_sha256 = <SHA-256 of exact UTF-8 H5 payload>
         source_display_dataset_digest_canonicalization = "utf8_bytes_v1"
@@ -193,11 +194,35 @@ _OUTPUT_GEOMETRY_RE = re.compile(
     r"(?P<x>[+-](?:0|[1-9][0-9]*))(?P<y>[+-](?:0|[1-9][0-9]*))$"
 )
 _XRANDR_OUTPUT_HEADER_RE = re.compile(r"^\S+\s+(?:connected|disconnected)(?:\s|$)")
+# XRandR prints the *current* rotation and reflection between the geometry and
+# the parenthesized *supported* list.  Non-verbose output omits them for an
+# unrotated, unreflected output; ``--verbose`` always prints the rotation and
+# puts the ``(0x..)`` mode id first.  The parenthesized list never names the
+# current state, so the transform token is read from the words before it.
+_XRANDR_ROTATIONS = ("normal", "left", "inverted", "right")
+_XRANDR_REFLECTIONS = {
+    "X axis": "x",
+    "Y axis": "y",
+    "X and Y axis": "xy",
+}
 _SELECTED_OUTPUT_HEADER_RE = re.compile(
-    r"^(?P<name>\S+) connected "
+    r"^(?P<name>\S+) connected(?P<primary> primary)? "
     r"(?P<geometry>[1-9][0-9]*x[1-9][0-9]*[+-](?:0|[1-9][0-9]*)"
     r"[+-](?:0|[1-9][0-9]*)) "
+    r"(?:\((?P<mode_id>0x[0-9a-fA-F]+)\) )?"
+    r"(?:(?P<rotation>normal|left|inverted|right) "
+    r"(?:(?P<reflection>X axis|Y axis|X and Y axis) )?)?"
     r"\((?P<transform_raw>[^()\r\n]+)\)(?:\s.*)?$"
+)
+_SUPPORTED_ROTATIONS_RE = re.compile(
+    r"^(?P<rotations>(?:normal|left|inverted|right)(?: (?:left|inverted|right))*)"
+    r"(?: x axis)?(?: y axis)?$"
+)
+_VERBOSE_TRANSFORM_LABEL_RE = re.compile(r"^\s+Transform:(?P<rest>.*)$")
+_IDENTITY_TRANSFORM = (
+    (1.0, 0.0, 0.0),
+    (0.0, 1.0, 0.0),
+    (0.0, 0.0, 1.0),
 )
 
 # A nominal ``Verified*`` type is not sufficient to mark evidence as having
@@ -1507,14 +1532,120 @@ def _normalize_display_group_attrs(attrs: Mapping[str, Any]) -> dict[str, str]:
             "Only selected_output_transform_token='normal' is supported."
         )
     parse_selected_output_geometry(normalized["selected_output_geometry"])
-    transform_tokens = normalized["selected_output_transform_raw"].split()
-    if not transform_tokens or transform_tokens[0] != normalized[
-        "selected_output_transform_token"
-    ]:
+    supported = _supported_output_rotations(
+        normalized["selected_output_transform_raw"]
+    )
+    if normalized["selected_output_transform_token"] not in supported:
         raise SelectedCalibrationError(
-            "Display transform token does not match selected_output_transform_raw."
+            "Display transform token is not among the rotations listed in "
+            "selected_output_transform_raw."
         )
     return normalized
+
+
+def _supported_output_rotations(transform_raw: str) -> tuple[str, ...]:
+    """Return the rotations named by XRandR's parenthesized supported list.
+
+    The list states what the output *can* do.  It never states the current
+    rotation, so it is used only to check that the current token is plausible.
+    """
+
+    match = _SUPPORTED_ROTATIONS_RE.fullmatch(transform_raw)
+    if match is None:
+        raise SelectedCalibrationError(
+            "selected_output_transform_raw is not an XRandR supported-rotation list."
+        )
+    return tuple(match.group("rotations").split(" "))
+
+
+def _verbose_transform_matrix(lines: list[str]) -> tuple[tuple[float, ...], ...] | None:
+    """Parse the 3x3 ``Transform:`` matrix of one ``xrandr --verbose`` block."""
+
+    labels = [
+        index
+        for index, line in enumerate(lines)
+        if _VERBOSE_TRANSFORM_LABEL_RE.match(line) is not None
+    ]
+    if not labels:
+        return None
+    if len(labels) != 1 or labels[0] + 2 >= len(lines):
+        raise SelectedCalibrationError(
+            "selected_output_block verbose Transform is ambiguous or truncated."
+        )
+    start = labels[0]
+    label_match = _VERBOSE_TRANSFORM_LABEL_RE.match(lines[start])
+    assert label_match is not None
+    row_texts = [label_match.group("rest"), lines[start + 1], lines[start + 2]]
+    rows: list[tuple[float, ...]] = []
+    for row_text in row_texts:
+        words = row_text.split()
+        if len(words) != 3:
+            raise SelectedCalibrationError(
+                "selected_output_block verbose Transform row is malformed."
+            )
+        try:
+            values = tuple(float(word) for word in words)
+        except ValueError as exc:
+            raise SelectedCalibrationError(
+                "selected_output_block verbose Transform row is not numeric."
+            ) from exc
+        if not all(math.isfinite(value) for value in values):
+            raise SelectedCalibrationError(
+                "selected_output_block verbose Transform row is not finite."
+            )
+        rows.append(values)
+    return tuple(rows)
+
+
+def _parse_selected_output_header(first_line: str) -> tuple[dict[str, str], bool]:
+    """Parse one connected XRandR output header into the persisted fields.
+
+    Returns the five persisted display fields and whether the header came from
+    ``xrandr --verbose``.  The transform token is the *current* rotation.  Only
+    an unrotated, unreflected output is admitted.
+    """
+
+    match = _SELECTED_OUTPUT_HEADER_RE.fullmatch(first_line)
+    if match is None:
+        raise SelectedCalibrationError(
+            "selected_output_block header is malformed or not connected."
+        )
+    verbose = match.group("mode_id") is not None
+    rotation = match.group("rotation")
+    if rotation is None:
+        if verbose:
+            raise SelectedCalibrationError(
+                "selected_output_block verbose header omits the current rotation."
+            )
+        rotation = SUPPORTED_OUTPUT_TRANSFORM_TOKEN
+    reflection_words = match.group("reflection")
+    reflection = (
+        "none" if reflection_words is None else _XRANDR_REFLECTIONS[reflection_words]
+    )
+    transform_raw = match.group("transform_raw")
+    if rotation not in _supported_output_rotations(transform_raw):
+        raise SelectedCalibrationError(
+            "selected_output_block current rotation is not in its supported list."
+        )
+    if rotation != SUPPORTED_OUTPUT_TRANSFORM_TOKEN:
+        raise SelectedCalibrationError(
+            f"selected_output_block output is rotated ({rotation!r}); only "
+            "an unrotated output is supported."
+        )
+    if reflection != "none":
+        raise SelectedCalibrationError(
+            f"selected_output_block output is reflected ({reflection_words!r}); "
+            "only an unreflected output is supported."
+        )
+    parsed = {
+        "selected_output_name": match.group("name"),
+        "selected_output_connection_state": "connected",
+        "selected_output_geometry": match.group("geometry"),
+        "selected_output_transform_token": rotation,
+        "selected_output_transform_raw": transform_raw,
+    }
+    parse_selected_output_geometry(parsed["selected_output_geometry"])
+    return parsed, verbose
 
 
 def _parse_selected_output_block(value: Any) -> tuple[bytes, str, dict[str, str]]:
@@ -1526,25 +1657,17 @@ def _parse_selected_output_block(value: Any) -> tuple[bytes, str, dict[str, str]
             "selected_output_block must contain exactly one unambiguous output header."
         )
     first_line = headers[0]
-    match = _SELECTED_OUTPUT_HEADER_RE.fullmatch(first_line)
-    if match is None:
+    parsed, verbose = _parse_selected_output_header(first_line)
+    matrix = _verbose_transform_matrix(lines[1:])
+    if verbose and len(lines) > 1 and matrix is None:
         raise SelectedCalibrationError(
-            "selected_output_block header is malformed or not connected."
+            "selected_output_block verbose output omits its Transform matrix."
         )
-    transform_raw = match.group("transform_raw")
-    transform_tokens = transform_raw.split()
-    if not transform_tokens:
+    if matrix is not None and matrix != _IDENTITY_TRANSFORM:
         raise SelectedCalibrationError(
-            "selected_output_block transform declaration is empty."
+            "selected_output_block verbose Transform is not the identity; "
+            "a keystone or scaling output transform is not supported."
         )
-    parsed = {
-        "selected_output_name": match.group("name"),
-        "selected_output_connection_state": "connected",
-        "selected_output_geometry": match.group("geometry"),
-        "selected_output_transform_token": transform_tokens[0],
-        "selected_output_transform_raw": transform_raw,
-    }
-    parse_selected_output_geometry(parsed["selected_output_geometry"])
     return raw, first_line, parsed
 
 
