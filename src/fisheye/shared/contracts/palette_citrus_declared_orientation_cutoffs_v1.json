@@ -1,0 +1,15 @@
+{
+  "schema_id": "palette.citrus_declared_orientation_cutoffs",
+  "schema_version": 1,
+  "contract": "agent-contracts citrus-palette/coordinate_spaces_v1 (#135, merged 3480e3e), README Admission",
+  "rule": "the group /geometry/calibration/declared_orientation is required in every recording whose /metadata/session session_start_iso8601_utc is at or after its rig's cutoff_utc; before it the group is optional but validated when present",
+  "cutoffs": {
+    "omnifin0": {
+      "cutoff_utc": "2026-11-15T23:17:22Z",
+      "hostname": "pancake0.hhmi.org",
+      "citrus_commit": "027d292a41db771a6ba14fda7db839c7c1fffec9",
+      "citrus_binary_sha256": "sha256:7bd5e43da2c7348f4cdd7f4c62412d26892a141b133d6f6a853f1f32518dd559",
+      "source": "rig GUI install notice, citrus-orientation-agent via palette-agent-contracts, 2026-11-15: rename ctime 23:17:22.675Z on pancake0 CLOCK_REALTIME; no Citrus process ran 23:17:07Z-23:18:17Z, so the cutoff is rounded down to the whole second"
+    }
+  }
+}
