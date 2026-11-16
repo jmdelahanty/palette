@@ -16,7 +16,9 @@ from fisheye.shared.unified_h5.citrus_subject_snapshot import (
 )
 
 # Copied byte-for-byte from agent-contracts citrus-palette/fixtures/subject_v4/ at d329774;
-# dish_group_with_member, members_fewer_than_count and expected.json at c72c496 (#125).
+# dish_group_with_member, members_fewer_than_count and expected.json at c72c496 (#125);
+# dish_group_with_members_on_link, the seven link_member(s)_* fixtures and
+# expected.json at a01fdd3e (#130).
 FIXTURES = Path(__file__).resolve().parents[2] / "contracts" / "citrus_subject_v4"
 ACCEPTED = sorted((FIXTURES / "accepted").glob("*.json"))
 REFUSED_KIND = json.loads((FIXTURES / "refused" / "expected.json").read_text())
@@ -61,8 +63,8 @@ def project_attrs(doc: dict) -> dict:
 
 
 def test_fixture_sets_match_the_contract():
-    assert len(ACCEPTED) == 10
-    assert len(REFUSED) == 27
+    assert len(ACCEPTED) == 11
+    assert len(REFUSED) == 34
     assert sorted(p.stem for p in REFUSED) == sorted(REFUSED_KIND)
 
 
@@ -72,7 +74,7 @@ def test_accepted_fixtures_are_admitted(path):
     admitted = admit_subject_snapshot(doc, project_attrs(doc))
     assert admitted["citrus_snapshot_status"] == "admitted"
     assert admitted["citrus_snapshot_schema_version"] == 4
-    assert admitted["citrus_snapshot_schema_sha256"].startswith("469e50a7")
+    assert admitted["citrus_snapshot_schema_sha256"].startswith("5c3ea283")
 
 
 @pytest.mark.parametrize("path", REFUSED, ids=lambda p: p.stem)
@@ -207,4 +209,34 @@ def test_member_count_refusals_name_their_rule(fixture, code):
 def test_an_empty_member_list_is_still_admitted():
     doc = _load(FIXTURES / "accepted" / "dish_group.json")
     assert doc["members"] == [] and doc["subject"]["subject_count"] > 1
+    assert admit_subject_snapshot(doc, project_attrs(doc))["citrus_snapshot_status"] == "admitted"
+
+
+# agent-contracts #130: the R6 members rule names which check refused.
+@pytest.mark.parametrize(
+    "fixture, reason",
+    [
+        ("link_member_not_in_snapshot", "R6_usage_link_members_differ"),
+        ("link_member_revision_differs", "R6_usage_link_members_differ"),
+        ("link_members_without_snapshot_members", "R6_usage_link_members_not_declared"),
+    ],
+)
+def test_link_members_invariant_reason(fixture, reason):
+    doc = _load(FIXTURES / "refused" / f"{fixture}.json")
+    with pytest.raises(UnifiedH5ContractError, match=reason):
+        admit_subject_snapshot(doc, project_attrs(doc))
+
+
+def test_link_without_members_stays_admitted_for_a_group_with_members():
+    # Transitional (#130): Citrus fde5467 seals group links without members.
+    doc = _load(FIXTURES / "accepted" / "dish_group_with_members_on_link.json")
+    del doc["usage_link_request"]["body"]["members"]
+    assert doc["members"]
+    admitted = admit_subject_snapshot(doc, project_attrs(doc))
+    assert admitted["citrus_snapshot_status"] == "admitted"
+
+
+def test_link_members_compare_as_a_set():
+    doc = _load(FIXTURES / "accepted" / "dish_group_with_members_on_link.json")
+    doc["usage_link_request"]["body"]["members"].reverse()
     assert admit_subject_snapshot(doc, project_attrs(doc))["citrus_snapshot_status"] == "admitted"

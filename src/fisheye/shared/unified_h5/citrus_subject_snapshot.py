@@ -56,10 +56,11 @@ SCHEMAS = {
     3: ("citrus_zebrobot_snapshot_v3.schema.json",
         "ff362fe03245819660f449b60b00a78cf7004d0db97073d41005179c588f068c"),
     # agent-contracts PR 103 (0b468c7), amended by #109 and #112 (merge d329774);
-    # attr types stated by #114 (5d9b172); members amended by #125 (merge c72c496,
-    # contract md sha256 cdff7138...): description text and R4 only.
+    # attr types stated by #114 (5d9b172); members amended by #125 (merge c72c496):
+    # description text and R4 only; usage_link_request.body.members amended by
+    # #130 (merge a01fdd3e, contract md sha256 e1cf9f57...): optional, R6.
     4: ("citrus_zebrobot_snapshot_v4.schema.json",
-        "469e50a77f270891c417073860eac506d38b5c62bdee0354580dd77ce19377ee"),
+        "5c3ea283d9beb628bb013a3f9fbf5e8c4e4af710870a68bc5f58598c78241dd2"),
 }
 # The v3 pin under its pre-v4 names (callers and witness tests use them).
 SCHEMA_FILE, SCHEMA_SHA256 = SCHEMAS[CONTRACT_VERSION]
@@ -179,6 +180,17 @@ def v4_invariant_errors(snapshot: Mapping[str, Any]) -> list[str]:
                     if fish is not None else (None, None, None))
         if (body["fish_id"], body["fish_revision"], body["unit_id"]) != expected:
             errors.append("R6_usage_link_fish_differs")
+        # Amended by agent-contracts #130 (merge a01fdd3e), transitional: members
+        # on the link are optional; when sent they are exactly the snapshot's
+        # declared members, compared as a set, one entry per member.
+        if "members" in body:
+            declared = {(m["mzb_fish_id"], m["mzb_fish_revision"]) for m in members or []}
+            sent = body["members"]
+            if not declared:
+                errors.append("R6_usage_link_members_not_declared")
+            elif len(sent) != len(declared) or {
+                    (m["fish_id"], m["fish_revision"]) for m in sent} != declared:
+                errors.append("R6_usage_link_members_differ")
     return errors
 
 
