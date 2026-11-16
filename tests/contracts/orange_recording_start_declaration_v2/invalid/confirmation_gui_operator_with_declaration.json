@@ -1,0 +1,50 @@
+{
+  "schema_id": "orange.recording_subject_confirmation",
+  "schema_version": 2,
+  "confirmed_by": "gui_operator",
+  "confirmed_at_utc": "2026-11-16T14:00:00Z",
+  "cameras": {
+    "2010093": {
+      "dish_id": "19498_2",
+      "subject_count": 5
+    },
+    "2010094": {
+      "dish_id": null,
+      "subject_count": null
+    }
+  },
+  "config": {
+    "schema_version": 1,
+    "cameras": {
+      "2010093": {
+        "dish_id": "19498_2",
+        "subject_count": 5
+      }
+    }
+  },
+  "declaration": {
+    "schema_id": "orange.recording_start_declaration",
+    "schema_version": 1,
+    "declared_by": "delahantyj",
+    "recording_intent": "stimulus_experiment",
+    "subject_references": {
+      "schema_version": 1,
+      "default": {
+        "subject_count": 1
+      },
+      "cameras": {
+        "2010093": {
+          "dish_id": "19498_2"
+        },
+        "2010094": {
+          "dish_id": "19498_3",
+          "subject_count": 5
+        }
+      }
+    }
+  },
+  "requester": {
+    "transport": "gui_panel",
+    "user": "delahantyj"
+  }
+}

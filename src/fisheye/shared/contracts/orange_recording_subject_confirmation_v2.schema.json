@@ -1,0 +1,381 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orange.recording_subject_confirmation.v2",
+  "title": "Orange recording subject confirmation v2 (subject_confirmation.json)",
+  "description": "Who declared a recording, written at the recording root before the start snapshot is sealed by session::BuildSubjectConfirmation (Orange cb4b65ee), the one writer for the GUI panel, a local-control start and an orange_client run spec. v2 adds `declaration` and `requester` to v1's keys. Cross-field rules are in README.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "schema_version",
+    "confirmed_by",
+    "confirmed_at_utc",
+    "cameras",
+    "config",
+    "declaration",
+    "requester"
+  ],
+  "properties": {
+    "schema_id": {
+      "const": "orange.recording_subject_confirmation"
+    },
+    "schema_version": {
+      "const": 2
+    },
+    "confirmed_by": {
+      "enum": [
+        "gui_operator",
+        "local_control",
+        "run_spec"
+      ]
+    },
+    "confirmed_at_utc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "cameras": {
+      "type": "object",
+      "propertyNames": {
+        "minLength": 1
+      },
+      "description": "One entry per recording camera: the declaration resolved (camera value, else default, else null). A stated blank and an undeclared camera BOTH resolve to {dish_id: null, subject_count: null}; tell them apart by `config` or the subject reference reason (declared_blank vs no_dish_declared).",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "dish_id",
+          "subject_count"
+        ],
+        "properties": {
+          "dish_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          },
+          "subject_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "config": {
+      "oneOf": [
+        {
+          "$ref": "orange.recording_start_declaration.v1#/$defs/subject_references"
+        },
+        {
+          "$ref": "orange.recording_start_declaration.v2#/$defs/subject_references"
+        }
+      ],
+      "description": "The subject_references block as Orange re-serialized it (equal to declaration.subject_references when a declaration exists; the GUI table otherwise)."
+    },
+    "declaration": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "orange.recording_start_declaration.v1"
+        },
+        {
+          "$ref": "orange.recording_start_declaration.v2"
+        }
+      ],
+      "description": "null for a GUI panel confirmation. Otherwise the parsed declaration re-serialized by Orange (keys sorted; `source` kept as received): equal as JSON to what was sent, not byte-identical. The exact bytes of a spec-declared run are in run_spec/<sha256>.json at fixed.declaration."
+    },
+    "requester": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/gui_panel"
+        },
+        {
+          "$ref": "#/$defs/local_control_socket"
+        },
+        {
+          "$ref": "#/$defs/run_spec"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "confirmed_by": {
+            "const": "gui_operator"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "declaration": {
+            "type": "null"
+          },
+          "requester": {
+            "$ref": "#/$defs/gui_panel"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "confirmed_by": {
+            "const": "local_control"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "declaration": {
+            "type": "object"
+          },
+          "requester": {
+            "$ref": "#/$defs/local_control_socket"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "confirmed_by": {
+            "const": "run_spec"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "declaration": {
+            "type": "object"
+          },
+          "requester": {
+            "$ref": "#/$defs/run_spec"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "declaration": {
+            "type": "object",
+            "required": [
+              "source"
+            ],
+            "properties": {
+              "source": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "orchard_run_plan",
+                      "orange_run_spec"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "confirmed_by": {
+            "const": "run_spec"
+          }
+        }
+      },
+      "description": "Route rule at cb4b65ee (CheckDeclarationRoute). PENDING, not in production: branch agent/gui/spec-runner-20261116 would also allow orchard_run_plan with local_control; a later schema version will relax this."
+    },
+    {
+      "if": {
+        "properties": {
+          "declaration": {
+            "type": "object",
+            "required": [
+              "source"
+            ],
+            "properties": {
+              "source": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "operator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "confirmed_by": {
+            "const": "local_control"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "gui_panel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transport",
+        "user"
+      ],
+      "properties": {
+        "transport": {
+          "const": "gui_panel"
+        },
+        "user": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 32
+        }
+      },
+      "description": "The Subject panel's Confirm button; user = the account that started Orange (SUDO_USER, else the real uid's login)."
+    },
+    "local_control_socket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transport",
+        "peer",
+        "request_id",
+        "operation_id",
+        "command_source",
+        "received_at_utc"
+      ],
+      "properties": {
+        "transport": {
+          "const": "local_control_socket"
+        },
+        "peer": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "uid",
+                "gid",
+                "pid",
+                "user"
+              ],
+              "properties": {
+                "uid": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "gid": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "pid": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "user": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 32
+                }
+              }
+            }
+          ],
+          "description": "Kernel SO_PEERCRED of the sender. At cb4b65ee a declared start that names no empty background is NOT refused when the kernel reports no peer, so null is possible here (unlike orange.requester.v1)."
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "command_source": {
+          "type": "string",
+          "description": "The request's own source field (a claim; may be empty)."
+        },
+        "received_at_utc": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        }
+      }
+    },
+    "run_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transport",
+        "spec_path",
+        "spec_sha256",
+        "spec_copy_relative_path",
+        "run_stamp",
+        "experiment_id",
+        "user"
+      ],
+      "properties": {
+        "transport": {
+          "const": "run_spec"
+        },
+        "spec_path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Provenance only: the spec path as orange_client resolved it (absolute when resolvable)."
+        },
+        "spec_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "sha256 of the spec bytes as read (one read: the bytes parsed are the bytes sealed)."
+        },
+        "spec_copy_relative_path": {
+          "type": "string",
+          "pattern": "^run_spec/[0-9a-f]{64}\\.json$",
+          "description": "Exactly run_spec/<spec_sha256>.json; the file holds the spec's exact bytes."
+        },
+        "run_stamp": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "orange_client --run-stamp, null when none was given."
+        },
+        "experiment_id": {
+          "type": "string",
+          "description": "The spec's top-level experiment_id, \"\" when absent."
+        },
+        "user": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "SUDO_USER, else the real uid's login; null when neither is known."
+        }
+      },
+      "description": "Not orange.requester.v1's run_spec shape: this one also carries spec_copy_relative_path, run_stamp and experiment_id."
+    }
+  }
+}

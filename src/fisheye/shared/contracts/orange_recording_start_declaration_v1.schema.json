@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orange.recording_start_declaration.v1",
+  "title": "Orange recording start declaration v1",
+  "description": "What a person declares for one recording (Orange src/session/recording_start_declaration.h at cb4b65ee). Carried as local-control start_recording params.declaration or an orange_client run spec's fixed.declaration; recorded as subject_confirmation.json `declaration`. v1: no source. Cross-field rules a JSON Schema cannot express are in README.md and test_recording_start_declaration.py.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "schema_version",
+    "declared_by",
+    "recording_intent",
+    "subject_references"
+  ],
+  "properties": {
+    "schema_id": {
+      "const": "orange.recording_start_declaration"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "declared_by": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+      "description": "The person who declares (HHMI identity form of pancakebatter host.yml). A claim; who actually sent it is the confirmation's requester."
+    },
+    "recording_intent": {
+      "enum": [
+        "stimulus_experiment",
+        "recording_only"
+      ]
+    },
+    "subject_references": {
+      "$ref": "#/$defs/subject_references"
+    }
+  },
+  "$defs": {
+    "subject_declaration": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "One declaration: a dish and/or a count; at least one key (an entry that declares nothing is refused: omit it). Undeclared fields resolve from `default`, else stay undeclared.",
+      "properties": {
+        "dish_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u0020\\u007f/?#]+$",
+          "description": "MetaZebrobot dish id as typed. Orange: at most 256 BYTES (UTF-8), every byte > 0x20 and != 0x7f, no '/', '?' or '#'."
+        },
+        "subject_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000,
+          "description": "Animals this camera records. A JSON integer token (Orange refuses 5.0)."
+        }
+      }
+    },
+    "subject_references": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version"
+      ],
+      "description": "subject_references block of a start declaration v1. schema_version is this block's own version (it must equal the declaration's), NOT orange.recording_subject_reference. {\"schema_version\": 1} alone declares every camera undeclared (not_collected / no_dish_declared, the GUI's 'Blank all').",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "default": {
+          "$ref": "#/$defs/subject_declaration"
+        },
+        "cameras": {
+          "type": "object",
+          "propertyNames": {
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/subject_declaration"
+          },
+          "description": "Keyed by exact camera serial."
+        }
+      }
+    }
+  }
+}

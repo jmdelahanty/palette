@@ -1,0 +1,55 @@
+{
+  "schema_id": "orange.recording_start_declaration",
+  "schema_version": 2,
+  "declared_by": "delahantyj",
+  "recording_intent": "stimulus_experiment",
+  "subject_references": {
+    "schema_version": 2,
+    "cameras": {
+      "2010093": {
+        "dish_id": "PLACEHOLDER_SOURCE_DISH",
+        "subject_count": 5
+      },
+      "2010094": {
+        "dish_id": "PLACEHOLDER_PLATE",
+        "subject_count": 1
+      },
+      "2010095": {
+        "dish_id": "PLACEHOLDER_SOURCE_DISH",
+        "subject_count": 1
+      },
+      "2010096": {
+        "blank": true
+      }
+    }
+  },
+  "source": {
+    "kind": "orchard_run_plan",
+    "repo": "jmdelahanty/orchard",
+    "commit": "ccbdd67da37f27732dd68bb0fd335d91fd86e4f6",
+    "path": "specs/omnifin0-dot-contrast-corners/run_plans/example_one_session.plan.yaml",
+    "file_sha256": "221e0914a0c0e545e87180f7a2bf6d9043195fe3ebc598490b90885355f871a9",
+    "tree_dirty": false,
+    "plan_id": "omnifin0-dot-contrast-corners-example",
+    "plan_revision": 0,
+    "plan_session_id": "S1",
+    "plan_sha256": "328901b36094e73885eba780dd53c8261e9f23656e3e44ebd891876227bdf2ef",
+    "plan_hash_rule": "orchard_run_plan_v1_plan_sha256",
+    "sign_off": {
+      "entry_id": "signoff-1",
+      "entry_sha256": "89e62a0cab49f676438bf8a29a69c5d7c3300168a467261d05d9d38990592573",
+      "by": "delahantyj",
+      "at_utc": "2026-11-18T14:55:00Z",
+      "record_path": "specs/omnifin0-dot-contrast-corners/run_plans/example_one_session.record.yaml",
+      "record_commit": "ccbdd67da37f27732dd68bb0fd335d91fd86e4f6"
+    },
+    "generator": {
+      "repo": "jmdelahanty/orchard",
+      "commit": "ccbdd67da37f27732dd68bb0fd335d91fd86e4f6",
+      "tool": "tools/declare.py"
+    },
+    "plan_copy_relative_path": "run_plan/221e0914a0c0e545e87180f7a2bf6d9043195fe3ebc598490b90885355f871a9.yaml",
+    "plan_json_copy_relative_path": "run_plan/328901b36094e73885eba780dd53c8261e9f23656e3e44ebd891876227bdf2ef.json",
+    "sign_off_copy_relative_path": "run_plan/sign_off/89e62a0cab49f676438bf8a29a69c5d7c3300168a467261d05d9d38990592573.json"
+  }
+}
