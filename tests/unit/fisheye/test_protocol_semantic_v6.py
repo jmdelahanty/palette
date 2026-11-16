@@ -33,11 +33,12 @@ from fisheye.shared.unified_h5.z_eff import validate_z_eff
 
 CONTRACTS = resource_files("fisheye.shared").joinpath("contracts")
 PINNED = {
-    # agent-contracts PR #137 merge 06b30766, citrus-palette/angles/
+    # agent-contracts PR #137 merge 06b30766, unchanged at PR #139 merge 90dc45a,
+    # citrus-palette/angles/
     "citrus_palette_semantic_policy_pairing_v5.json": "510fccc8d155b2674b0993679f2b82ebe2b3fdb324af0bc6e2e7a67f8761c6f3",
     "citrus_palette_semantic_hash_v6_cases.json": "0c2f308687878ffce4a0ff48312500839c17ed10c71eff1d11451b1cce51c22b",
-    # agent-contracts PR #139 head ac4830dc (pending merge; re-vendor from the
-    # merge commit before review), citrus-palette/angles/; Citrus #127 b1391c6
+    # agent-contracts PR #139 merge 90dc45a (bytes unchanged from head ac4830dc),
+    # citrus-palette/angles/; Citrus #127 b1391c6
     "citrus_protocol_trial_index_v5.schema.json": "f5f3047d746884ec09e26d414278305f20d1d5b56f2f91630a1e9fb39521c85c",
 }
 
