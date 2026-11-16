@@ -32,6 +32,7 @@ from fisheye.shared.pixel_frame_authority import (
     load_source_camera_pixel_frame_authority,
 )
 from fisheye.shared.recording_geometry import (
+    REGISTRATION_SOURCE_DAILY,
     BoundRegisteredDishMask,
     GeometryLoadPolicy,
     MaskGeometryStatus,
@@ -158,6 +159,14 @@ def build_acquisition_geometry_candidate_record(
     if type(bound_mask) is not BoundRegisteredDishMask:
         raise RecordingGeometryError("A bound registered dish mask is required.")
     mask = bound_mask.mask
+    if mask.registration_source != REGISTRATION_SOURCE_DAILY:
+        # Record v1's registration_id/registration_sha256 mean the Citrus daily
+        # registration; a physical-sourced mask needs candidate record v2,
+        # which names its source and selection record (Jeremy, 2026-11-15).
+        raise RecordingGeometryError(
+            "physical_registration_candidate_requires_record_v2: candidate record "
+            f"v{CANDIDATE_RECORD_SCHEMA_VERSION} cannot carry a {mask.registration_source} mask."
+        )
     record = {
         "schema_id": CANDIDATE_RECORD_SCHEMA_ID,
         "schema_version": CANDIDATE_RECORD_SCHEMA_VERSION,

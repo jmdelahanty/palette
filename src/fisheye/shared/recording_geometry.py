@@ -16,7 +16,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -55,6 +56,23 @@ RIM_ACCEPTANCE_QUALITY_GATE = "quality_gate"
 # A gate-accepted fit is admitted only when Palette's own recompute of the
 # gate's evaluation (``dish_rim_gate``) accepts exactly the observation's rim.
 ADMITTED_RIM_ACCEPTANCE_BASES = frozenset({RIM_ACCEPTANCE_OPERATOR_REVIEW, RIM_ACCEPTANCE_QUALITY_GATE})
+# Which producer selection a mask came from. A Citrus daily registration is the
+# default; Orange's own physical registration (its active per-camera pointer,
+# agent-contracts dish_rim_registration_v4) is chosen when it is
+# selected_resolved for the camera, the same rule Orange's live mask uses.
+REGISTRATION_SOURCE_DAILY = "daily_registration"
+REGISTRATION_SOURCE_PHYSICAL = "physical_registration"
+PHYSICAL_REGISTRATION_SCHEMA_ID = "orange.recording.physical_registration_geometry"
+PHYSICAL_REGISTRATION_SCHEMA_VERSION = 1
+PHYSICAL_FRESHNESS_RULE = "orange_physical_registration_freshness_24h_v1"
+PHYSICAL_FRESHNESS_WINDOW = timedelta(seconds=86400)
+PHYSICAL_SELECTION_POLICIES = frozenset(
+    {"accepted_with_group_fit", "explicit_operator_selection", "explicit_operator_reuse"}
+)
+# Orange marks only the entry it chose with live-use facts; the other entry
+# must carry neither (Orange recording_physical_registration.cpp:349-395).
+_LIVE_USE_MARK = "orange_live_detection_pipeline_mode"
+_LIVE_USE_FLAG = "active_in_orange_live_detection_pipeline"
 H5_SCOPE_SCHEMA_ID = "citrus.session.orange_recording_geometry_contract_scope"
 # Scope version -> the source contract versions it may reference. v2 (Citrus
 # #35) changes only version fields: it may reference a v2 geometry contract.
@@ -163,6 +181,12 @@ class RegisteredDishMask:
     recovery_receipt_sha256: str | None = None
     independent_fit_required_before_operational_use: bool = False
     producer_acceptance_basis: str = "operator_review"
+    # REGISTRATION_SOURCE_DAILY: registration_id/registration_sha256 are the
+    # Citrus daily registration's. REGISTRATION_SOURCE_PHYSICAL: they are the
+    # rim observation's artifact id and sha256, and selection_record_sha256 is
+    # Orange's active-pointer record that selected it.
+    registration_source: str = REGISTRATION_SOURCE_DAILY
+    selection_record_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -574,6 +598,16 @@ def _verify_snapshot_rim_reference(
         raise RecordingGeometryError("recording_snapshot rim checksum disagrees with the contract.")
 
 
+# Rows a mask is bound to; verified even when the selection is partial.
+_BOUND_ASSET_ROLES = frozenset(
+    {
+        "daily_rim_observation",
+        "physical_registration_observation",
+        "physical_registration_active_pointer",
+    }
+)
+
+
 def _manifest_status(value: Any) -> MaterializedAssetStatus:
     text = str(value or "missing")
     if text == "complete":
@@ -627,7 +661,7 @@ def _verify_asset_manifest(
             raise RecordingGeometryError(f"Duplicate geometry asset manifest path: {rel_text}")
         asset_path = _safe_relative(assets_root, rel_text, label="geometry asset relative_path")
         by_path[rel_text] = row
-        if not verify_all_files and row.get("role") != "daily_rim_observation":
+        if not verify_all_files and row.get("role") not in _BOUND_ASSET_ROLES:
             continue
         if not asset_path.is_file():
             raise RecordingGeometryError(f"Missing materialized geometry asset: {rel_text}")
@@ -844,6 +878,159 @@ def bind_registered_dish_mask_to_source_camera_frame(
     )
 
 
+@dataclass(frozen=True)
+class _PhysicalSelection:
+    """One camera's validated Orange physical-registration selection."""
+
+    entry: Mapping[str, Any]
+    arena_id: str
+    observation_sha256: str
+    active_pointer_sha256: str
+    valid_until_utc: str
+
+
+def _utc_second(value: Any, *, label: str) -> datetime:
+    """Orange's whole-second UTC stamp, e.g. 2026-11-04T01:00:16Z."""
+
+    text = _required_text(value, label=label)
+    try:
+        return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise RecordingGeometryError(f"{label} is not a whole-second UTC time: {text!r}.") from exc
+
+
+def _refuse_live_use(entry: Any, *, label: str) -> None:
+    if isinstance(entry, Mapping) and (
+        entry.get(_LIVE_USE_FLAG) is True or _LIVE_USE_MARK in entry
+    ):
+        raise RecordingGeometryError(
+            f"{label} is not the entry Orange chose but carries its live-use marks."
+        )
+
+
+def _physical_cameras(contract: Mapping[str, Any]) -> Mapping[str, Mapping[str, Any]]:
+    """physical_registration_geometry.cameras, or {} when the block is absent."""
+
+    block = contract.get("physical_registration_geometry")
+    if block is None:
+        return {}
+    block = _required_mapping(block, label="physical_registration_geometry")
+    _require_schema(
+        block,
+        schema_id=PHYSICAL_REGISTRATION_SCHEMA_ID,
+        schema_version=PHYSICAL_REGISTRATION_SCHEMA_VERSION,
+        label="physical_registration_geometry",
+    )
+    cameras = block.get("cameras", {})
+    cameras = _required_mapping(cameras, label="physical_registration_geometry.cameras")
+    return {
+        str(serial): _required_mapping(camera, label=f"physical camera {serial}")
+        for serial, camera in cameras.items()
+    }
+
+
+def _physical_selection(
+    contract: Mapping[str, Any],
+    camera_serial: str,
+    camera: Mapping[str, Any],
+) -> _PhysicalSelection:
+    """Validate one selected_resolved physical camera, including its 24 h window.
+
+    Rules (Orange production, confirmed 2026-11-15): one captured_at string per
+    recording, equal in the contract, the physical block and the freshness
+    evaluation; the window is [valid_from, valid_until) and exactly 86400 s;
+    valid_from is the fit's created time, or for explicit_operator_reuse the
+    re-selection time sealed in the active pointer.
+    """
+
+    label = f"physical camera {camera_serial}"
+    top = _required_mapping(contract.get("cameras"), label="recording geometry cameras")
+    top_camera = _required_mapping(top.get(camera_serial), label=f"cameras[{camera_serial}]")
+    if top_camera.get("physical_registration") != camera:
+        raise RecordingGeometryError(
+            f"{label} differs between cameras.<serial>.physical_registration "
+            "and physical_registration_geometry.cameras."
+        )
+    if str(camera.get("camera_serial")) != camera_serial:
+        raise RecordingGeometryError(f"{label} camera_serial does not match its key.")
+    if camera.get("mode") != "selected_physical_registration":
+        raise RecordingGeometryError(f"{label} is selected_resolved but not selected_physical_registration.")
+    entry = _required_mapping(camera.get("recording_snapshot_entry"), label=f"{label} recording_snapshot_entry")
+    if entry.get("artifact_id") != camera.get("artifact_id"):
+        raise RecordingGeometryError(f"{label} artifact_id differs from its recording_snapshot_entry.")
+    arena_id = _required_text(entry.get("arena_id"), label=f"{label} entry arena_id")
+    if "arena_id" in top_camera and top_camera.get("arena_id") != arena_id:
+        raise RecordingGeometryError(f"{label} arena_id differs from cameras[{camera_serial}].arena_id.")
+    observation = _required_mapping(camera.get("observation"), label=f"{label} observation")
+    observation_sha = _normalized_sha256(observation.get("sha256"), label=f"{label} observation sha256")
+    source = _required_mapping(entry.get("source"), label=f"{label} entry source")
+    if _normalized_sha256(source.get("sha256"), label=f"{label} entry source sha256") != observation_sha:
+        raise RecordingGeometryError(f"{label} observation sha256 differs from its recording_snapshot_entry.")
+    pointer = _required_mapping(camera.get("active_pointer"), label=f"{label} active_pointer")
+    pointer_sha = _normalized_sha256(pointer.get("sha256"), label=f"{label} active_pointer sha256")
+
+    freshness = _required_mapping(camera.get("freshness"), label=f"{label} freshness")
+    if freshness.get("rule") != PHYSICAL_FRESHNESS_RULE:
+        raise RecordingGeometryError(f"{label} freshness rule is not {PHYSICAL_FRESHNESS_RULE}.")
+    policy = freshness.get("selection_policy")
+    if policy not in PHYSICAL_SELECTION_POLICIES:
+        raise RecordingGeometryError(f"{label} freshness selection_policy {policy!r} is unknown.")
+    if freshness.get("state") != "fresh":
+        raise RecordingGeometryError(f"{label} is selected_resolved but its freshness is not fresh.")
+    captured_text = _required_text(contract.get("captured_at_utc"), label="contract captured_at_utc")
+    block = _required_mapping(contract.get("physical_registration_geometry"), label="physical_registration_geometry")
+    if block.get("captured_at_utc") != captured_text or freshness.get("evaluated_at_utc") != captured_text:
+        raise RecordingGeometryError(
+            f"{label} freshness was not evaluated at the recording's captured_at_utc."
+        )
+    captured = _utc_second(captured_text, label="contract captured_at_utc")
+    valid_from = _utc_second(freshness.get("valid_from_utc"), label=f"{label} valid_from_utc")
+    valid_until = _utc_second(freshness.get("valid_until_utc"), label=f"{label} valid_until_utc")
+    fit_created = _utc_second(freshness.get("fit_created_utc"), label=f"{label} fit_created_utc")
+    if valid_until - valid_from != PHYSICAL_FRESHNESS_WINDOW:
+        raise RecordingGeometryError(f"{label} freshness window is not exactly 24 h.")
+    if policy == "explicit_operator_reuse":
+        snapshot = _required_mapping(pointer.get("snapshot"), label=f"{label} active_pointer snapshot")
+        reselected = _utc_second(snapshot.get("selected_at_utc"), label=f"{label} active_pointer selected_at_utc")
+        pointer_freshness = _required_mapping(
+            snapshot.get("freshness"), label=f"{label} active_pointer freshness"
+        )
+        if reselected != valid_from or pointer_freshness.get("valid_from_utc") != freshness.get("valid_from_utc"):
+            raise RecordingGeometryError(f"{label} reuse window does not start at its re-selection.")
+        if reselected < fit_created:
+            raise RecordingGeometryError(f"{label} was re-selected before its fit was created.")
+    elif valid_from != fit_created:
+        raise RecordingGeometryError(f"{label} freshness window does not start at the fit's creation.")
+    if not valid_from <= captured < valid_until:
+        raise RecordingGeometryError(
+            f"{label} recording captured at {captured_text} is outside its window "
+            f"[{freshness.get('valid_from_utc')}, {freshness.get('valid_until_utc')})."
+        )
+    return _PhysicalSelection(
+        entry=entry,
+        arena_id=arena_id,
+        observation_sha256=observation_sha,
+        active_pointer_sha256=pointer_sha,
+        valid_until_utc=str(freshness["valid_until_utc"]),
+    )
+
+
+def _verify_manifest_row(
+    rows: Mapping[str, Mapping[str, Any]],
+    relative_path: str,
+    *,
+    role: str,
+    sha256: str,
+) -> None:
+    row = rows.get(relative_path)
+    if row is None:
+        raise RecordingGeometryError(f"Asset manifest lacks {relative_path}.")
+    if row.get("role") != role:
+        raise RecordingGeometryError(f"Asset manifest row {relative_path} is not role {role}.")
+    if _normalized_sha256(row.get("sha256"), label=f"{relative_path} sha256") != sha256:
+        raise RecordingGeometryError(f"Materialized {relative_path} checksum disagrees with the contract.")
+
+
 def load_registered_dish_masks_from_recording_folder(
     root: str | Path,
     *,
@@ -886,11 +1073,18 @@ def load_registered_dish_masks_from_recording_folder(
         contract = _strict_json_loads(contract_bytes, label="recording geometry contract")
         _require_geometry_contract(contract, label="recording geometry contract")
         daily = _required_mapping(contract.get("daily_registration_geometry"), label="daily_registration_geometry")
-        selection_status = str(daily.get("status") or "missing")
-        if daily.get("mode") != "selected_daily_registration" or selection_status not in {
+        daily_status = str(daily.get("status") or "missing")
+        daily_selected = daily.get("mode") == "selected_daily_registration" and daily_status in {
             "selected_resolved",
             "selected_partial",
-        }:
+        }
+        physical_cameras = _physical_cameras(contract)
+        physical_chosen = {
+            serial: camera
+            for serial, camera in physical_cameras.items()
+            if camera.get("status") == "selected_resolved"
+        }
+        if not daily_selected and not physical_chosen:
             return _collection_failure(
                 policy=policy,
                 source_kind="orange_recording_folder",
@@ -899,9 +1093,17 @@ def load_registered_dish_masks_from_recording_folder(
                 code="recording_bound_mask_unavailable",
                 message="Recording contract has no selected daily registration geometry.",
             )
+        if daily_selected:
+            selection_status = daily_status
+        else:
+            physical_block = _required_mapping(
+                contract.get("physical_registration_geometry"), label="physical_registration_geometry"
+            )
+            selection_status = str(physical_block.get("status") or "missing")
         if selection_status == "selected_partial" and policy is GeometryLoadPolicy.REQUIRED:
             raise RecordingGeometryError("Required geometry does not accept selected_partial.")
-        registration_id, registration_sha, valid_until = _registration_identity(contract)
+        if daily_selected:
+            registration_id, registration_sha, valid_until = _registration_identity(contract)
         asset_status, _manifest_sha, manifest_rows = _verify_asset_manifest(
             source_root,
             contract,
@@ -913,11 +1115,81 @@ def load_registered_dish_masks_from_recording_folder(
             selection.get("selected_canvas_name"),
             label="selection.selected_canvas_name",
         )
-        cameras = _required_mapping(daily.get("cameras"), label="daily_registration_geometry.cameras")
+        daily_cameras = (
+            _required_mapping(daily.get("cameras"), label="daily_registration_geometry.cameras")
+            if daily_selected
+            else {}
+        )
         masks: dict[RegisteredDishMaskKey, RegisteredDishMask] = {}
         issues: list[GeometryLoadIssue] = []
-        for camera_key, raw_camera in cameras.items():
+        # Orange's rule: the physical entry when it is selected_resolved for the
+        # camera, else the daily one. Only the chosen entry may carry live-use
+        # marks; daily and physical may name different observations.
+        for camera_serial, physical_camera in physical_cameras.items():
+            if camera_serial not in physical_chosen:
+                _refuse_live_use(
+                    physical_camera.get("recording_snapshot_entry"),
+                    label=f"Unselected physical entry for camera {camera_serial}",
+                )
+        for camera_key, raw_camera in daily_cameras.items():
+            if str(camera_key) in physical_chosen and isinstance(raw_camera, Mapping):
+                _refuse_live_use(
+                    raw_camera.get("recording_snapshot_entry"),
+                    label=f"Daily entry for camera {camera_key} (physical chosen)",
+                )
+        for camera_serial, physical_camera in physical_chosen.items():
+            chosen = _physical_selection(contract, camera_serial, physical_camera)
+            key = RegisteredDishMaskKey(rig_id, canvas_name, chosen.arena_id, camera_serial)
+            mask = _mask_from_entry(
+                chosen.entry,
+                key=key,
+                registration_id=_required_text(chosen.entry.get("artifact_id"), label="rim artifact_id"),
+                registration_sha256=chosen.observation_sha256,
+                source_contract_sha256=contract_sha,
+                h5_scope_sha256=None,
+                asset_status=asset_status,
+                citrus_status=CitrusRegistrationStatus.MISSING,
+                valid_until_utc=chosen.valid_until_utc,
+                applied_by_citrus=None,
+                source_kind="orange_recording_folder",
+                source_location=location,
+            )
+            mask = replace(
+                mask,
+                registration_source=REGISTRATION_SOURCE_PHYSICAL,
+                selection_record_sha256=chosen.active_pointer_sha256,
+            )
+            _verify_snapshot_dimensions(
+                snapshot,
+                camera_serial=camera_serial,
+                width=mask.native_width_px,
+                height=mask.native_height_px,
+            )
+            _verify_snapshot_rim_reference(
+                snapshot,
+                camera_serial=camera_serial,
+                artifact_id=mask.artifact_id,
+                source_sha256=mask.source_observation_sha256,
+            )
+            if asset_status is MaterializedAssetStatus.COMPLETE:
+                prefix = f"cameras/Cam{camera_serial}/physical_registration/"
+                _verify_manifest_row(
+                    manifest_rows,
+                    prefix + "observation.json",
+                    role="physical_registration_observation",
+                    sha256=chosen.observation_sha256,
+                )
+                _verify_manifest_row(
+                    manifest_rows,
+                    prefix + "active_pointer.json",
+                    role="physical_registration_active_pointer",
+                    sha256=chosen.active_pointer_sha256,
+                )
+            masks[key] = mask
+        for camera_key, raw_camera in daily_cameras.items():
             camera_serial = str(camera_key)
+            if camera_serial in physical_chosen:
+                continue
             camera = _required_mapping(raw_camera, label=f"daily camera {camera_serial}")
             if camera.get("status") != "resolved":
                 if selection_status == "selected_partial":

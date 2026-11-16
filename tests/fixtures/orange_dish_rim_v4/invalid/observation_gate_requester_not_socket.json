@@ -1,6 +1,6 @@
 {
  "acceptance": {
-  "accepted_at_utc": "2026-11-15T17:00:00Z",
+  "accepted_at_utc": "2026-11-04T01:00:16Z",
   "basis": "quality_gate",
   "gate": {
    "camera_serial": "2010093",
@@ -69,7 +69,7 @@
     "chain_depth": 1,
     "rule": "compare_to_last_operator_reviewed_fit"
    },
-   "evaluated_at_utc": "2026-11-15T17:00:00Z",
+   "evaluated_at_utc": "2026-11-04T01:00:16Z",
    "failures": [],
    "fit": {
     "center_px": {

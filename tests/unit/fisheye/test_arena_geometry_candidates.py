@@ -330,6 +330,22 @@ def _clipped_palette_fit_inputs(
     return fit_report, montage, clip_index, snapshot
 
 
+def test_candidate_record_v1_refuses_a_physical_registration_mask() -> None:
+    # Record v1's registration fields mean the Citrus daily registration; a
+    # physical-sourced mask waits for candidate record v2 (Jeremy, 2026-11-15).
+    bound = _bound_mask()
+    physical = replace(
+        bound,
+        mask=replace(
+            bound.mask,
+            registration_source="physical_registration",
+            selection_record_sha256="sha256:" + "e" * 64,
+        ),
+    )
+    with pytest.raises(RecordingGeometryError, match="physical_registration_candidate_requires_record_v2"):
+        mod.build_acquisition_geometry_candidate_record(physical, recovery_binding=_recovery_binding())
+
+
 def test_candidate_record_keeps_physical_rim_gate_and_selection_distinct() -> None:
     record = mod.build_acquisition_geometry_candidate_record(
         _bound_mask(),
