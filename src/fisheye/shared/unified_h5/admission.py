@@ -14,6 +14,7 @@ from .correspondence import (
     validate_capacity_preflight,
     validate_component_correspondence,
 )
+from .declared_orientation import validate_declared_orientation
 from .geometry import validate_geometry
 from .identity import validate_recording_identity
 from .integrity import (
@@ -168,6 +169,9 @@ def validate_artifact(
     )
     # Recipe v5's per-arena z_eff (after geometry: it reads arena_config_json).
     validate_z_eff(h5, snapshot.semantic_payload.get("normalization_policy"))
+    # Citrus's declared-orientation check (agent-contracts #135; after
+    # geometry: it reads the active homography and the arena region).
+    validate_declared_orientation(h5)
     # Revision 7: pose v3 under video_overlay_v1, and the overlay states only
     # under a binding that admits them (after geometry: they read its
     # homography and arena origin).

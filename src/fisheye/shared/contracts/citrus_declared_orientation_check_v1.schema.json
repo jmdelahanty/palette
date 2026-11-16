@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jmdelahanty/agent-contracts/citrus-palette/coordinate_spaces_v1/citrus_declared_orientation_check_v1.schema.json",
+  "title": "citrus.declared_orientation_check v1",
+  "description": "One arena's handedness check, as sealed in /geometry/calibration/declared_orientation: the rig file's declared orientation facts for the arena's camera and projection path, the stimulus output's xrandr reflection, Citrus's presentation parity, and the expected and measured sign of the active camera_native_px -> final_display_canvas_px homography's determinant. Each H5 attribute is one member; read the group's attributes into an object and validate that. Only a record whose check agreed reaches an H5: START refuses every other outcome. The arithmetic rules R1-R4 in README.md are not expressible here and are checked by test_citrus_declared_orientation_check_v1.py.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "schema_version",
+    "status",
+    "detail",
+    "arena_id",
+    "rig_id",
+    "rig_file_sha256",
+    "projection_path",
+    "projection_mode",
+    "projector_mount",
+    "projector_mount_rotation_deg_about_optical_axis",
+    "projector_firmware_flip",
+    "projection_optical_mirror_count",
+    "canvas_space_parity",
+    "camera_serial",
+    "viewing_side",
+    "camera_optical_mirror_count",
+    "camera_reverse_x",
+    "camera_reverse_y",
+    "recorded_space_parity",
+    "expected_camera_to_canvas_handedness",
+    "presentation_parity",
+    "xrandr_reflection",
+    "expected_determinant_sign",
+    "measured_determinant_sign",
+    "camera_native_width_px",
+    "camera_native_height_px",
+    "homography_determinant"
+  ],
+  "properties": {
+    "schema_id": {
+      "const": "citrus.declared_orientation_check"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "status": {
+      "const": "agrees",
+      "description": "Citrus's own verdict. A consumer recomputes it (README, Consumer checks) and never relies on it alone."
+    },
+    "detail": {
+      "const": "",
+      "description": "The refusal sentence; empty when the check agrees."
+    },
+    "arena_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The arena's config_name."
+    },
+    "rig_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+$"
+    },
+    "rig_geometry_revision": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The rig file's rig_geometry_revision. Absent (never null or 0) when the rig file has none."
+    },
+    "rig_file_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Over the whole rig file bytes Citrus read."
+    },
+    "projection_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The process's projection path id (projection_paths.<id> in the rig file)."
+    },
+    "projection_mode": {
+      "enum": [
+        "front",
+        "rear",
+        "unknown"
+      ]
+    },
+    "projector_mount": {
+      "enum": [
+        "table",
+        "ceiling",
+        "unknown"
+      ]
+    },
+    "projector_mount_rotation_deg_about_optical_axis": {
+      "enum": [
+        "0",
+        "90",
+        "180",
+        "270",
+        "unknown"
+      ],
+      "description": "The rig file's scalar as text, so unknown survives."
+    },
+    "projector_firmware_flip": {
+      "enum": [
+        "none",
+        "horizontal",
+        "vertical",
+        "both",
+        "unknown"
+      ]
+    },
+    "projection_optical_mirror_count": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*|unknown)$",
+      "description": "projection_paths.<id>.optical_mirror_count as text."
+    },
+    "canvas_space_parity": {
+      "enum": [
+        1,
+        -1
+      ],
+      "description": "projection_paths.<id>.derived.canvas_space_parity."
+    },
+    "camera_serial": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The arena's active camera id; a key of the rig file's cameras map."
+    },
+    "viewing_side": {
+      "enum": [
+        "dorsal",
+        "ventral",
+        "unknown"
+      ]
+    },
+    "camera_optical_mirror_count": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*|unknown)$",
+      "description": "cameras.<serial>.optical_mirror_count as text."
+    },
+    "camera_reverse_x": {
+      "enum": [
+        "true",
+        "false",
+        "not_supported_by_firmware",
+        "unknown"
+      ],
+      "description": "cameras.<serial>.reverse_x as text."
+    },
+    "camera_reverse_y": {
+      "enum": [
+        "true",
+        "false",
+        "not_supported_by_firmware",
+        "unknown"
+      ],
+      "description": "cameras.<serial>.reverse_y as text."
+    },
+    "recorded_space_parity": {
+      "enum": [
+        1,
+        -1
+      ],
+      "description": "cameras.<serial>.derived.recorded_space_parity."
+    },
+    "expected_camera_to_canvas_handedness": {
+      "enum": [
+        "preserved",
+        "reflected"
+      ],
+      "description": "cameras.<serial>.derived.expected_camera_to_canvas_handedness.<projection_path>. unknown is refused at START (declared_parity_undeclared)."
+    },
+    "presentation_parity": {
+      "const": -1,
+      "description": "Citrus draws the canvas with one vertical reflection before scan-out (measured on omnifin0 2026-11-15: canvas (x, y) at scan-out (x, H-1-y))."
+    },
+    "xrandr_reflection": {
+      "enum": [
+        "none",
+        "x",
+        "y",
+        "xy"
+      ],
+      "description": "The stimulus output's current reflection, parsed by Citrus from xrandr. Anything else is refused at START."
+    },
+    "expected_determinant_sign": {
+      "enum": [
+        1,
+        -1
+      ]
+    },
+    "measured_determinant_sign": {
+      "enum": [
+        1,
+        -1
+      ]
+    },
+    "camera_native_width_px": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "W of the camera_native_px frame (camera.recorded_px.v1, after ReverseX/Y) the w(p) check used: the arena's active camera calibration native_width_px."
+    },
+    "camera_native_height_px": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "H of that frame: native_height_px."
+    },
+    "homography_determinant": {
+      "type": "number",
+      "not": {
+        "const": 0
+      },
+      "description": "det of the active homography H (camera_native_px -> final_display_canvas_px) as stored, float64; finite and non-zero. Citrus seals the group only when w(p) = h31*x + h32*y + h33 > 0 at the four corners (0,0), (W,0), (0,H), (W,H) of the camera frame and at the arena centre mapped back through H^-1, so sign(det) is the handedness there (README, The rule). Citrus never normalizes H."
+    }
+  }
+}
