@@ -362,6 +362,16 @@ def test_physical_registration_mask_writes_candidate_record_v2() -> None:
     mod.validate_arena_geometry_candidate_record(record)
 
 
+def test_citrus_h5_physical_mask_writes_candidate_record_v2() -> None:
+    # The H5 loader reads Orange's physical selection from the embedded contract.
+    bound = _physical_bound_mask()
+    bound = replace(bound, mask=replace(bound.mask, source_kind="citrus_h5", source_location="/session.h5"))
+    record = mod.build_acquisition_geometry_candidate_record(bound, recovery_binding=None)
+    assert record["schema_version"] == 2
+    assert record["acquisition_source"]["source_kind"] == "citrus_h5"
+    mod.validate_arena_geometry_candidate_record(record)
+
+
 def test_daily_mask_still_writes_candidate_record_v1_unchanged() -> None:
     record = mod.build_acquisition_geometry_candidate_record(
         _bound_mask(), recovery_binding=_recovery_binding()
@@ -393,7 +403,7 @@ _DROP = object()
         (_v2_source_mutation("selection_record_sha256", _DROP), "selection_record_sha256"),
         (_v2_source_mutation("registration_id", "dailyreg-1"), "identity is not its rim observation"),
         (_v2_source_mutation("registration_sha256", "sha256:" + "b" * 64), "identity is not its rim observation"),
-        (_v2_source_mutation("source_kind", "citrus_h5"), "only from an Orange recording folder"),
+        (_v2_source_mutation("source_kind", "palette_recording_image_fit"), "only from an Orange"),
         (lambda record: record.__setitem__("schema_version", 3), "Unsupported arena-geometry candidate schema"),
     ],
 )
