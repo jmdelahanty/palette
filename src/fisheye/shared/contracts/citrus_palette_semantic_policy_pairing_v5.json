@@ -1,0 +1,91 @@
+{
+  "schema_id": "citrus_palette.stimulus_angle_convention.semantic_policy_pairing",
+  "schema_version": 1,
+  "revision": 5,
+  "status": "draft",
+  "decided": "Jeremy, 2026-11-15 (Q9, dot-contrast sham; relayed by citrus-agent): every chaser carries a hashed role, test or sham; new identity versions semantic v6 + trial_index v5; a missing role hashes as test; every chaser in a pre-v6 recording counts as test",
+  "producer": "Citrus PR #127 (JohnsonLabJanelia/citrus, branch agent/citrus/chaser-role-v6, draft): code head 04071dd8bf4926ed0d9c7b49f36d251f58ba2d07, fixture head b1391c62440ec0c4b0a5dde32309184d747a88e6, base main 027d292a41db771a6ba14fda7db839c7c1fffec9; rules in src/protocols/chaser_role.h",
+  "supersedes": "semantic_policy_pairing_v4.json (revision 4). Revisions 2, 3 and 4 are unchanged and stay pinned by whatever already pins them.",
+  "hash_rule": "protocol_semantic_hash = 'sha256:' + hex(sha256(canonical_json_bytes)) over the exact recorded bytes; a consumer never re-canonicalises or regenerates them, except to apply relabel_pooling_rule.rule_v5_to_v6 to recorded v5 bytes",
+  "envelope": {
+    "schema_id": "citrus.protocol.semantic",
+    "schema_version": 1,
+    "stimulus_angle_convention": "atan2_negative_y_x_degrees"
+  },
+  "pairings": [
+    {
+      "stimulus_angle_convention": "canvas_y_down_clockwise_legacy",
+      "semantic_normalization_policies": ["citrus.protocol.semantic.v1"],
+      "trial_index": "schema_version 1 or 2 (citrus.protocol.trial_index.v1 / .v2)",
+      "protocol_file": "unversioned (legacy version 1)"
+    },
+    {
+      "stimulus_angle_convention": "atan2_negative_y_x_degrees",
+      "semantic_normalization_policies": ["citrus.protocol.semantic.v2", "citrus.protocol.semantic.v3", "citrus.protocol.semantic.v4"],
+      "trial_index": "schema_version 3 (citrus.protocol.trial_index.v3)",
+      "protocol_file": "citrus.stimulus_protocol schema_version 2"
+    },
+    {
+      "stimulus_angle_convention": "atan2_negative_y_x_degrees",
+      "semantic_normalization_policies": ["citrus.protocol.semantic.v5"],
+      "trial_index": "schema_version 4 (citrus.protocol.trial_index.v4)",
+      "protocol_file": "citrus.stimulus_protocol schema_version 2"
+    },
+    {
+      "stimulus_angle_convention": "atan2_negative_y_x_degrees",
+      "semantic_normalization_policies": ["citrus.protocol.semantic.v6"],
+      "trial_index": "schema_version 5 (citrus.protocol.trial_index.v5)",
+      "protocol_file": "citrus.stimulus_protocol schema_version 2"
+    }
+  ],
+  "mixing": "the trial index version is fixed by the semantic policy: v2, v3 and v4 pair only with trial_index v3, v5 only with trial_index v4, and v6 only with trial_index v5. Any other combination is corruption and is refused. semantic v3-v6 under the legacy convention is refused, and so is an unknown policy (for example citrus.protocol.semantic.v7).",
+  "semantic_v6": {
+    "changes_from_v5": "normalization_policy is citrus.protocol.semantic.v6. Every chaser of every chaser step (stimulus_mode_id 12) gains a hashed role. Nothing else changes: the render rate, z_eff_source and v3's chaser fields are kept exactly as in v5.",
+    "removed": [],
+    "newly_hashed": [
+      {
+        "path": "identity.steps[].parameters.chasers[].role",
+        "rule": "required on every chaser of every chaser step, exactly \"test\" or \"sham\"; written \"test\" when the protocol file leaves it out, so a protocol without a sham hashes the same with or without explicit roles; absent from non-chaser steps; ordered by the unchanged canonicaliser"
+      }
+    ],
+    "role_rules": {
+      "definition": "a sham is a control arm that is on screen in the step's layout but cannot be seen: it is drawn in exactly the background's displayed code and never moves. It is hashed so that a sham never pools with a test chaser of zero contrast.",
+      "displayed_code": "the plain_v1 code at brightness 1.0 (Citrus ChaserRole::DisplayedCode), recorded in the trial index as features.appearance.elements.chaser_<k>.resolved_color.rgba8 and features.appearance.elements.background.resolved_color.rgba8, where k is the chaser's chaser_index. Never the authored floats (features.bg_color and chasers[k].color are authored codes).",
+      "citrus_load_refusals": [
+        {"code": "chaser_role_sham_not_passive", "rule": "a sham whose behavior_mode is not passive (1)"},
+        {"code": "chaser_role_sham_with_appearance_profile", "rule": "a sham with an appearance profile (with or without appearance_drive). appearance_drive without a profile is refused for every chaser, test or sham, by Citrus's general appearance check before roles are checked (\"appearance_drive requires an object appearance profile\"; protocol_io.cpp ValidateChaserAppearanceConfiguration, unchanged since before v6), so a drive appears in the trial index only under chasers[k].appearance.drive_binding"},
+        {"code": "chaser_role_sham_with_background_edge_falloff", "rule": "a sham in a step with background_edge_falloff (the background has no single code)"},
+        {"code": "chaser_role_sham_with_proximity_feedback", "rule": "a sham in a step with enable_proximity_feedback (the per-frame blend toward proximity_color repaints the background under the chasers but not the sham)"},
+        {"code": "chaser_role_sham_with_danger_zone", "rule": "a sham in a step whose danger zone is enabled and drawn (danger_zone_enabled && draw_danger_zone; the zone repaints part of the background). An enabled zone with draw_danger_zone false is admitted."},
+        {"code": "chaser_role_sham_differs_from_background", "rule": "a sham whose displayed rgba8 differs from the background's"},
+        {"code": "chaser_role_test_equals_background", "rule": "a test chaser whose displayed rgba8 equals the background's"}
+      ],
+      "citrus_order": "Citrus reports the first failure in chaser order, and for a sham checks passive, then appearance, then falloff, then proximity feedback, then a drawn danger zone, then the displayed code. Citrus draws the background code, the edge falloff, the proximity blend and the danger zone under the chasers (ChaserStimulus.cu chaser_underlay_pixel), so the sham is refused for each underlay that would make it differ from the pixels around it. A role other than \"test\" or \"sham\" is refused with the message 'A chaser's role must be \"test\" or \"sham\"' and no stable code.",
+      "intake_recheck": "Palette does not trust Citrus's load check alone. On every v6 recording, for each chaser k of each chaser step in the trial index: R-role, features.chasers[k].role is present and is \"test\" or \"sham\"; if \"sham\": S1, elements.chaser_<k>.resolved_color.rgba8 == elements.background.resolved_color.rgba8; S2, the step's features has no background_edge_falloff; S3, features.chasers[k].behavior_mode_id == 1; S4, features.chasers[k] has no appearance and elements.chaser_<k>.contrast_profile_digest is null; S5, the step's features.proximity_feedback.enabled is false; S6, the step's features.danger_zone is not both enabled and draw true, and elements has no danger_zone (an absent proximity_feedback or danger_zone block counts as enabled); if \"test\": T1, elements.chaser_<k>.resolved_color.rgba8 != elements.background.resolved_color.rgba8. Any failure refuses the recording. Palette's refusal codes are its own."
+    },
+    "trial_index": {
+      "schema_id": "citrus.protocol.trial_index",
+      "schema_version": 5,
+      "normalization_policy": "citrus.protocol.trial_index.v5",
+      "changes_from_v4": "schema_version 4 -> 5 and normalization_policy .v4 -> .v5. On chaser steps every features.chasers[k] gains a required role, \"test\" or \"sham\", always written. There are no other new keys. The bytes also differ in the embedded protocol_semantic_hash, and the execution-index hash changes because it embeds the trial-index hash.",
+      "schema": "Citrus src/schemas/protocol_trial_index_v5.schema.json at Citrus PR #127 head b1391c6 (unchanged since 54e475d), sha256 f5f3047d746884ec09e26d414278305f20d1d5b56f2f91630a1e9fb39521c85c (a copy of v4 with $id, title, description and the two version consts changed, and chaser.role added as a required enum test | sham)"
+    },
+    "seeds": "per_session_v1 chaser seeds are sha256('citrus.chaser_schedule.seed.v1' | session_uuid | semantic_hash | step_index | occurrence), so they change with the semantic hash. session_uuid is included, so no two sessions ever shared a seed. fixed_v1 seeds are unchanged."
+  },
+  "relabel_pooling_rule": {
+    "rule_v5_to_v6": "crosswalk. A v5 recording pools with a v6 protocol_semantic_hash group G exactly when 'sha256:' + hex(sha256(canonical(T(v5_bytes)))) == G, where T parses the recorded v5 canonical_json, sets normalization_policy to citrus.protocol.semantic.v6, and sets role \"test\" on every chaser of every chaser step (stimulus_mode_id 12), and canonical is sorted keys, separators (',', ':'), UTF-8, no NaN. Only recorded v5 bytes are used; the v5 trial index is read with every chaser as role \"test\". The render rate is part of the identity, so 120 and 240 Hz never pool with each other.",
+    "why": "v6 adds only a label. Every pre-v6 chaser was a test chaser, so a v5 recording shows exactly the stimulus of its v6 counterpart with all roles test. No v5 recording can join a group that contains a sham.",
+    "zero_contrast_v5": "a v5 chaser drawn in the background's displayed code would be refused by v6 Citrus (chaser_role_test_equals_background), so its T-image names no admissible v6 protocol and it pools with no v6 group. It keeps its own v5 hash. None of the six fixture protocols has one.",
+    "earlier_rules": "the revision-2 (v2 to v3) and revision-3 (v3 to v4) rules are unchanged and end at v4; rule_v4_to_v5 stays none"
+  },
+  "h5": "none. Revision 5 adds no H5 group or attribute; role is only in the protocol identity and the trial index.",
+  "fixture": {
+    "path": "fixtures/semantic_hash_v6_cases.json",
+    "source": "Citrus protocol_identity_dump (--render-rate-hz 120 and 240): v5_120/v5_240 from main 027d292 (the rig GUI since 2026-11-15T23:17:22Z), v6_120/v6_240 and the role cases from 04071dd",
+    "status": "delivered byte for byte from Citrus PR #127 head b1391c6 (docs/protocol_semantic_v6/semantic_hash_v6_cases.json); sha256 0c2f308687878ffce4a0ff48312500839c17ed10c71eff1d11451b1cce51c22b",
+    "cases": "6 repository protocols at v5 and v6, 120 and 240 Hz: batman_composable, goodbatbadbat, good_cop_bad_cop, good_cop_bad_cop_demo, demo_chaser_then_phototaxis_seed1 (chaser), phototaxis_heading_split_30trials_seed1 (no chaser)",
+    "role_cases": "10 on one synthetic dot-contrast step with four chasers (three test, one sham): admitted_test_and_sham and admitted_tests_without_role (the same protocol with the test roles left out; both hash sha256:61e8d1fa334fe6ac4fc4b80645925b1e3924a423605cb5039204384d346d89d9 at 120 Hz); one refused file per Citrus rule with Citrus's exit status and refusal text; refused_unknown_role (role \"control\")",
+    "intake_refused_cases": "1: refused_trial_index_v5_role_absent, admitted_test_and_sham at 120 Hz with steps[0].features.chasers[0].role deleted. Citrus never writes it; intake must refuse it.",
+    "shared_with_revision_4": "the v5 entries of batman_composable, goodbatbadbat, good_cop_bad_cop_demo and demo_chaser_then_phototaxis_seed1 equal fixtures/semantic_hash_v5_cases.json: the same protocol file sha256, the same canonical bytes and hashes, and the same trial index (stored here as a JSON string, there as an object)"
+  }
+}
