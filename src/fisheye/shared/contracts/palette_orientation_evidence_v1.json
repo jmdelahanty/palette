@@ -1,0 +1,201 @@
+{
+  "schema_id": "palette.orientation_evidence",
+  "schema_version": 1,
+  "design": "palette#377 section 5 legacy policy and section 10 (orientation_status is derived per recording, not stamped)",
+  "rule": "a recording listed here is orientation-verified for the camera_to_canvas link when its Citrus H5 /metadata/session rig_id, session_uuid and arena_id, its /geometry/correspondence/input camera_serial, and the sha256 of its active /geometry/calibration/<camera>/homography_matrix (3x3, little-endian float64, C order) all equal the listed values; camera-to-dish parity stays declared",
+  "evidence": {
+    "omnifin0_20261115_static_dots_nir_filters_off": {
+      "rig_id": "omnifin0",
+      "verified_link": "camera_to_canvas",
+      "measurement": {
+        "performed_at_utc": "2026-11-15T17:33:52Z",
+        "description": "Citrus static_dots (6 mm disk top_left, 3 mm disk top_right) in every arena with NIR filters off; Orange guided capture of all four cameras and an xwd of the scan-out. Camera x preserved, y reflected (det < 0) on all four arenas; presentation parity -1 measured. The homography sealed in every Citrus H5 from 2026-10-09 to 2026-11-06 maps today's camera blobs onto the commanded dots within 0.2-8 px (the November projector move, a translation).",
+        "rig_geometry_revision": 16,
+        "rig_file_sha256": "sha256:1934857fe156e7d3aa3873602760b67ce3ae1e74be181a8ddbd0e9df3f0c0332",
+        "orange_guided_capture_result_sha256": "sha256:c8a07d0cebbbb351562b582e0146bf741e4564a412774eb089bee8bbb000f839",
+        "orange_calibration_session": "calsess_2026_11_15T17_29_47Z_shadow",
+        "orange_calibration_session_index_sha256": "sha256:0b4ec4121822aa49ac8af7466a3cbf995d8665a3f9e212495bc1aee8fc970185",
+        "scanout_xwd_sha256": "sha256:74d30722bbe78f51a871751ec4ccc74607caa85f1096867ab8ec932c91c4e0de",
+        "scene_status_sha256": "sha256:387f1400e333b844fb7647e28a1a4ca6fc08ee06d0d887d2d25e5cf34bbcb393",
+        "held_at": "pancake0:/mnt/Data2/palette_delivery/omnifin0-orientation-check-20261115/ (SHA256SUMS, 12 entries); not yet on /groups",
+        "record": "palette#377 docs/design/2026-10-12-coordinate-spaces-contract/README.md section 10, 'Orientation check, omnifin0, 2026-11-15'"
+      },
+      "statement": {
+        "by": "Jeremy",
+        "given_utc_date": "2026-11-15",
+        "text": "The camera can't see the projection, the projector didn't flip or change anything that way."
+      },
+      "coverage_decision": "Jeremy, 2026-11-17: this measurement plus the statement covers only the 10-17/18 phototaxis sessions; other pre-cutoff omnifin0 recordings stay unverified until widened",
+      "recordings": [
+        {
+          "session_uuid": "citsess_03c5f482bc81db8c81056754169f2019c3335dfc664f5e1a9c27dc991689ce0d",
+          "arena_id": "arena_1",
+          "camera_serial": "2010093",
+          "homography_matrix_sha256": "sha256:9f6f9c2ade9909d4a224f264e5c20ee62bfc632207ecce2b762f0ecbcd83b64c",
+          "recording": "2026_10_17_12_06_15_Cam2010093"
+        },
+        {
+          "session_uuid": "citsess_497a7bfcef0c511e238d3ea46e7f4872dfcc02fbd7f6bcd30e73e68c547cb3fe",
+          "arena_id": "arena_2",
+          "camera_serial": "2010094",
+          "homography_matrix_sha256": "sha256:67a4098dea7918ce5631e66023ebcebebecf9e131f905c2dc4ba393657fb0150",
+          "recording": "2026_10_17_12_06_15_Cam2010094"
+        },
+        {
+          "session_uuid": "citsess_bb27fbe6aa8ba4f4ab0f09102cf284d6e988f1594a3181a2b1a700fe6197b4e8",
+          "arena_id": "arena_3",
+          "camera_serial": "2010095",
+          "homography_matrix_sha256": "sha256:117b29013fe7e602471207deb3e455ec521967a7c50fd4e01e5ca1784f1677b8",
+          "recording": "2026_10_17_12_06_15_Cam2010095"
+        },
+        {
+          "session_uuid": "citsess_c5506b9a2088ac2c7dbec346740d7da743010441e83a5cd257a5e5d5d9d2e860",
+          "arena_id": "arena_4",
+          "camera_serial": "2010096",
+          "homography_matrix_sha256": "sha256:59b61ca3b6181a1bc58866b14c3654411a640871488e850da80b4e32a37ca074",
+          "recording": "2026_10_17_12_06_15_Cam2010096"
+        },
+        {
+          "session_uuid": "citsess_51cb7ec3bcb16e6d288eaa3cab94d80d14cd11089fa62827c6d0aa8b19aada60",
+          "arena_id": "arena_1",
+          "camera_serial": "2010093",
+          "homography_matrix_sha256": "sha256:9f6f9c2ade9909d4a224f264e5c20ee62bfc632207ecce2b762f0ecbcd83b64c",
+          "recording": "2026_10_17_14_09_08_Cam2010093"
+        },
+        {
+          "session_uuid": "citsess_2559afa0c286fb5731f7b44cf5284d8fb63ca1c7c56c4bcefc3cd87cf5ec7a64",
+          "arena_id": "arena_2",
+          "camera_serial": "2010094",
+          "homography_matrix_sha256": "sha256:67a4098dea7918ce5631e66023ebcebebecf9e131f905c2dc4ba393657fb0150",
+          "recording": "2026_10_17_14_09_08_Cam2010094"
+        },
+        {
+          "session_uuid": "citsess_47a060de56b7d885af94ad426b649ee593f18822361c2a7d061782b4254637b2",
+          "arena_id": "arena_3",
+          "camera_serial": "2010095",
+          "homography_matrix_sha256": "sha256:117b29013fe7e602471207deb3e455ec521967a7c50fd4e01e5ca1784f1677b8",
+          "recording": "2026_10_17_14_09_08_Cam2010095"
+        },
+        {
+          "session_uuid": "citsess_4320c820ea0015a0533565bcd0b25d9eb23989f9b376d25b3c73244a3da9ed54",
+          "arena_id": "arena_4",
+          "camera_serial": "2010096",
+          "homography_matrix_sha256": "sha256:59b61ca3b6181a1bc58866b14c3654411a640871488e850da80b4e32a37ca074",
+          "recording": "2026_10_17_14_09_08_Cam2010096"
+        },
+        {
+          "session_uuid": "citsess_e0be8f77a30cd747d7555a48b213b87ab0d27721f33c6e192f4bcce03633cd58",
+          "arena_id": "arena_1",
+          "camera_serial": "2010093",
+          "homography_matrix_sha256": "sha256:9f6f9c2ade9909d4a224f264e5c20ee62bfc632207ecce2b762f0ecbcd83b64c",
+          "recording": "2026_10_17_15_57_07_Cam2010093"
+        },
+        {
+          "session_uuid": "citsess_611f1d63e14dabee8ecafe03f0e8497062a82fa2519dba3c276bd2922c0a77e0",
+          "arena_id": "arena_2",
+          "camera_serial": "2010094",
+          "homography_matrix_sha256": "sha256:67a4098dea7918ce5631e66023ebcebebecf9e131f905c2dc4ba393657fb0150",
+          "recording": "2026_10_17_15_57_07_Cam2010094"
+        },
+        {
+          "session_uuid": "citsess_9728b26471b948c515d085ac7f51541fe64f0c49bf0e942d2f2e078edcad7e09",
+          "arena_id": "arena_3",
+          "camera_serial": "2010095",
+          "homography_matrix_sha256": "sha256:117b29013fe7e602471207deb3e455ec521967a7c50fd4e01e5ca1784f1677b8",
+          "recording": "2026_10_17_15_57_07_Cam2010095"
+        },
+        {
+          "session_uuid": "citsess_ce1cfc443509e7e12a0a33f4efe14d2346ee4f8ba953cedd285845c7631fe900",
+          "arena_id": "arena_4",
+          "camera_serial": "2010096",
+          "homography_matrix_sha256": "sha256:59b61ca3b6181a1bc58866b14c3654411a640871488e850da80b4e32a37ca074",
+          "recording": "2026_10_17_15_57_07_Cam2010096"
+        },
+        {
+          "session_uuid": "citsess_d0f7254fec25d1dc112f6f2d19442d604bc43041999d31a1807e09220b48b7c6",
+          "arena_id": "arena_1",
+          "camera_serial": "2010093",
+          "homography_matrix_sha256": "sha256:9f6f9c2ade9909d4a224f264e5c20ee62bfc632207ecce2b762f0ecbcd83b64c",
+          "recording": "2026_10_17_17_45_57_Cam2010093"
+        },
+        {
+          "session_uuid": "citsess_57202adb59e7f608b05d6e0c2f4a8b7ec5b04c08792a1027ce217c8994ee5c74",
+          "arena_id": "arena_2",
+          "camera_serial": "2010094",
+          "homography_matrix_sha256": "sha256:67a4098dea7918ce5631e66023ebcebebecf9e131f905c2dc4ba393657fb0150",
+          "recording": "2026_10_17_17_45_57_Cam2010094"
+        },
+        {
+          "session_uuid": "citsess_7502b61a7c6dfb1f2de0f54308be72af22f36541cd026d9fd4eeae3209157c6c",
+          "arena_id": "arena_3",
+          "camera_serial": "2010095",
+          "homography_matrix_sha256": "sha256:117b29013fe7e602471207deb3e455ec521967a7c50fd4e01e5ca1784f1677b8",
+          "recording": "2026_10_17_17_45_57_Cam2010095"
+        },
+        {
+          "session_uuid": "citsess_4daf648a2eeb7574d8a1280ce140a0c2d63ac1d32ac81ae6ff5cd6274ec4cc25",
+          "arena_id": "arena_4",
+          "camera_serial": "2010096",
+          "homography_matrix_sha256": "sha256:59b61ca3b6181a1bc58866b14c3654411a640871488e850da80b4e32a37ca074",
+          "recording": "2026_10_17_17_45_57_Cam2010096"
+        },
+        {
+          "session_uuid": "citsess_9165c05edc43284d7dc324b3a9f5c8035107770c7ce4aeb5d378f054e7d752bd",
+          "arena_id": "arena_1",
+          "camera_serial": "2010093",
+          "homography_matrix_sha256": "sha256:9f6f9c2ade9909d4a224f264e5c20ee62bfc632207ecce2b762f0ecbcd83b64c",
+          "recording": "2026_10_17_19_38_38_Cam2010093"
+        },
+        {
+          "session_uuid": "citsess_a5b5422769902774b4d7cdf54452c171b2880f16b1666bddec604d7e3fc83197",
+          "arena_id": "arena_2",
+          "camera_serial": "2010094",
+          "homography_matrix_sha256": "sha256:67a4098dea7918ce5631e66023ebcebebecf9e131f905c2dc4ba393657fb0150",
+          "recording": "2026_10_17_19_38_38_Cam2010094"
+        },
+        {
+          "session_uuid": "citsess_b33a07d96e83a103f555785ca5f22c1d74c5b46bd6804bbd984d4e4dabf9a648",
+          "arena_id": "arena_3",
+          "camera_serial": "2010095",
+          "homography_matrix_sha256": "sha256:117b29013fe7e602471207deb3e455ec521967a7c50fd4e01e5ca1784f1677b8",
+          "recording": "2026_10_17_19_38_38_Cam2010095"
+        },
+        {
+          "session_uuid": "citsess_ee20f5cad42b5c0b3ca10ae29970f75c23e46a84ccf7a3f25ac90e30c57559ef",
+          "arena_id": "arena_4",
+          "camera_serial": "2010096",
+          "homography_matrix_sha256": "sha256:59b61ca3b6181a1bc58866b14c3654411a640871488e850da80b4e32a37ca074",
+          "recording": "2026_10_17_19_38_38_Cam2010096"
+        },
+        {
+          "session_uuid": "citsess_e7d856c52abe9d655650656dda2356a21d15c17e33344ca6ea07a401fa809011",
+          "arena_id": "arena_1",
+          "camera_serial": "2010093",
+          "homography_matrix_sha256": "sha256:9f6f9c2ade9909d4a224f264e5c20ee62bfc632207ecce2b762f0ecbcd83b64c",
+          "recording": "2026_10_18_11_32_33_Cam2010093"
+        },
+        {
+          "session_uuid": "citsess_2a054493c08dcaa63236af7c39b121364978eebda3d938d6f95bef789bafa489",
+          "arena_id": "arena_2",
+          "camera_serial": "2010094",
+          "homography_matrix_sha256": "sha256:67a4098dea7918ce5631e66023ebcebebecf9e131f905c2dc4ba393657fb0150",
+          "recording": "2026_10_18_11_32_33_Cam2010094"
+        },
+        {
+          "session_uuid": "citsess_185becbcde8aec1b273ebd6c6ea83db81a59f08bce059882b27010c078a76a15",
+          "arena_id": "arena_3",
+          "camera_serial": "2010095",
+          "homography_matrix_sha256": "sha256:117b29013fe7e602471207deb3e455ec521967a7c50fd4e01e5ca1784f1677b8",
+          "recording": "2026_10_18_11_32_33_Cam2010095"
+        },
+        {
+          "session_uuid": "citsess_421a8651576a1124d02d96e8adf216926213ef6b39c86995a8a91876284388a7",
+          "arena_id": "arena_4",
+          "camera_serial": "2010096",
+          "homography_matrix_sha256": "sha256:59b61ca3b6181a1bc58866b14c3654411a640871488e850da80b4e32a37ca074",
+          "recording": "2026_10_18_11_32_33_Cam2010096"
+        }
+      ]
+    }
+  }
+}
