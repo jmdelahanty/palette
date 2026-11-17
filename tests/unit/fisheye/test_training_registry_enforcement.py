@@ -329,3 +329,76 @@ def test_main_records_failed_status_on_config_load_failure(
     assert td.main(args) == 1
     assert [entry["status"] for entry in recorded] == ["failed"]
     assert recorded[0]["final_metrics"]["stage"] == "config_load"
+
+
+# --- shared best.pt binding: pose -------------------------------------------
+
+from fisheye.training.training_run_shared import (  # noqa: E402
+    BEST_CHECKPOINT_METRICS_SOURCE,
+    ULTRALYTICS_POSE_METRIC_COLUMNS,
+    best_checkpoint_validation_metrics,
+    results_row_metrics,
+    ultralytics_completion_errors,
+)
+
+_POSE_RESULTS = pd.DataFrame(
+    [
+        [10, 0.95, 0.94, 0.97, 0.70, 0.90, 0.60],
+        [11, 0.96, 0.95, 0.98, 0.72, 0.93, 0.66],
+        [21, 0.96, 0.96, 0.98, 0.71, 0.91, 0.62],
+    ],
+    columns=[
+        "epoch",
+        "metrics/precision(B)",
+        "metrics/recall(B)",
+        "metrics/mAP50(B)",
+        "metrics/mAP50-95(B)",
+        "metrics/mAP50(P)",
+        "metrics/mAP50-95(P)",
+    ],
+)
+
+
+def test_pose_best_checkpoint_metrics_bind_box_and_pose_to_best_epoch(tmp_path: Path) -> None:
+    best_row = _POSE_RESULTS.iloc[1]
+    weights = _write_checkpoint(
+        tmp_path / "weights" / "best.pt",
+        {column: float(best_row[column]) for column in ULTRALYTICS_POSE_METRIC_COLUMNS.values()}
+        | {"fitness": 0.66},
+    )
+
+    metrics = best_checkpoint_validation_metrics(
+        weights_path=weights,
+        results_df=_POSE_RESULTS,
+        columns=ULTRALYTICS_POSE_METRIC_COLUMNS,
+    )
+
+    assert metrics["best_epoch"] == 11
+    assert metrics["pose_mAP50_95"] == pytest.approx(0.66)
+    assert metrics["mAP50_95"] == pytest.approx(0.72)
+    assert metrics["metrics_source"] == BEST_CHECKPOINT_METRICS_SOURCE
+    last = results_row_metrics(_POSE_RESULTS.iloc[-1], ULTRALYTICS_POSE_METRIC_COLUMNS)
+    assert last["pose_mAP50_95"] == pytest.approx(0.62)
+
+
+def test_pose_best_checkpoint_metrics_require_pose_columns(tmp_path: Path) -> None:
+    weights = _write_checkpoint(tmp_path / "best.pt", _BEST_TRAIN_METRICS)  # box-only
+    with pytest.raises(ValueError, match="lacks"):
+        best_checkpoint_validation_metrics(
+            weights_path=weights,
+            results_df=_POSE_RESULTS,
+            columns=ULTRALYTICS_POSE_METRIC_COLUMNS,
+        )
+
+
+def test_results_row_metrics_treats_nan_as_missing() -> None:
+    row = pd.Series({"metrics/mAP50(B)": float("nan")})
+    assert results_row_metrics(row, {"mAP50": "metrics/mAP50(B)"}) == {"mAP50": None}
+
+
+def test_detect_and_pose_share_the_completion_gate() -> None:
+    from fisheye.training import train_pose
+
+    assert td._detection_completion_errors is ultralytics_completion_errors
+    assert train_pose.ultralytics_completion_errors is ultralytics_completion_errors
+    assert train_pose.best_checkpoint_validation_metrics is best_checkpoint_validation_metrics

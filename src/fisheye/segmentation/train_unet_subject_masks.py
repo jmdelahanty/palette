@@ -34,6 +34,7 @@ from ..training.config import SubjectMaskTrainingConfig
 from ..training.losses import MaskedBCEDiceCriterion
 from ..training.training_run_shared import (
     record_registry_training_run as _shared_record_registry_training_run,
+    snapshot_training_inputs as _shared_snapshot_training_inputs,
 )
 from ..training.zarr_subject_mask_dataset import (
     SubjectMaskChunkedDataset,
@@ -618,7 +619,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[Sequence[str]] = None) -> None:
+def _unet_completion_errors(*, run_dir: Path, best_dice: float) -> list[str]:
+    """Reasons a finished U-Net run must not be recorded as success."""
+    errors: list[str] = []
+    best_model_path = Path(run_dir) / "best_model.pt"
+    if not best_model_path.is_file():
+        errors.append(f"best_model.pt missing at {best_model_path}")
+    if not math.isfinite(float(best_dice)):
+        errors.append("no finite validation Dice was observed; best_model.pt was never selected")
+    return errors
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
 
@@ -627,10 +639,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     manifest_path = Path(args.manifest).expanduser().resolve() if args.manifest else None
     effective_set_id = str(args.set_id).strip() if args.set_id else None
     registry_run_id = args.run_name or f"unet_subject_{int(time.time())}"
-    invocation_payload = (
-        build_invocation_record(tool="fisheye.segmentation.train_unet_subject_masks", args=args)
-        if args.log_registry
-        else None
+    # Built unconditionally and snapshotted into <run>/inputs, so a run without
+    # registry logging (a cluster job registered later on the writer host)
+    # still carries its LSF allocation and accelerator identity.
+    invocation_payload = build_invocation_record(
+        tool="fisheye.segmentation.train_unet_subject_masks",
+        args=args,
+        include_scheduler=True,
+        include_accelerator=True,
     )
     if not effective_set_id and manifest_path is not None:
         effective_set_id = _read_manifest_set_id(manifest_path)
@@ -762,6 +778,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     run_dir = _create_run_directory(project_base_dir, args.run_name or default_run_name)
     registry_run_id = run_dir.name
     console.print(f"[green]Output directory:[/green] {run_dir}\n")
+    _shared_snapshot_training_inputs(
+        run_dir=run_dir,
+        config_path=cfg_path,
+        manifest_path=manifest_path,
+        invocation_payload=invocation_payload,
+    )
     preview_dir = run_dir / "validation_previews"
     live_history_path = run_dir / "training_history_live.jsonl"
     if val_preview_samples > 0:
@@ -1149,6 +1171,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "git_commit": git_info.get("commit_hash", "unknown"),
             "git_branch": git_info.get("branch", "unknown"),
             "hostname": env_info["platform"].get("hostname", "unknown"),
+            "platform": invocation_payload.get("platform") if isinstance(invocation_payload, dict) else None,
+            "accelerator": invocation_payload.get("accelerator") if isinstance(invocation_payload, dict) else None,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         with open(run_dir / "training_summary.json", "w", encoding="utf-8") as fh:
@@ -1183,6 +1207,31 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     finally:
         if writer is not None:
             writer.close()
+
+    completion_errors = _unet_completion_errors(run_dir=run_dir, best_dice=best_dice)
+    if completion_errors:
+        for message in completion_errors:
+            console.print(f"[bold red]✗ Training run incomplete:[/bold red] {message}")
+        if args.log_registry:
+            history_path = run_dir / "training_history.json"
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=registry_run_id,
+                set_id=effective_set_id,
+                config_path=cfg_path,
+                manifest_path=manifest_path,
+                model_path=None,
+                metrics_path=history_path if history_path.exists() else None,
+                status="failed",
+                final_metrics={
+                    "stage": "post_training_validation",
+                    "error_type": "TrainingCompletionCheckFailed",
+                    "error_message": "; ".join(completion_errors),
+                },
+            )
+        return 1
 
     if args.log_registry:
         best_model_path = run_dir / "best_model.pt"
@@ -1223,7 +1272,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         f"\n[green]✓[/green] Training complete. Best validation Dice = {best_dice:.4f} "
         f"at epoch {best_epoch}. Artifacts written to [cyan]{run_dir}[/cyan]"
     )
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
-    main()
+    raise SystemExit(main())

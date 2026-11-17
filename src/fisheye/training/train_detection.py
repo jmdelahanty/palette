@@ -46,6 +46,11 @@ from .training_run_shared import (
     record_registry_training_run as _shared_record_registry_training_run,
     safe_sha256_file as _shared_safe_sha256_file,
     snapshot_training_inputs as _shared_snapshot_training_inputs,
+    ULTRALYTICS_BOX_METRIC_COLUMNS,
+    best_checkpoint_validation_metrics,
+    results_row_epoch,
+    results_row_metrics,
+    ultralytics_completion_errors,
 )
 from .training_naming_shared import (
     build_default_detect_run_name as _shared_build_default_detect_run_name,
@@ -1089,91 +1094,22 @@ def _record_registry_training_run(
     )
 
 
-_BOX_METRIC_COLUMNS: dict[str, str] = {
-    "precision": "metrics/precision(B)",
-    "recall": "metrics/recall(B)",
-    "mAP50": "metrics/mAP50(B)",
-    "mAP50_95": "metrics/mAP50-95(B)",
-}
-# results.csv and the checkpoint's train_metrics carry the same rounded values.
-_EPOCH_MATCH_TOLERANCE = 5e-6
-
-
-def _results_row_epoch(row) -> int | None:
-    value = row.get("epoch") if hasattr(row, "get") else None
-    if value is None or pd.isna(value):
-        return None
-    return int(value)
+# best.pt metric binding is shared with the pose trainer (training_run_shared).
+_BOX_METRIC_COLUMNS = ULTRALYTICS_BOX_METRIC_COLUMNS
+_results_row_epoch = results_row_epoch
+_detection_completion_errors = ultralytics_completion_errors
 
 
 def _results_row_box_metrics(row) -> dict[str, float | None]:
-    metrics: dict[str, float | None] = {}
-    for key, column in _BOX_METRIC_COLUMNS.items():
-        value = row.get(column) if hasattr(row, "get") else None
-        metrics[key] = None if value is None or pd.isna(value) else float(value)
-    return metrics
-
-
-def _load_checkpoint_train_metrics(weights_path: Path) -> dict | None:
-    checkpoint = torch.load(str(weights_path), map_location="cpu", weights_only=False)
-    if not isinstance(checkpoint, dict):
-        return None
-    train_metrics = checkpoint.get("train_metrics")
-    return dict(train_metrics) if isinstance(train_metrics, dict) else None
+    return results_row_metrics(row, _BOX_METRIC_COLUMNS)
 
 
 def _best_checkpoint_validation_metrics(*, weights_path: Path, results_df) -> dict:
-    """Return the validation metrics of the epoch saved as ``best.pt``.
-
-    Ultralytics embeds the best epoch's validation metrics in the checkpoint
-    (``train_metrics``), so they are bound to the exact weights file being
-    registered. ``best_epoch`` is the 1-based ``results.csv`` epoch whose
-    metrics match; it is ``None`` if no row matches.
-    """
-    weights_path = Path(weights_path)
-    if not weights_path.is_file():
-        raise FileNotFoundError(f"best.pt not found: {weights_path}")
-    train_metrics = _load_checkpoint_train_metrics(weights_path)
-    if not train_metrics:
-        raise ValueError(f"{weights_path} carries no train_metrics; cannot bind metrics to it")
-    missing = [column for column in _BOX_METRIC_COLUMNS.values() if column not in train_metrics]
-    if missing:
-        raise ValueError(f"{weights_path} train_metrics lacks {missing}")
-    metrics = {key: float(train_metrics[column]) for key, column in _BOX_METRIC_COLUMNS.items()}
-
-    best_epoch = None
-    for _, row in results_df.iterrows():
-        row_metrics = _results_row_box_metrics(row)
-        if all(
-            row_metrics[key] is not None
-            and abs(row_metrics[key] - metrics[key]) <= _EPOCH_MATCH_TOLERANCE
-            for key in metrics
-        ):
-            best_epoch = _results_row_epoch(row)
-            break  # Ultralytics keeps the first epoch reaching the best fitness.
-
-    fitness = train_metrics.get("fitness")
-    return {
-        **metrics,
-        "fitness": None if fitness is None else float(fitness),
-        "best_epoch": best_epoch,
-        "metrics_checkpoint": "best.pt",
-        "metrics_source": "best.pt:train_metrics",
-    }
-
-
-def _detection_completion_errors(*, run_dir: Path, final_validation_metrics: dict | None) -> list[str]:
-    """Reasons a finished training run must not be recorded as success."""
-    errors: list[str] = []
-    best_path = Path(run_dir) / "weights" / "best.pt"
-    if not best_path.is_file():
-        errors.append(f"best.pt missing at {best_path}")
-    results_csv = Path(run_dir) / "results.csv"
-    if not results_csv.is_file():
-        errors.append(f"results.csv missing at {results_csv}")
-    if final_validation_metrics is None:
-        errors.append("validation metrics bound to best.pt could not be determined")
-    return errors
+    return best_checkpoint_validation_metrics(
+        weights_path=weights_path,
+        results_df=results_df,
+        columns=_BOX_METRIC_COLUMNS,
+    )
 
 
 def _normalize_imgsz(value) -> tuple[int, int]:
