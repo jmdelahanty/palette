@@ -98,10 +98,10 @@ def _channel_summary(
     }
 
 
-def test_train_unet_subject_masks_logs_registry_in_progress_then_success(
+def _prepare_unet_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+) -> tuple[list[str], list[dict[str, object]]]:
     zarr_dir = tmp_path / "source.zarr"
     zarr_dir.mkdir(parents=True)
     (zarr_dir / "zarr.json").write_text("{}", encoding="utf-8")
@@ -145,21 +145,29 @@ def test_train_unet_subject_masks_logs_registry_in_progress_then_success(
 
     monkeypatch.setattr(mod, "_record_registry_training_run", _fake_record)
 
-    mod.main(
-        [
-            str(cfg_path),
-            "--registry",
-            str(tmp_path / "registry.sqlite"),
-            "--set-id",
-            "subject_mask_set_v001",
-            "--run-name",
-            "subject_mask_unet_registry_test",
-            "--output-dir",
-            str(tmp_path / "runs"),
-            "--no-progress",
-            "--no-compile",
-        ]
-    )
+    argv = [
+        str(cfg_path),
+        "--registry",
+        str(tmp_path / "registry.sqlite"),
+        "--set-id",
+        "subject_mask_set_v001",
+        "--run-name",
+        "subject_mask_unet_registry_test",
+        "--output-dir",
+        str(tmp_path / "runs"),
+        "--no-progress",
+        "--no-compile",
+    ]
+    return argv, calls
+
+
+def test_train_unet_subject_masks_logs_registry_in_progress_then_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    argv, calls = _prepare_unet_run(tmp_path, monkeypatch)
+
+    assert mod.main(argv) == 0
 
     assert [entry["status"] for entry in calls] == ["in_progress", "success"]
     assert calls[0]["run_id"] == "subject_mask_unet_registry_test"
@@ -276,3 +284,47 @@ def test_validation_preview_writer_outputs_composite_png(tmp_path: Path) -> None
     assert written == [tmp_path / "validation_previews" / "epoch_001" / "sample_000.png"]
     assert written[0].exists()
     assert written[0].stat().st_size > 0
+
+
+def test_train_unet_subject_masks_refuses_success_without_best_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    argv, calls = _prepare_unet_run(tmp_path, monkeypatch)
+    real_save = mod._save_checkpoint
+
+    def _skip_best(path, *args, **kwargs):
+        if Path(path).name == "best_model.pt":
+            return None
+        return real_save(path, *args, **kwargs)
+
+    monkeypatch.setattr(mod, "_save_checkpoint", _skip_best)
+
+    assert mod.main(argv) == 1
+    assert [entry["status"] for entry in calls] == ["in_progress", "failed"]
+    assert calls[1]["final_metrics"]["stage"] == "post_training_validation"
+    assert "best_model.pt missing" in calls[1]["final_metrics"]["error_message"]
+    assert calls[1]["model_path"] is None
+
+
+def test_train_unet_subject_masks_snapshots_invocation_without_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    argv, calls = _prepare_unet_run(tmp_path, monkeypatch)
+    argv = [token for token in argv if token not in {"--registry", str(tmp_path / "registry.sqlite")}]
+    argv.append("--no-log-registry")
+
+    assert mod.main(argv) == 0
+    assert calls == []
+    run_dir = tmp_path / "runs" / "subject_mask_unet_registry_test"
+    snapshot = json.loads((run_dir / "inputs" / "train_invocation.json").read_text(encoding="utf-8"))
+    assert snapshot == {"tool": "test"}
+
+
+def test_unet_completion_errors_require_finite_dice_and_best_model(tmp_path: Path) -> None:
+    errors = mod._unet_completion_errors(run_dir=tmp_path, best_dice=float("-inf"))
+    assert any("best_model.pt missing" in message for message in errors)
+    assert any("no finite validation Dice" in message for message in errors)
+    (tmp_path / "best_model.pt").write_bytes(b"x")
+    assert mod._unet_completion_errors(run_dir=tmp_path, best_dice=0.8) == []
