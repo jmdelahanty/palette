@@ -6,9 +6,9 @@ agent-contracts owns which fields each consumer relies on.
 
 | File | Source | SHA-256 |
 | --- | --- | --- |
-| `consumers.json` | agent-contracts `metazebrobot-consumers/` @ `f081059040fa9a194f2dcd67ed5261313f9b6d35` (PR 128) | `e45d0e1e16e4f3e3d0857a85852a4a86ae731fcc8a983098cd53c4cbbc0ac2b4` |
-| `verify_consumers.py` | agent-contracts `metazebrobot-consumers/` @ `f081059040fa9a194f2dcd67ed5261313f9b6d35` (unchanged since PR 54) | `0e5ec76c15aef37120eee3fb160a7f3b79a1ad7e37760313996414c1f091befc` |
-| `consumer_openapi.json` | metazebrobot `docs/api/consumer_openapi.json` @ `ecaa247ebe77ae3fa053313e8ea3d49975bc3ae0` | `97c581df4fd118e0a7b1048c9e312836cf7068723f5b6695058f0bf53c499cb3` |
+| `consumers.json` | agent-contracts `metazebrobot-consumers/` @ `bfdae22898e84678fd3b553ef9e3b1f1d71a43b8` (re-pin at 7cedf98) | `364c583184763966f65d61d55cc6df7b81f4fb37f39e10de729eb6ed0a43a7de` |
+| `verify_consumers.py` | agent-contracts `metazebrobot-consumers/` @ `bfdae22898e84678fd3b553ef9e3b1f1d71a43b8` (unchanged since PR 54) | `0e5ec76c15aef37120eee3fb160a7f3b79a1ad7e37760313996414c1f091befc` |
+| `consumer_openapi.json` | metazebrobot `docs/api/consumer_openapi.json` @ `7cedf98d1c81b2da3051f0e64eb52236de68449a` | `9b97bb72d9da50a59467f8cfa65b4d73a115a847cfd8004c13d0231d85ab790f` |
 
 `tests/unit/fisheye/test_metazebrobot_consumer_contract.py` checks the digests,
 checks that `fisheye.shared.zebrobot_subject_reference.MZB_PIN` names the same
@@ -35,13 +35,13 @@ recording whose build does not match is still admitted.
 
 A slice is listed as compatible only when the pinned slice strictly extends it
 for everything Palette relies on (its `consumers.json` entry). At the
-`ecaa247` pin, `c93b2530` and every later slice qualify: the two operations
+`7cedf98` pin, `c93b2530` and every later slice qualify: the two operations
 Palette relies on (`GET /dishes/{dish_id}/citrus-snapshot` and
 `GET /dishes/{dish_id}/fish`) and every schema they reference are identical in
-each slice, and their server handlers are unchanged from `b2f4b20` to `ecaa247`.
+each slice, and their server handlers are unchanged from `b2f4b20` to `7cedf98`.
 Later builds add only what Palette does not read: `X-Delivered-By` on usage
 links (`b2f4b20`), screening, timeline and construct endpoints (`5f3ac60`,
-`c48f9a2`), and usage-link `members` (`ecaa247`). Earlier slices
+`c48f9a2`), usage-link `members` (`ecaa247`), and `PUT /usage-links/{recording_ref}/members` (`7cedf98`). Earlier slices
 do not (decided by Jeremy, 2026-10-15), because `GET /dishes/{dish_id}/fish`, which Palette relies on, changed meaning
 twice after `509a3eb8`:
 
@@ -54,7 +54,8 @@ twice after `509a3eb8`:
 | `d80e79a6…` | `b2f4b20` | as `c93b2530` (adds `X-Delivered-By` on usage links) | yes |
 | `950353ae…` | `5f3ac60` | as `c93b2530` (adds screening, timeline, constructs) | yes |
 | `6d7d35ea…` | `c48f9a2` (served as `52ebae1`) | as `c93b2530` (adds mixed well plates, per-fish screening) | yes |
-| `97c581df…` | `ecaa247` | as `c93b2530` (adds usage-link `members`) | yes (pin) |
+| `97c581df…` | `ecaa247` | as `c93b2530` (adds usage-link `members`) | yes |
+| `9b97bb72…` | `7cedf98` | as `c93b2530` (adds `PUT /usage-links/{recording_ref}/members`) | yes (pin) |
 
 So a fish list sealed by an earlier build (Orange `dish_fish`, Palette's
 `dish_fish_ids`) means something different from one sealed at the pin, and
@@ -63,4 +64,4 @@ today's list. Every recording served by a build before `c93b2530`,
 including the 2026-10-09 snow sessions (served by `509a3eb8`), records
 `matches_pin: false` for that reason, not because anything is wrong with it.
 The flag never gates admission. Fish identity itself (`mzb_fish_id`) is stable
-across all eight slices.
+across all nine slices.
