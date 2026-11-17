@@ -13,9 +13,9 @@ from fisheye.shared.zebrobot_subject_reference import MZB_PIN, consumer_schema_m
 
 VENDORED = Path(__file__).resolve().parents[2] / "contracts" / "metazebrobot_consumers"
 DIGESTS = {
-    "consumers.json": "e45d0e1e16e4f3e3d0857a85852a4a86ae731fcc8a983098cd53c4cbbc0ac2b4",
+    "consumers.json": "364c583184763966f65d61d55cc6df7b81f4fb37f39e10de729eb6ed0a43a7de",
     "verify_consumers.py": "0e5ec76c15aef37120eee3fb160a7f3b79a1ad7e37760313996414c1f091befc",
-    "consumer_openapi.json": "97c581df4fd118e0a7b1048c9e312836cf7068723f5b6695058f0bf53c499cb3",
+    "consumer_openapi.json": "9b97bb72d9da50a59467f8cfa65b4d73a115a847cfd8004c13d0231d85ab790f",
 }
 
 
@@ -49,6 +49,7 @@ def test_palette_reliance_is_served_by_the_pinned_api():
         (MZB_PIN["consumer_openapi_sha256"], True),
         # Since c93b2530 the slice Palette relies on is unchanged; later builds
         # add only endpoints and fields Palette does not read.
+        ("97c581df4fd118e0a7b1048c9e312836cf7068723f5b6695058f0bf53c499cb3", True),  # ecaa247
         ("6d7d35ea59f9d5dba8c8d035863d7d1d0345ce53600dd7bda26ca63f77941cc1", True),  # c48f9a2
         ("950353ae2f8305394c8042cba66b5ba617934cd308fdd5cc5fbe101c43c1d89a", True),  # 5f3ac60
         ("d80e79a68c65a04c5ec3b519648b9cf82985bde987abdce378e7a7d07e92710f", True),  # b2f4b20

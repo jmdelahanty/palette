@@ -1863,6 +1863,30 @@
             "title": "Members",
             "type": "array"
           },
+          "members_added_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When members were given to a link created without them; null when they came with the link at Start",
+            "title": "Members Added At"
+          },
+          "members_added_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The X-Delivered-By token of that later request, if any",
+            "title": "Members Added By"
+          },
           "received_at": {
             "title": "Received At",
             "type": "string"
@@ -3047,7 +3071,7 @@
                 }
               }
             },
-            "description": "usage_link_conflict (different creation body) or usage_link_end_conflict"
+            "description": "usage_link_conflict (different creation body), usage_link_end_conflict, or usage_link_members_conflict (different members)"
           },
           "422": {
             "content": {
@@ -3073,7 +3097,7 @@
         "summary": "List Usage Links"
       },
       "post": {
-        "description": "Record that an arena recording used a dish (and fish), at Start.\n\nIdempotent on ``recording_ref``: an identical replay is 200, a\ndifferent body 409. An existing ref is answered before any dish or\nfish check. No server-filled fields in the request. An optional\n``X-Delivered-By`` header (e.g. ``citrus``, ``palette``) is recorded on\nfirst creation as ``delivered_by`` and isn't compared on replays.\n\nA group arena (``fish_id`` null) may name its ``members``\n(``[{fish_id, fish_revision}]``, as many as ``subject_count``), compared\nas a set on replays. Each must exist; one that was dead or in another\ndish at ``started_at`` is accepted and flagged, never refused.",
+        "description": "Record that an arena recording used a dish (and fish), at Start.\n\nIdempotent on ``recording_ref``: an identical replay is 200, a\ndifferent body 409. An existing ref is answered before any dish or\nfish check. No server-filled fields in the request. An optional\n``X-Delivered-By`` header (e.g. ``citrus``, ``palette``) is recorded on\nfirst creation as ``delivered_by`` and isn't compared on replays.\n\nA group arena (``fish_id`` null) may name its ``members``\n(``[{fish_id, fish_revision}]``, as many as ``subject_count``), compared\nas a set on replays. Each must exist; one that was dead or in another\ndish at ``started_at`` is accepted and flagged, never refused. A link\ncreated without them gets them only through\n``PUT /usage-links/{recording_ref}/members``; replaying the original\nbody stays 200, and adding ``members`` to it is 409.",
         "operationId": "create_usage_link_usage_links_post",
         "requestBody": {
           "content": {
@@ -3125,7 +3149,7 @@
                 }
               }
             },
-            "description": "usage_link_conflict (different creation body) or usage_link_end_conflict"
+            "description": "usage_link_conflict (different creation body), usage_link_end_conflict, or usage_link_members_conflict (different members)"
           },
           "422": {
             "content": {
@@ -3194,7 +3218,7 @@
                 }
               }
             },
-            "description": "usage_link_conflict (different creation body) or usage_link_end_conflict"
+            "description": "usage_link_conflict (different creation body), usage_link_end_conflict, or usage_link_members_conflict (different members)"
           },
           "422": {
             "content": {
@@ -3273,7 +3297,7 @@
                 }
               }
             },
-            "description": "usage_link_conflict (different creation body) or usage_link_end_conflict"
+            "description": "usage_link_conflict (different creation body), usage_link_end_conflict, or usage_link_members_conflict (different members)"
           },
           "422": {
             "content": {
@@ -3297,6 +3321,97 @@
           }
         },
         "summary": "End Usage Link"
+      }
+    },
+    "/usage-links/{recording_ref}/members": {
+      "put": {
+        "description": "Give a group link created without members its ``members``, once.\n\nBody ``{\"members\": [{fish_id, fish_revision}]}``, checked as on\n``POST /usage-links``. 201 when added; the same set again is 200; a\ndifferent set once members exist is 409\n``usage_link_members_conflict``. Records ``members_added_at`` and the\n``X-Delivered-By`` token as ``members_added_by``.",
+        "operationId": "set_usage_link_members_usage_links__recording_ref__members_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "recording_ref",
+            "required": true,
+            "schema": {
+              "title": "Recording Ref",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "default": {},
+                "title": "Body",
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageLinkResponse"
+                }
+              }
+            },
+            "description": "The same members again; the current link"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageLinkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "dish_not_found / fish_not_found (new link) or usage_link_not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "usage_link_conflict (different creation body), usage_link_end_conflict, or usage_link_members_conflict (different members)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "invalid_usage_link (with field)"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Lookup failed (database_error)"
+          }
+        },
+        "summary": "Set Usage Link Members"
       }
     },
     "/version": {
