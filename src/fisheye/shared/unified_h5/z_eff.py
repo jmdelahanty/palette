@@ -1,4 +1,4 @@
-"""Per-arena z_eff under semantic recipe v5 (agent-contracts pairing revision 4).
+"""Per-arena z_eff under semantic recipes v5 and v6 (pairing revisions 4 and 5).
 
 Citrus #114 (``be2cd47``) computes one float32 z_eff per arena at START from
 the rig file's measured media stack and records it, with every input and its
@@ -8,7 +8,8 @@ covered by the sealed dependency manifest, so this module checks it in full:
 a closed set of 25 scalar attributes (``rig_geometry_revision`` optional),
 their types, the fixed source strings, the two derived differences bit for
 bit, and the value against the digest-bound ``arena_config_json``, the chaser
-rows and the rig pin. Required on every v5 recording, refused on any other.
+rows and the rig pin. Required on every v5 and v6 recording (revision 5 adds
+no H5 group), refused on any other.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import h5py
 import numpy as np
 
 from fisheye.shared.protocol_semantic_contract import (
-    PROTOCOL_SEMANTIC_RECIPE_V5_NORMALIZATION_POLICY,
+    PROTOCOL_SEMANTIC_Z_EFF_SOURCE_POLICIES,
 )
 
 from .common import require
@@ -123,14 +124,14 @@ def _rig_pin_text(attrs, name: str) -> str | None:
 
 
 def validate_z_eff(h5, semantic_normalization_policy: object) -> float | None:
-    """Check ``/geometry/calibration/z_eff``; return z_eff_mm under recipe v5.
+    """Check ``/geometry/calibration/z_eff``; return z_eff_mm under recipe v5 or v6.
 
     Every other policy must not carry the group: one hash never names both an
-    authored and a measured z_eff.
+    authored and a measured z_eff. The refusal code keeps its revision-4 name.
     """
 
     group = h5.get(GROUP)
-    if semantic_normalization_policy != PROTOCOL_SEMANTIC_RECIPE_V5_NORMALIZATION_POLICY:
+    if semantic_normalization_policy not in PROTOCOL_SEMANTIC_Z_EFF_SOURCE_POLICIES:
         require(group is None, "z_eff_group_outside_recipe_v5")
         return None
     require(isinstance(group, h5py.Group), "z_eff_group_missing")

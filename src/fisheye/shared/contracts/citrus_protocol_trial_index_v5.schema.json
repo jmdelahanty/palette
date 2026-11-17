@@ -1,0 +1,1040 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "citrus.protocol.trial_index.v5",
+  "title": "Citrus protocol trial index v5",
+  "description": "v5 (2026-11-16) adds a required role (\"test\" | \"sham\") to every chaser in features.chasers, always written (\"test\" when the protocol leaves it out), paired with citrus.protocol.semantic.v6 (src/protocols/chaser_role.h). Otherwise as v4. v4 (2026-11-13) replaces a chaser step's target.z_eff_mm with target.z_eff_source = arena_media_stack: the chaser takes z_eff from the arena's measured media stack (H5 /calibration/z_eff), paired with citrus.protocol.semantic.v5. Otherwise as v3: v3 adds the top-level stimulus_angle_convention (every direction angle in steps[] is a unit-circle angle on a y-down raster: 0 = right, +90 = up; src/stimuli/angle_convention.h) and the features.appearance.elements block (one element per authored colour the mode displays; src/color/color.h, stimulus vocabulary v1). A minimal step may carry features.appearance alone. v2 (clockwise angles, +90 = down) is kept as protocol_trial_index_v2.schema.json for history.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "schema_version",
+    "normalization_policy",
+    "protocol_semantic_hash",
+    "steps",
+    "stimulus_angle_convention"
+  ],
+  "properties": {
+    "schema_id": {
+      "const": "citrus.protocol.trial_index"
+    },
+    "schema_version": {
+      "const": 5
+    },
+    "normalization_policy": {
+      "const": "citrus.protocol.trial_index.v5"
+    },
+    "protocol_semantic_hash": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      ]
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    },
+    "stimulus_angle_convention": {
+      "type": "string",
+      "const": "atan2_negative_y_x_degrees"
+    }
+  },
+  "$defs": {
+    "finiteNumber": {
+      "type": "number"
+    },
+    "nonnegativeNumber": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        {
+          "minimum": 0
+        }
+      ]
+    },
+    "rgba8": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 255
+      }
+    },
+    "appearanceElement": {
+      "type": "object",
+      "required": [
+        "authored_color",
+        "brightness",
+        "derivation",
+        "quantization",
+        "resolved_color",
+        "contrast_profile_digest"
+      ],
+      "properties": {
+        "derivation": {
+          "enum": [
+            "plain_v1",
+            "opaque_alpha_v1",
+            "premultiplied_background_v1",
+            "edge_minimum_floor_half_v1"
+          ]
+        },
+        "authored_color": {
+          "type": "object",
+          "required": [
+            "color_space",
+            "rgba"
+          ],
+          "properties": {
+            "color_space": {
+              "const": "srgb"
+            },
+            "rgba": {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "items": {
+                "type": "number"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "brightness": {
+          "type": "number"
+        },
+        "quantization": {
+          "enum": [
+            "rgba8_round_half_up_v1",
+            "rgba8_trunc_legacy"
+          ]
+        },
+        "resolved_color": {
+          "type": "object",
+          "required": [
+            "color_space",
+            "rgba8"
+          ],
+          "properties": {
+            "color_space": {
+              "const": "srgb"
+            },
+            "rgba8": {
+              "$ref": "#/$defs/rgba8"
+            }
+          },
+          "additionalProperties": false
+        },
+        "contrast_profile_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepAppearance": {
+      "type": "object",
+      "properties": {
+        "elements": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/appearanceElement"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "color": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "color_space",
+        "rgba8"
+      ],
+      "properties": {
+        "color_space": {
+          "const": "srgb"
+        },
+        "rgba8": {
+          "$ref": "#/$defs/rgba8"
+        }
+      }
+    },
+    "chaserBackgroundEdgeFalloff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "profile",
+        "minimum_brightness",
+        "falloff_width_fraction",
+        "rgb_policy",
+        "alpha_policy",
+        "foreground_policy",
+        "domain",
+        "width_reference",
+        "geometry_source",
+        "outside_area_policy"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "profile": {
+          "const": "boundary_distance_smoothstep_v1"
+        },
+        "minimum_brightness": {
+          "type": "number",
+          "minimum": 0.25,
+          "maximum": 1.0
+        },
+        "falloff_width_fraction": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "maximum": 1.0
+        },
+        "rgb_policy": {
+          "const": "multiply_background_rgb_v1"
+        },
+        "alpha_policy": {
+          "const": "preserve_authored_alpha_v1"
+        },
+        "foreground_policy": {
+          "const": "unmodulated_v1"
+        },
+        "domain": {
+          "const": "active_experimental_area"
+        },
+        "width_reference": {
+          "const": "experimental_area_inradius_v1"
+        },
+        "geometry_source": {
+          "const": "/calibration_snapshot/arena_geometry"
+        },
+        "outside_area_policy": {
+          "const": "masked_black_v1"
+        }
+      }
+    },
+    "objectAppearance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "schema_version",
+        "scope_id",
+        "profile_digest",
+        "contrast_model",
+        "calculation_domain",
+        "reference",
+        "alpha_policy",
+        "invalid_reference_policy",
+        "baseline_contrast",
+        "peak_contrast",
+        "baseline_chromatic_strength",
+        "peak_chromatic_strength",
+        "modulation"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "citrus.object_appearance_profile"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "scope_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "profile_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "contrast_model": {
+          "const": "signed_weber_luminance_v1"
+        },
+        "calculation_domain": {
+          "const": "renderer_nominal_code_luminance_v1"
+        },
+        "reference": {
+          "const": "local_rendered_background_v1"
+        },
+        "alpha_policy": {
+          "const": "preserve_authored_alpha_v1"
+        },
+        "invalid_reference_policy": {
+          "const": "preserve_underlay_v1"
+        },
+        "baseline_contrast": {
+          "type": "number",
+          "minimum": -1.0
+        },
+        "peak_contrast": {
+          "type": "number",
+          "minimum": -1.0
+        },
+        "baseline_chromatic_strength": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "peak_chromatic_strength": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "modulation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "curve",
+            "invalid_drive_policy"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "constant",
+                "normalized_drive"
+              ]
+            },
+            "curve": {
+              "enum": [
+                "linear_v1",
+                "smoothstep_v1"
+              ]
+            },
+            "invalid_drive_policy": {
+              "const": "return_to_baseline_v1"
+            }
+          }
+        },
+        "drive_binding": {
+          "$ref": "#/$defs/chaserAppearanceDriveBinding"
+        }
+      }
+    },
+    "chaserAppearanceDriveBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "schema_version",
+        "source",
+        "approach_progress_policy",
+        "held_target_policy",
+        "retreat_policy",
+        "fallback_release_duration_s"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "citrus.chaser_appearance_drive_binding"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "source": {
+          "enum": [
+            "distance_closed_v1",
+            "visual_angle_progress_v1"
+          ]
+        },
+        "approach_progress_policy": {
+          "const": "monotonic_non_decreasing_v1"
+        },
+        "held_target_policy": {
+          "const": "hold_last_valid_drive_v1"
+        },
+        "retreat_policy": {
+          "const": "attained_drive_smoothstep_release_v1"
+        },
+        "fallback_release_duration_s": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "near_distance_mm": {
+          "type": "number",
+          "minimum": 0.0
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "source": {
+                "const": "distance_closed_v1"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "near_distance_mm"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "near_distance_mm"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "chaser": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "behavior_mode",
+        "behavior_mode_id",
+        "chaser_behavior_class",
+        "chaser_behavior_class_id",
+        "chaser_behavior_class_schema",
+        "chaser_behavior_class_source",
+        "chase",
+        "chaser_index",
+        "color",
+        "enable_random_movement",
+        "end_position",
+        "loom",
+        "pause_at_random_target",
+        "positioning",
+        "radius_mm",
+        "random_movement",
+        "retreat",
+        "speed_mm_per_sec",
+        "start_position",
+        "stop_at_target_edge",
+        "behavior_program",
+        "role"
+      ],
+      "properties": {
+        "behavior_mode": {
+          "type": "string"
+        },
+        "behavior_mode_id": {
+          "type": "integer"
+        },
+        "chaser_behavior_class": {
+          "type": "string"
+        },
+        "chaser_behavior_class_id": {
+          "type": "integer"
+        },
+        "chaser_behavior_class_schema": {
+          "const": "citrus.chaser_behavior_class.v1"
+        },
+        "chaser_behavior_class_source": {
+          "const": "resolved_from_protocol_fields"
+        },
+        "chase": {
+          "type": "object"
+        },
+        "chaser_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "color": {
+          "$ref": "#/$defs/color"
+        },
+        "enable_random_movement": {
+          "type": "boolean"
+        },
+        "end_position": {
+          "type": "object"
+        },
+        "loom": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "pause_at_random_target": {
+          "type": "boolean"
+        },
+        "positioning": {
+          "type": "object"
+        },
+        "radius_mm": {
+          "$ref": "#/$defs/nonnegativeNumber"
+        },
+        "random_movement": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "role": {
+          "enum": [
+            "test",
+            "sham"
+          ],
+          "description": "test, or sham: drawn in the background's displayed code, passive, no appearance profile, no background_edge_falloff in the step."
+        },
+        "retreat": {
+          "type": "object"
+        },
+        "speed_mm_per_sec": {
+          "$ref": "#/$defs/nonnegativeNumber"
+        },
+        "start_position": {
+          "type": "object"
+        },
+        "stop_at_target_edge": {
+          "type": "boolean"
+        },
+        "behavior_program": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "appearance": {
+          "$ref": "#/$defs/objectAppearance"
+        }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "step_index",
+        "stimulus_mode_id",
+        "stimulus_mode",
+        "stimulus_family",
+        "duration_s",
+        "post_stimulus_iti_s",
+        "index_status",
+        "features"
+      ],
+      "properties": {
+        "step_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stimulus_mode_id": {
+          "type": "integer"
+        },
+        "stimulus_mode": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stimulus_family": {
+          "type": "string",
+          "minLength": 1
+        },
+        "duration_s": {
+          "$ref": "#/$defs/nonnegativeNumber"
+        },
+        "post_stimulus_iti_s": {
+          "$ref": "#/$defs/nonnegativeNumber"
+        },
+        "index_status": {
+          "enum": [
+            "minimal",
+            "detailed"
+          ]
+        },
+        "index_note": {
+          "type": "string",
+          "minLength": 1
+        },
+        "index_reasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "features": {
+          "type": "object",
+          "properties": {
+            "appearance": {
+              "$ref": "#/$defs/stepAppearance"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "index_status": {
+                "const": "minimal"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "features": {
+                "type": "object",
+                "properties": {
+                  "appearance": {
+                    "$ref": "#/$defs/stepAppearance"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stimulus_mode_id": {
+                "const": 4
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "stimulus_mode": {
+                "const": "SOLID_BLACK"
+              },
+              "stimulus_family": {
+                "const": "solid_color"
+              },
+              "index_status": {
+                "const": "detailed"
+              },
+              "features": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "color_name",
+                  "resolved_color"
+                ],
+                "properties": {
+                  "appearance": {
+                    "$ref": "#/$defs/stepAppearance"
+                  },
+                  "color_name": {
+                    "const": "black"
+                  },
+                  "resolved_color": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/color"
+                      },
+                      {
+                        "properties": {
+                          "rgba8": {
+                            "const": [
+                              0,
+                              0,
+                              0,
+                              255
+                            ]
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stimulus_mode_id": {
+                "const": 18
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "stimulus_mode": {
+                "const": "PHOTOTAXIS"
+              },
+              "stimulus_family": {
+                "const": "phototaxis"
+              },
+              "index_status": {
+                "const": "detailed"
+              },
+              "features": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "appearance",
+                  "brightness",
+                  "fill",
+                  "region"
+                ],
+                "properties": {
+                  "appearance": {
+                    "$ref": "#/$defs/stepAppearance"
+                  },
+                  "brightness": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "region": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "type",
+                      "half_side",
+                      "quarter",
+                      "circle_radius_fraction"
+                    ],
+                    "properties": {
+                      "type": {
+                        "enum": [
+                          "half",
+                          "quarter",
+                          "circle"
+                        ]
+                      },
+                      "half_side": {
+                        "enum": [
+                          "left",
+                          "right",
+                          "top",
+                          "bottom"
+                        ]
+                      },
+                      "quarter": {
+                        "enum": [
+                          "top_left",
+                          "top_right",
+                          "bottom_left",
+                          "bottom_right"
+                        ]
+                      },
+                      "circle_radius_fraction": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      }
+                    }
+                  },
+                  "fill": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "type",
+                      "domain",
+                      "outside_area_policy"
+                    ],
+                    "properties": {
+                      "type": {
+                        "enum": [
+                          "two_tone",
+                          "gradient",
+                          "heading_split"
+                        ]
+                      },
+                      "style": {
+                        "enum": [
+                          "two_tone",
+                          "gradient"
+                        ],
+                        "description": "heading_split only: how the two sides of the midline are painted; gradient is reserved until the revision that specifies the ramp"
+                      },
+                      "domain": {
+                        "const": "experimental_area"
+                      },
+                      "outside_area_policy": {
+                        "enum": [
+                          "side_b_v1",
+                          "masked_black_v1"
+                        ]
+                      },
+                      "formula_id": {
+                        "const": "linear_srgb_gradient_v1"
+                      },
+                      "axis": {
+                        "enum": [
+                          "x",
+                          "y"
+                        ]
+                      },
+                      "start_fraction": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      "end_fraction": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      }
+                    },
+                    "allOf": [
+                      {
+                        "if": {
+                          "properties": {
+                            "type": {
+                              "const": "gradient"
+                            }
+                          }
+                        },
+                        "then": {
+                          "required": [
+                            "formula_id",
+                            "axis",
+                            "start_fraction",
+                            "end_fraction"
+                          ],
+                          "properties": {
+                            "outside_area_policy": {
+                              "const": "masked_black_v1"
+                            }
+                          }
+                        },
+                        "else": {
+                          "properties": {
+                            "outside_area_policy": {
+                              "const": "side_b_v1"
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "if": {
+                          "properties": {
+                            "type": {
+                              "const": "heading_split"
+                            }
+                          }
+                        },
+                        "then": {
+                          "required": [
+                            "style"
+                          ],
+                          "properties": {
+                            "outside_area_policy": {
+                              "const": "side_b_v1"
+                            }
+                          }
+                        },
+                        "else": {
+                          "not": {
+                            "required": [
+                              "style"
+                            ]
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "reactive": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Reactive heading split (agent-contracts citrus-palette/reactive_phototaxis revision 5): present exactly when fill.type is heading_split.",
+                    "required": [
+                      "module",
+                      "heading_definition_ref",
+                      "camera_view_assumed",
+                      "side_rule_id",
+                      "hysteresis_frame",
+                      "fill_style",
+                      "minimum_keypoint_confidence",
+                      "minimum_heading_displacement_degrees",
+                      "maximum_held_heading_updates",
+                      "unknown_heading_fallback",
+                      "left_side"
+                    ],
+                    "properties": {
+                      "module": {
+                        "const": "PhototaxisHeadingSplit"
+                      },
+                      "heading_definition_ref": {
+                        "type": "string"
+                      },
+                      "camera_view_assumed": {
+                        "const": "dorsal_unmirrored"
+                      },
+                      "side_rule_id": {
+                        "const": "projected_left_axis_v1"
+                      },
+                      "hysteresis_frame": {
+                        "const": "camera"
+                      },
+                      "fill_style": {
+                        "enum": [
+                          "two_tone",
+                          "gradient"
+                        ]
+                      },
+                      "minimum_keypoint_confidence": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      "minimum_heading_displacement_degrees": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 180
+                      },
+                      "maximum_held_heading_updates": {
+                        "oneOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          {
+                            "const": "never"
+                          }
+                        ]
+                      },
+                      "unknown_heading_fallback": {
+                        "enum": [
+                          "static_fill",
+                          "uniform_side_a",
+                          "uniform_side_b"
+                        ]
+                      },
+                      "left_side": {
+                        "enum": [
+                          "side_a",
+                          "side_b"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "fill": {
+                          "properties": {
+                            "type": {
+                              "const": "heading_split"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "then": {
+                      "required": [
+                        "reactive"
+                      ]
+                    },
+                    "else": {
+                      "not": {
+                        "required": [
+                          "reactive"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stimulus_mode_id": {
+                "const": 12
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "stimulus_mode": {
+                "const": "CHASER"
+              },
+              "stimulus_family": {
+                "const": "chaser"
+              },
+              "features": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "bg_color",
+                  "chase_schedule",
+                  "chasers",
+                  "danger_zone",
+                  "proximity_feedback",
+                  "proximity_sizing",
+                  "target",
+                  "timing",
+                  "wander_rng",
+                  "guarantee_final_position"
+                ],
+                "properties": {
+                  "appearance": {
+                    "$ref": "#/$defs/stepAppearance"
+                  },
+                  "bg_color": {
+                    "$ref": "#/$defs/color"
+                  },
+                  "background_edge_falloff": {
+                    "$ref": "#/$defs/chaserBackgroundEdgeFalloff"
+                  },
+                  "chase_schedule": {
+                    "type": "object",
+                    "required": [
+                      "schema_version",
+                      "mode",
+                      "time_reference",
+                      "chase_motion_onset_event",
+                      "duration_s",
+                      "parameters"
+                    ]
+                  },
+                  "chasers": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/chaser"
+                    }
+                  },
+                  "danger_zone": {
+                    "type": "object"
+                  },
+                  "proximity_feedback": {
+                    "type": "object"
+                  },
+                  "proximity_sizing": {
+                    "type": "object"
+                  },
+                  "target": {
+                    "type": "object"
+                  },
+                  "timing": {
+                    "type": "object",
+                    "required": [
+                      "pre_period_s",
+                      "training_period_s",
+                      "post_period_s",
+                      "position_transition_duration_s",
+                      "post_period_starts_after_repositioning"
+                    ]
+                  },
+                  "wander_rng": {
+                    "type": "object"
+                  },
+                  "guarantee_final_position": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

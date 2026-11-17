@@ -167,7 +167,7 @@ def validate_artifact(
     geometry = validate_geometry(
         h5, read_json(h5, BINDING, canonical=True), integrity.table_descriptors
     )
-    # Recipe v5's per-arena z_eff (after geometry: it reads arena_config_json).
+    # Recipes v5/v6's per-arena z_eff (after geometry: it reads arena_config_json).
     validate_z_eff(h5, snapshot.semantic_payload.get("normalization_policy"))
     # Citrus's declared-orientation check (agent-contracts #135; after
     # geometry: it reads the active homography and the arena region).
