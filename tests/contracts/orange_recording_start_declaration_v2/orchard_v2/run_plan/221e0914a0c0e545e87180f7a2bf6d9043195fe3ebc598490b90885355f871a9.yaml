@@ -1,0 +1,133 @@
+# EXAMPLE ONLY. Shows the run-plan format (schema/run_plan.v2.schema.json) for one dot-contrast session.
+# Dish and fish ids are placeholders, the protocol is not generated, and nothing runs from this file.
+# A plan states intent and never changes once committed. What was done (sign-off, loading, unloading,
+# results) is in the run record beside it: example_one_session.record.yaml.
+schema_id: orchard.run_plan.v2
+plan_id: omnifin0-dot-contrast-corners-example
+revision: 5
+created: 2026-11-14
+created_by: experiment-spec
+note: Format example. Shows a group from a dish, a single fish from a plate well, a single larva drawn from a dish, and a blank.
+
+spec:
+  spec_id: omnifin0-dot-contrast-corners
+  revision: 3
+  orchard_commit: null
+
+rig_id: omnifin0
+
+requires:
+  citrus_commit: null          # filled when the plan is made; the runner compares with the GUI's baked commit
+  orange_commit: null
+  rig_config_revision: 15
+  render_rate_hz: 240
+  sealer_version: 3.3.0
+  photometric_release: null    # r1 is not released
+
+execution:
+  mode: operator_gui
+  operator_at_rig: required    # Jeremy, 2026-11-14: the operator moves fish in and out
+  gap_between_sessions_s: null
+
+sessions:
+  - session_id: S1
+    order: 1
+    intent: experiment
+    expected_duration_s: 2110
+    max_duration_s: 2400
+    orange:
+      recording_intent: stimulus_experiment
+      # The camera config folder, pinned by Orange's digest of its *.json files (tools/run_plan.py
+      # preset-hash DIR). The preset sets the camera settings and which media are recorded; the plan
+      # chooses media by choosing the preset. The digest here is a placeholder.
+      preset:
+        name: PLACEHOLDER_PRESET       # for example 30_cam4_ptp_fourcam
+        sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        hash_rule: orange_camera_config_dir_sha256_v1
+      # With the filled dishes in place and before loading, Orange captures an empty background per camera;
+      # the start names that capture and Orange seals a copy inside the recording. The capture's id and
+      # sha256 go in the run record.
+      empty_background: capture_at_setup
+      context_type: behavior
+      context_subtype: dot_contrast
+    citrus:
+      canvas: PLACEHOLDER_CANVAS       # must be named before a sign-off covers the session
+      commissioning_release: null
+    protocol:
+      path: protocols/PLACEHOLDER_dot_contrast_corners_seed_1.json   # written by grove from the orchard request
+      file_sha256: null
+      protocol_semantic_hash: "0000000000000000000000000000000000000000000000000000000000000000"   # placeholder
+      semantic_version: 5
+      render_rate_hz: 240
+      generator:
+        repo: JohnsonLabJanelia/grove
+        commit: null
+        request_sha256: null
+        placement_algorithm: latin_square_splitmix64_v1
+        placement_seed: 1
+        placement_sha256: 1e76c4602cf3246765c55ac92999ba69a9604a99cd5408438b88f02c4022d570
+    arenas:
+      # A group of larvae picked from one dish. They have no ids yet: each is minted as a registered fish
+      # in the source dish when picked, and the load record carries the ids. Citrus and Orange declare
+      # the source dish and the count; the members name the larvae.
+      - arena_id: arena_1
+        camera_serial: "2010093"
+        subject_type: group
+        subject_count: 5
+        source: { kind: dish, dish_id: PLACEHOLDER_SOURCE_DISH }
+        members: []
+        destination: { kind: dish, dish_id: PLACEHOLDER_USED_FISH_DISH }
+        assignment: { method: fixed }
+        expected: { dpf: { min: 6, max: 8 } }
+      # One registered fish from a plate well. Its id is known in advance.
+      - arena_id: arena_2
+        camera_serial: "2010094"
+        subject_type: individual
+        subject_count: 1
+        source: { kind: plate_well, dish_id: PLACEHOLDER_PLATE, unit_id: "PLACEHOLDER_PLATE:A1" }
+        members: [00000000-0000-4000-8000-00000000000a]
+        destination: { kind: dish, dish_id: PLACEHOLDER_USED_FISH_DISH }
+        assignment: { method: fixed }
+        expected:
+          dpf: { min: 6, max: 8 }
+          screening: { construct_key: pmca2mcherryzf, call: positive }
+      # One larva picked from a dish, minted when picked.
+      - arena_id: arena_3
+        camera_serial: "2010095"
+        subject_type: individual
+        subject_count: 1
+        source: { kind: dish, dish_id: PLACEHOLDER_SOURCE_DISH }
+        members: []
+        destination: { kind: dish, dish_id: PLACEHOLDER_USED_FISH_DISH }
+        assignment: { method: fixed }
+      # An empty arena is stated, never implied by leaving it out.
+      - arena_id: arena_4
+        camera_serial: "2010096"
+        subject_type: blank
+        subject_count: 0
+        source: null
+        members: []
+        destination: null
+    preconditions:
+      - Projector on before boot or any display-manager restart; projector state read over RS-232 matches the recorded settings (Brightness 50).
+      - Each dish filled to the recorded volume, disc covered, no bubbles (rule fill-fixed-volume).
+      - The empty background is captured with the filled dishes in place, and the dishes are not moved between the capture and loading.
+      - Commissioning release current for the installed rig config.
+      - Free disk space for the session on the recording volume.
+      - "MetaZebrobot (tools/mzb.py subjects): source dish active, dpf inside expected, enough fish; destination dish active and of the same cross; each member alive, in the source dish, with no earlier usage link."
+
+abort_rules:
+  - { id: A1, when: "An installed build, rig config revision or render rate differs from requires.", scope: batch, action: refuse_start, status: proposed }
+  - { id: A2, when: "No sign-off covers the session, or the run record's plan_sha256 does not match the plan.", scope: session, action: refuse_start, status: proposed }
+  - { id: A3, when: "Citrus computes a protocol_semantic_hash different from the plan's.", scope: session, action: refuse_start, status: proposed }
+  - { id: A4, when: "A fish is named in two arenas or two sessions, or MetaZebrobot shows an earlier usage link for it.", scope: session, action: refuse_start, status: proposed }
+  - { id: A5, when: "Citrus or Orange refuses START for any reason.", scope: session, action: skip_session, status: proposed, note: "No automatic retry; the refusal text goes into the run record." }
+  - { id: A6, when: "Any H5 of the session seals FAILED.", scope: batch, action: stop_batch, status: proposed }
+  - { id: A7, when: "A precondition check fails.", scope: session, action: refuse_start, status: proposed }
+  - { id: A8, when: "The Orange preset folder the session names is missing on the host or its digest differs from the plan's, or the commissioning release is missing.", scope: session, action: refuse_start, status: proposed }
+  - { id: A9, when: "A non-blank arena of the session has no load confirmation, or an earlier session's arena has no unload confirmation.", scope: session, action: refuse_start, status: proposed }
+  - { id: A10, when: "The plan file is not committed or has edits.", scope: batch, action: refuse_start, status: proposed, note: "Jeremy, 2026-11-14: Citrus and Orange both refuse." }
+
+transfer:
+  mode: manual_domain_user     # Jeremy, 2026-11-14: manual for now; automatic on completion is the goal
+  destination: null

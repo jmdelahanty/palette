@@ -1,0 +1,24 @@
+{
+  "schema_id": "orange.recording_start_declaration",
+  "schema_version": 1,
+  "declared_by": "delahantyj",
+  "recording_intent": "stimulus_experiment",
+  "subject_references": {
+    "schema_version": 1,
+    "default": {
+      "subject_count": 1
+    },
+    "cameras": {
+      "2010093": {
+        "dish_id": "19498_2"
+      },
+      "2010094": {
+        "dish_id": "19498_3",
+        "subject_count": 5
+      },
+      "2010095": {
+        "dish_id": "a/b"
+      }
+    }
+  }
+}

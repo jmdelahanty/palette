@@ -1,0 +1,66 @@
+{
+  "cameras": {
+    "2010093": {
+      "dish_id": "PLACEHOLDER_SOURCE_DISH",
+      "subject_count": 5
+    },
+    "2010094": {
+      "dish_id": "PLACEHOLDER_PLATE",
+      "subject_count": 1
+    },
+    "2010095": {
+      "dish_id": "PLACEHOLDER_SOURCE_DISH",
+      "subject_count": 1
+    },
+    "2010096": {
+      "dish_id": null,
+      "subject_count": null
+    }
+  },
+  "config": {
+    "schema_version": 2,
+    "cameras": {
+      "2010093": {
+        "dish_id": "19498_2",
+        "subject_count": 5
+      },
+      "2010096": {
+        "blank": true
+      }
+    }
+  },
+  "confirmed_at_utc": "2026-11-16T03:28:12Z",
+  "confirmed_by": "run_spec",
+  "declaration": {
+    "schema_id": "orange.recording_start_declaration",
+    "schema_version": 2,
+    "declared_by": "delahantyj",
+    "recording_intent": "stimulus_experiment",
+    "subject_references": {
+      "schema_version": 2,
+      "cameras": {
+        "2010093": {
+          "dish_id": "19498_2",
+          "subject_count": 5
+        },
+        "2010096": {
+          "blank": true
+        }
+      }
+    },
+    "source": {
+      "kind": "operator"
+    }
+  },
+  "requester": {
+    "experiment_id": "fourcam_fused_recorder_realfish_int8_192_native_ownerpush_ring_od8ff_s16",
+    "run_stamp": null,
+    "spec_copy_relative_path": "run_spec/1791cf0ccf296ff324d41465f92dd9f0a039cd08fb48f21c2375eabf526c24fd.json",
+    "spec_path": "/home/jeremy/orange_data/synthetic_fixtures/20261116_decl_v2/inputs/merged_run_spec.json",
+    "spec_sha256": "1791cf0ccf296ff324d41465f92dd9f0a039cd08fb48f21c2375eabf526c24fd",
+    "transport": "run_spec",
+    "user": "jeremy"
+  },
+  "schema_id": "orange.recording_subject_confirmation",
+  "schema_version": 2
+}

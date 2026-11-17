@@ -102,6 +102,12 @@ from fisheye.shared.subject_metadata import (
     read_h5_subject_metadata,
     resolve_subject_metadata,
 )
+from fisheye.shared.orange_start_declaration import (
+    check_declared_files,
+    parse_document,
+    stated_blank,
+    validate_confirmation_v2,
+)
 from fisheye.shared.zebrobot_subject_reference import resolve_subject_reference
 from fisheye.shared.zarr_run_completion import (
     PALETTE_STORE_EPOCH_ATTR,
@@ -759,7 +765,10 @@ def import_zebrobot_subject_reference(
         camera=str(manifest.get("camera_id")),
         **({"fetch": fetch} if fetch is not None else {}),
     )
+    declaration = _start_declaration(plan.recording_dir, manifest, reference)
     root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    if declaration is not None:
+        root.attrs["orange_start_declaration"] = declaration
     # Orange's declared reference status, distinct from whether subject metadata
     # exists: a stimulus session's subject record comes from the Citrus H5.
     root.attrs["orange_subject_reference_status"] = resolved.status
@@ -859,11 +868,14 @@ def _declaring_requester(
 
     if confirmed_by == "local_control":
         peer = requester.get("peer")
-        if (requester.get("transport") != "local_control_socket" or not isinstance(peer, Mapping)
-                or "user" not in peer or not nullable_str(peer["user"])):
+        if requester.get("transport") != "local_control_socket" or not (
+            peer is None or (isinstance(peer, Mapping) and "user" in peer and nullable_str(peer["user"]))
+        ):
             return None
-        # peer.user is the OS account that sent it (null when the uid has no passwd entry).
-        return {"orange_requester_user": peer["user"]}
+        # peer.user is the OS account that sent it (null when the uid has no
+        # passwd entry); peer itself is null when the kernel reported none
+        # (agent-contracts #138: Orange cb4b65ee does not refuse that start).
+        return {"orange_requester_user": None if peer is None else peer["user"]}
     stamp = requester.get("run_stamp")
     sha = requester.get("spec_sha256")
     if (requester.get("transport") != "run_spec"
@@ -888,12 +900,17 @@ def _declaring_requester(
     }
 
 
-def _sealed_json(recording_dir: Path, item: Mapping[str, Any], *, name: str) -> tuple[Any, str]:
+def _sealed_bytes(recording_dir: Path, item: Mapping[str, Any], *, name: str) -> tuple[bytes, str]:
     path = Path(recording_dir) / item["relative_path"]
     data = path.read_bytes()
     digest = hashlib.sha256(data).hexdigest()
     if digest != item["sha256"] or len(data) != item["size_bytes"]:
         raise ValueError(f"{name} differs from the sealed inventory: {path}")
+    return data, digest
+
+
+def _sealed_json(recording_dir: Path, item: Mapping[str, Any], *, name: str) -> tuple[Any, str]:
+    data, digest = _sealed_bytes(recording_dir, item, name=name)
     return json.loads(data), digest
 
 
@@ -904,9 +921,10 @@ def _subject_confirmation_origin(recording_dir: Path, sealed: Mapping[str, dict]
     strict cross-check is unchanged; only the recorded label differs.
     """
 
-    confirmation, digest = _sealed_json(
+    data, digest = _sealed_bytes(
         recording_dir, sealed[ORANGE_SUBJECT_CONFIRMATION], name=ORANGE_SUBJECT_CONFIRMATION
     )
+    confirmation = json.loads(data)
     if not isinstance(confirmation, Mapping) or (
         confirmation.get("schema_id") != ORANGE_SUBJECT_CONFIRMATION_SCHEMA_ID
     ):
@@ -919,6 +937,9 @@ def _subject_confirmation_origin(recording_dir: Path, sealed: Mapping[str, dict]
             f"{ORANGE_SUBJECT_CONFIRMATION}: unsupported schema_version {version!r} "
             f"or confirmed_by {confirmed_by!r}"
         )
+    if version == 2:
+        # agent-contracts #138: the pinned schemas and rules T1, R1-R3, R5, C1-C3.
+        validate_confirmation_v2(parse_document(data, label=ORANGE_SUBJECT_CONFIRMATION))
     origin = {
         "orange_reference_origin": _CONFIRMATION_ORIGINS[confirmed_by],
         "orange_confirmed_by": confirmed_by,
@@ -940,6 +961,48 @@ def _subject_confirmation_origin(recording_dir: Path, sealed: Mapping[str, dict]
         # declared_by is the declaration's claim, not a verified identity.
         origin["orange_declared_by"] = declaration["declared_by"]
         origin.update(recorded)
+    if version == 2:
+        def read_sealed(source_path: str) -> bytes | None:
+            item = sealed.get(source_path)
+            return None if item is None else _sealed_bytes(recording_dir, item, name=source_path)[0]
+
+        # The sealed run_spec and run_plan/ copies the declaration names; its
+        # source is recorded verbatim as a claim.
+        origin.update(check_declared_files(confirmation, read_sealed))
+    return origin
+
+
+def _start_declaration(
+    recording_dir: Path, manifest: Mapping[str, Any], reference: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """The sealed ``subject_confirmation.json`` for this parent, checked and
+    recorded whatever the camera's reference status, or None without one.
+
+    A v2 declaration's stated blank (``{"blank": true}``) must be this camera's
+    ``not_collected`` / ``declared_blank`` reference and nothing else must be;
+    the confirmation's ``cameras`` view cannot tell a blank from undeclared.
+    """
+
+    from fisheye.shared.acquisition_realtime_products import sealed_parent_files
+
+    sealed = sealed_parent_files(manifest) or {}
+    if ORANGE_SUBJECT_CONFIRMATION not in sealed:
+        return None
+    origin = _subject_confirmation_origin(recording_dir, sealed)
+    confirmation, _ = _sealed_json(
+        recording_dir, sealed[ORANGE_SUBJECT_CONFIRMATION], name=ORANGE_SUBJECT_CONFIRMATION
+    )
+    if confirmation.get("schema_version") == 2:
+        camera = str(manifest.get("camera_id") or "")
+        if camera not in confirmation["cameras"]:
+            raise ValueError(f"{ORANGE_SUBJECT_CONFIRMATION}: camera {camera!r} is not confirmed")
+        declared_blank = reference.get("reason") == "declared_blank"
+        if stated_blank(confirmation, camera) != declared_blank:
+            raise ValueError(
+                f"{ORANGE_SUBJECT_CONFIRMATION}: camera {camera!r} stated blank "
+                f"{stated_blank(confirmation, camera)} but its reference reason is "
+                f"{reference.get('reason')!r}"
+            )
     return origin
 
 
