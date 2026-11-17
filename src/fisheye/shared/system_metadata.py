@@ -763,6 +763,8 @@ def build_invocation_record(
     argv: Optional[List[str]] = None,
     include_git: bool = True,
     include_environment: bool = True,
+    include_scheduler: bool = False,
+    include_accelerator: bool = False,
 ) -> Dict[str, Any]:
     """
     Build a compact invocation record for auditability/reproducibility.
@@ -773,6 +775,13 @@ def build_invocation_record(
         argv: Raw argv tokens (without interpreter). Defaults to sys.argv[1:].
         include_git: Include git commit/branch/dirty metadata.
         include_environment: Include key package + runtime environment summary.
+        include_scheduler: Add the batch-scheduler allocation that
+            ``get_platform_info`` already collects (``platform.lsf`` or
+            ``platform.slurm``) when the process runs inside one. Off by
+            default so existing callers' records are unchanged.
+        include_accelerator: Add ``accelerator`` (``get_gpu_info``: device
+            model/UUID, driver, CUDA/cuDNN runtime, visible-device mapping).
+            Off by default because it imports torch and may call nvidia-smi.
     """
     argv_tokens = [str(token) for token in (list(argv) if argv is not None else list(sys.argv[1:]))]
     entrypoint = str(sys.argv[0]) if sys.argv else ""
@@ -796,10 +805,16 @@ def build_invocation_record(
             "release": platform_info.get("release"),
         },
     }
+    if include_scheduler:
+        for scheduler_key in ("lsf", "slurm"):
+            if scheduler_key in platform_info:
+                record["platform"][scheduler_key] = _to_jsonable(platform_info[scheduler_key])
     if include_git:
         record["git"] = _to_jsonable(get_git_info())
     if include_environment:
         record["environment"] = _to_jsonable(get_environment_summary())
+    if include_accelerator:
+        record["accelerator"] = _to_jsonable(get_gpu_info())
     return record
 
 # === Main Entry Point ===

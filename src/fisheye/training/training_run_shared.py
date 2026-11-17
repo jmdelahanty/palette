@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from hashlib import sha256
 from pathlib import Path
@@ -12,6 +13,15 @@ from rich.console import Console
 
 from .export_shared import write_registry_model_exports
 from ..registry.db import Registry, RegistryPaths
+from ..registry.write_policy import (
+    REGISTRY_WRITES_DISABLED_ENV,
+    registry_writes_disabled,
+    running_inside_lsf_job,
+)
+
+
+class TrainingRegistryWriteError(RuntimeError):
+    """A training run's registry lifecycle record could not be written."""
 
 
 def safe_sha256_file(path: Optional[Path]) -> Optional[str]:
@@ -79,6 +89,22 @@ def record_registry_training_run(
                 "Pose training manifest content changed after its schema authority "
                 "was resolved."
             )
+    if registry_writes_disabled():
+        # Checked before Registry() is constructed: opening a registry
+        # initialises its schema, which is itself a write.
+        console.print(
+            "[yellow]Registry writes disabled:[/yellow] "
+            f"{REGISTRY_WRITES_DISABLED_ENV} is set; training run {run_id!r} "
+            f"status {status!r} was not recorded in the registry."
+        )
+        return
+    if running_inside_lsf_job():
+        raise TrainingRegistryWriteError(
+            "Refusing to write the registry from inside an LSF job "
+            f"(LSB_JOBID={os.environ.get('LSB_JOBID')}); cluster training records "
+            "are registered on the writer host. Pass --no-log-registry or set "
+            f"{REGISTRY_WRITES_DISABLED_ENV}=1."
+        )
     registry = None
     try:
         registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
@@ -119,7 +145,10 @@ def record_registry_training_run(
             )
         console.print(f"[green]✓ Registry updated:[/green] {registry_path}")
     except Exception as exc:
-        console.print(f"[yellow]Registry update skipped:[/yellow] {exc}")
+        console.print(f"[bold red]✗ Registry update failed:[/bold red] {exc}")
+        raise TrainingRegistryWriteError(
+            f"Could not record training run {run_id!r} (status {status!r}) in the registry: {exc}"
+        ) from exc
     finally:
         if registry is not None:
             try:

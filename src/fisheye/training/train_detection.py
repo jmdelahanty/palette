@@ -1089,6 +1089,93 @@ def _record_registry_training_run(
     )
 
 
+_BOX_METRIC_COLUMNS: dict[str, str] = {
+    "precision": "metrics/precision(B)",
+    "recall": "metrics/recall(B)",
+    "mAP50": "metrics/mAP50(B)",
+    "mAP50_95": "metrics/mAP50-95(B)",
+}
+# results.csv and the checkpoint's train_metrics carry the same rounded values.
+_EPOCH_MATCH_TOLERANCE = 5e-6
+
+
+def _results_row_epoch(row) -> int | None:
+    value = row.get("epoch") if hasattr(row, "get") else None
+    if value is None or pd.isna(value):
+        return None
+    return int(value)
+
+
+def _results_row_box_metrics(row) -> dict[str, float | None]:
+    metrics: dict[str, float | None] = {}
+    for key, column in _BOX_METRIC_COLUMNS.items():
+        value = row.get(column) if hasattr(row, "get") else None
+        metrics[key] = None if value is None or pd.isna(value) else float(value)
+    return metrics
+
+
+def _load_checkpoint_train_metrics(weights_path: Path) -> dict | None:
+    checkpoint = torch.load(str(weights_path), map_location="cpu", weights_only=False)
+    if not isinstance(checkpoint, dict):
+        return None
+    train_metrics = checkpoint.get("train_metrics")
+    return dict(train_metrics) if isinstance(train_metrics, dict) else None
+
+
+def _best_checkpoint_validation_metrics(*, weights_path: Path, results_df) -> dict:
+    """Return the validation metrics of the epoch saved as ``best.pt``.
+
+    Ultralytics embeds the best epoch's validation metrics in the checkpoint
+    (``train_metrics``), so they are bound to the exact weights file being
+    registered. ``best_epoch`` is the 1-based ``results.csv`` epoch whose
+    metrics match; it is ``None`` if no row matches.
+    """
+    weights_path = Path(weights_path)
+    if not weights_path.is_file():
+        raise FileNotFoundError(f"best.pt not found: {weights_path}")
+    train_metrics = _load_checkpoint_train_metrics(weights_path)
+    if not train_metrics:
+        raise ValueError(f"{weights_path} carries no train_metrics; cannot bind metrics to it")
+    missing = [column for column in _BOX_METRIC_COLUMNS.values() if column not in train_metrics]
+    if missing:
+        raise ValueError(f"{weights_path} train_metrics lacks {missing}")
+    metrics = {key: float(train_metrics[column]) for key, column in _BOX_METRIC_COLUMNS.items()}
+
+    best_epoch = None
+    for _, row in results_df.iterrows():
+        row_metrics = _results_row_box_metrics(row)
+        if all(
+            row_metrics[key] is not None
+            and abs(row_metrics[key] - metrics[key]) <= _EPOCH_MATCH_TOLERANCE
+            for key in metrics
+        ):
+            best_epoch = _results_row_epoch(row)
+            break  # Ultralytics keeps the first epoch reaching the best fitness.
+
+    fitness = train_metrics.get("fitness")
+    return {
+        **metrics,
+        "fitness": None if fitness is None else float(fitness),
+        "best_epoch": best_epoch,
+        "metrics_checkpoint": "best.pt",
+        "metrics_source": "best.pt:train_metrics",
+    }
+
+
+def _detection_completion_errors(*, run_dir: Path, final_validation_metrics: dict | None) -> list[str]:
+    """Reasons a finished training run must not be recorded as success."""
+    errors: list[str] = []
+    best_path = Path(run_dir) / "weights" / "best.pt"
+    if not best_path.is_file():
+        errors.append(f"best.pt missing at {best_path}")
+    results_csv = Path(run_dir) / "results.csv"
+    if not results_csv.is_file():
+        errors.append(f"results.csv missing at {results_csv}")
+    if final_validation_metrics is None:
+        errors.append("validation metrics bound to best.pt could not be determined")
+    return errors
+
+
 def _normalize_imgsz(value) -> tuple[int, int]:
     if value is None:
         return 640, 640
@@ -1546,10 +1633,14 @@ def main(args):
     global _ACTIVE_INPUT_PIPELINE_PROFILER
     console = Console()
     print_training_banner(console, "Detection")
+    # Built unconditionally: it is snapshotted into <run>/inputs even when the
+    # registry is not written (a cluster job registers later from that record).
     invocation_payload = build_invocation_record(
         tool="fisheye.training.train_detection",
         args=args,
-    ) if args.log_registry else None
+        include_scheduler=True,
+        include_accelerator=True,
+    )
     config_path = Path(args.config_path) if args.config_path else None
     manifest_path = Path(args.manifest) if args.manifest else None
     manifest_summary = _load_manifest_summary(args.manifest)
@@ -1614,7 +1705,7 @@ def main(args):
                     "error_message": str(e),
                 },
             )
-        return
+        return 1
 
     if args.log_registry:
         _record_registry_training_run(
@@ -2003,12 +2094,15 @@ def main(args):
         results_df = pd.read_csv(results.save_dir / 'results.csv')
         results_df.columns = results_df.columns.str.strip()
         last_epoch_metrics = results_df.iloc[-1]
-        final_validation_metrics = {
-            'precision': float(last_epoch_metrics.get('metrics/precision(B)', 0)),
-            'recall': float(last_epoch_metrics.get('metrics/recall(B)', 0)),
-            'mAP50': float(last_epoch_metrics.get('metrics/mAP50(B)', 0)),
-            'mAP50_95': float(last_epoch_metrics.get('metrics/mAP50-95(B)', 0))
-        }
+        # The registry registers best.pt, so the headline metrics must be
+        # best.pt's own (embedded by Ultralytics as train_metrics), not the
+        # last epoch's; early stopping makes those differ.
+        final_validation_metrics = _best_checkpoint_validation_metrics(
+            weights_path=Path(results.save_dir) / "weights" / "best.pt",
+            results_df=results_df,
+        )
+        final_validation_metrics["last_epoch"] = _results_row_epoch(last_epoch_metrics)
+        final_validation_metrics["last_epoch_metrics"] = _results_row_box_metrics(last_epoch_metrics)
 
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(training_start_time))
         final_config_filename = f"{timestamp}_detection_training_report.yaml"
@@ -2073,7 +2167,39 @@ def main(args):
     except Exception as e:
         console.print(f"[bold red]✗ Could not save training report:[/bold red] {e}")
         traceback.print_exc()
-    
+        final_validation_metrics = None
+
+    completion_errors = _detection_completion_errors(
+        run_dir=Path(results.save_dir),
+        final_validation_metrics=final_validation_metrics,
+    )
+    if completion_errors:
+        for message in completion_errors:
+            console.print(f"[bold red]✗ Training run incomplete:[/bold red] {message}")
+        if args.log_registry:
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=registry_run_id,
+                set_id=effective_set_id,
+                config_path=config_path,
+                manifest_path=manifest_path,
+                model_path=None,
+                metrics_path=None,
+                status="failed",
+                final_metrics={
+                    "stage": "post_training_validation",
+                    "error_type": "TrainingCompletionCheckFailed",
+                    "error_message": "; ".join(completion_errors),
+                },
+            )
+        _cleanup_trainer_dataloaders(model, console=console)
+        _ACTIVE_INPUT_PIPELINE_PROFILER = None
+        DetTrainer.profile_collector = None
+        YoloCompatibleDataLoader.profile_collector = None
+        return 1
+
     if args.log_registry:
         model_path = results.save_dir / "weights" / "best.pt"
         metrics_path = results.save_dir / "results.csv"
@@ -2113,6 +2239,7 @@ def main(args):
     DetTrainer.profile_collector = None
     YoloCompatibleDataLoader.profile_collector = None
     console.print("\n[bold green]✓ Training Complete![/bold green]")
+    return 0
 
 
 if __name__ == '__main__':
@@ -2251,4 +2378,4 @@ if __name__ == '__main__':
         help="Enable verbose TensorRT build logs."
     )
     args = parser.parse_args()
-    main(args)
+    raise SystemExit(main(args))
