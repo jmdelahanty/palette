@@ -73,6 +73,9 @@ ACQUISITION_RECORD_SCHEMA_VERSIONS = frozenset(
     {CANDIDATE_RECORD_SCHEMA_VERSION, ACQUISITION_RECORD_PHYSICAL_SCHEMA_VERSION}
 )
 _V2_SOURCE_FIELDS = ("registration_source", "selection_record_sha256")
+# Both producer loaders read Orange's physical selection: the recording folder
+# directly, the Citrus H5 through its embedded contract.
+_PHYSICAL_SOURCE_KINDS = frozenset({"orange_recording_folder", "citrus_h5"})
 CANDIDATE_RUN_SCHEMA_ID = "palette.arena_geometry_candidate_run"
 CANDIDATE_RUN_SCHEMA_VERSION = 1
 ACQUISITION_CANDIDATE_KIND = "acquisition_registered_dish"
@@ -386,9 +389,10 @@ def validate_acquisition_geometry_candidate_record(record: Mapping[str, Any]) ->
             raise RecordingGeometryError(
                 "Physical-registration candidate identity is not its rim observation."
             )
-        if source.get("source_kind") != "orange_recording_folder":
+        if source.get("source_kind") not in _PHYSICAL_SOURCE_KINDS:
             raise RecordingGeometryError(
-                "Physical-registration candidates come only from an Orange recording folder."
+                "Physical-registration candidates come only from an Orange "
+                "recording folder or a Citrus H5."
             )
     recovery = source.get("recovery_binding")
     if recovery is not None:

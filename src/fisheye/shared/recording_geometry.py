@@ -1473,6 +1473,66 @@ def _h5_runtime_status(
     return CitrusRegistrationStatus.EXACT_MATCH_APPLIED
 
 
+def _h5_physical_mask(
+    contract: Mapping[str, Any],
+    scope_camera: Mapping[str, Any],
+    physical_camera: Mapping[str, Any],
+    *,
+    camera_serial: str,
+    rig_id: str,
+    canvas_name: str,
+    arena_id: str,
+    contract_sha: str,
+    scope_sha: str,
+    location: str,
+) -> tuple[RegisteredDishMaskKey, RegisteredDishMask]:
+    """The physical-registration mask of one H5 scope camera.
+
+    Validated exactly as the folder loader validates it, against the embedded
+    contract. Citrus does not read or apply Orange's physical registration (it
+    applies only the daily one, to the stimulus geometry), so there is no Citrus
+    claim to reconcile: the status is MISSING and ``applied`` is None, as for a
+    folder-loaded physical mask, and REQUIRED does not refuse on it.
+    """
+
+    if scope_camera.get("physical_registration") != physical_camera:
+        raise RecordingGeometryError(
+            f"H5 scope camera {camera_serial} physical_registration differs from "
+            "the embedded contract's."
+        )
+    daily = scope_camera.get("daily_registration_geometry")
+    if isinstance(daily, Mapping):
+        _refuse_live_use(
+            daily.get("recording_snapshot_entry"),
+            label=f"Daily entry for camera {camera_serial} (physical chosen)",
+        )
+    chosen = _physical_selection(contract, camera_serial, physical_camera)
+    if chosen.arena_id != arena_id:
+        raise RecordingGeometryError(
+            f"Physical camera {camera_serial} arena differs from the H5 target arena."
+        )
+    key = RegisteredDishMaskKey(rig_id, canvas_name, arena_id, camera_serial)
+    mask = _mask_from_entry(
+        chosen.entry,
+        key=key,
+        registration_id=_required_text(chosen.entry.get("artifact_id"), label="rim artifact_id"),
+        registration_sha256=chosen.observation_sha256,
+        source_contract_sha256=contract_sha,
+        h5_scope_sha256=scope_sha,
+        asset_status=MaterializedAssetStatus.MISSING,
+        citrus_status=CitrusRegistrationStatus.MISSING,
+        valid_until_utc=chosen.valid_until_utc,
+        applied_by_citrus=None,
+        source_kind="citrus_h5",
+        source_location=location,
+    )
+    return key, replace(
+        mask,
+        registration_source=REGISTRATION_SOURCE_PHYSICAL,
+        selection_record_sha256=chosen.active_pointer_sha256,
+    )
+
+
 def load_registered_dish_masks_from_citrus_h5(
     source_h5: str | Path,
     *,
@@ -1581,22 +1641,62 @@ def load_registered_dish_masks_from_citrus_h5(
             if not isinstance(associated, Sequence) or isinstance(associated, (str, bytes)) or not associated:
                 raise RecordingGeometryError("H5 scope has no associated camera IDs.")
 
-            runtime_group = _runtime_geometry_group(h5)
-            runtime, _runtime_bytes, runtime_sha = _verified_h5_json_dataset(
-                runtime_group,
-                "daily_registration_json",
-                label="runtime daily_registration_json",
-            )
-            runtime_dataset = runtime_group["daily_registration_json"]
-            citrus_daily = _citrus_daily_registration(runtime_group)
+            # Orange's rule, as in the folder loader: a camera's mask is its
+            # physical registration when that is selected_resolved, else its
+            # daily one. Citrus copies Orange's camera entries into the scope
+            # verbatim and embeds the whole contract, so both are read here.
+            physical_cameras = _physical_cameras(contract)
+            physical_chosen = {
+                serial: camera
+                for serial, camera in physical_cameras.items()
+                if camera.get("status") == "selected_resolved"
+            }
+            serials = [
+                _required_text(str(raw_serial), label="associated camera serial")
+                for raw_serial in associated
+            ]
             cameras = _required_mapping(scope.get("cameras"), label="scope.cameras")
             masks: dict[RegisteredDishMaskKey, RegisteredDishMask] = {}
             issues: list[GeometryLoadIssue] = []
-            for raw_serial in associated:
-                camera_serial = _required_text(str(raw_serial), label="associated camera serial")
+            if any(serial not in physical_chosen for serial in serials):
+                runtime_group = _runtime_geometry_group(h5)
+                runtime, _runtime_bytes, runtime_sha = _verified_h5_json_dataset(
+                    runtime_group,
+                    "daily_registration_json",
+                    label="runtime daily_registration_json",
+                )
+                runtime_dataset = runtime_group["daily_registration_json"]
+                citrus_daily = _citrus_daily_registration(runtime_group)
+            for camera_serial in serials:
                 camera = _required_mapping(cameras.get(camera_serial), label=f"scope camera {camera_serial}")
+                if camera_serial in physical_chosen:
+                    # A physical-only Orange camera has no top-level arena_id
+                    # (Citrus scopes it in anyway); its entry names the arena.
+                    if "arena_id" in camera and camera.get("arena_id") != arena_id:
+                        raise RecordingGeometryError("H5 scope camera arena differs from target arena.")
+                    key, mask = _h5_physical_mask(
+                        contract,
+                        camera,
+                        physical_chosen[camera_serial],
+                        camera_serial=camera_serial,
+                        rig_id=rig_id,
+                        canvas_name=canvas_name,
+                        arena_id=arena_id,
+                        contract_sha=contract_sha,
+                        scope_sha=scope_sha,
+                        location=location,
+                    )
+                    if key in masks:
+                        raise RecordingGeometryError(f"Duplicate H5 geometry key: {key}")
+                    masks[key] = mask
+                    continue
                 if camera.get("arena_id") != arena_id:
                     raise RecordingGeometryError("H5 scope camera arena differs from target arena.")
+                if camera_serial in physical_cameras:
+                    _refuse_live_use(
+                        physical_cameras[camera_serial].get("recording_snapshot_entry"),
+                        label=f"Unselected physical entry for camera {camera_serial}",
+                    )
                 daily = _required_mapping(camera.get("daily_registration_geometry"), label="camera daily_registration_geometry")
                 if daily.get("schema_id") != "orange.recording.daily_registration_camera_geometry" or daily.get("schema_version") != 1 or daily.get("status") != "resolved" or daily.get("mode") != "selected_daily_registration":
                     raise RecordingGeometryError("H5 camera daily registration geometry is invalid.")
