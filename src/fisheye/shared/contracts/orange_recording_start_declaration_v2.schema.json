@@ -1,0 +1,294 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orange.recording_start_declaration.v2",
+  "title": "Orange recording start declaration v2",
+  "description": "What a person declares for one recording (Orange src/session/recording_start_declaration.h at cb4b65ee). Carried as local-control start_recording params.declaration or an orange_client run spec's fixed.declaration; recorded as subject_confirmation.json `declaration`. v2 = v1 plus a required `source` and subject_references schema 2 (camera entries may be {\"blank\": true}). Cross-field rules a JSON Schema cannot express are in README.md and test_recording_start_declaration.py.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "schema_version",
+    "declared_by",
+    "recording_intent",
+    "subject_references",
+    "source"
+  ],
+  "properties": {
+    "schema_id": {
+      "const": "orange.recording_start_declaration"
+    },
+    "schema_version": {
+      "const": 2
+    },
+    "declared_by": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+      "description": "The person who declares (HHMI identity form of pancakebatter host.yml). A claim; who actually sent it is the confirmation's requester."
+    },
+    "recording_intent": {
+      "enum": [
+        "stimulus_experiment",
+        "recording_only"
+      ]
+    },
+    "subject_references": {
+      "$ref": "#/$defs/subject_references"
+    },
+    "source": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/source_orchard_run_plan"
+        },
+        {
+          "$ref": "#/$defs/source_orange_run_spec"
+        },
+        {
+          "$ref": "#/$defs/source_operator"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "subject_declaration": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "One declaration: a dish and/or a count; at least one key (an entry that declares nothing is refused: omit it). Undeclared fields resolve from `default`, else stay undeclared.",
+      "properties": {
+        "dish_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u0020\\u007f/?#]+$",
+          "description": "MetaZebrobot dish id as typed. Orange: at most 256 BYTES (UTF-8), every byte > 0x20 and != 0x7f, no '/', '?' or '#'."
+        },
+        "subject_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000,
+          "description": "Animals this camera records. A JSON integer token (Orange refuses 5.0)."
+        }
+      }
+    },
+    "stated_blank": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "blank"
+      ],
+      "properties": {
+        "blank": {
+          "const": true
+        }
+      },
+      "description": "A stated blank: this camera records no subject on purpose. Alone (no dish_id, no subject_count). Camera entries only, never `default`. Replaces `default` entirely for that camera. Emitted as subject reference not_collected / reason declared_blank."
+    },
+    "subject_references": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version"
+      ],
+      "description": "subject_references block of a start declaration v2. schema_version is this block's own version (it must equal the declaration's), NOT orange.recording_subject_reference. {\"schema_version\": 2} alone declares every camera undeclared (not_collected / no_dish_declared, the GUI's 'Blank all').",
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "default": {
+          "$ref": "#/$defs/subject_declaration"
+        },
+        "cameras": {
+          "type": "object",
+          "propertyNames": {
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/subject_declaration"
+              },
+              {
+                "$ref": "#/$defs/stated_blank"
+              }
+            ]
+          },
+          "description": "Keyed by exact camera serial."
+        }
+      }
+    },
+    "source_orange_run_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "const": "orange_run_spec"
+        }
+      },
+      "description": "Typed into an Orange run spec by hand, no plan behind it."
+    },
+    "source_operator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "const": "operator"
+        }
+      },
+      "description": "A person at the client or GUI, no file behind it."
+    },
+    "source_orchard_run_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "repo",
+        "commit",
+        "path",
+        "file_sha256",
+        "tree_dirty",
+        "plan_id",
+        "plan_revision",
+        "plan_session_id",
+        "plan_sha256",
+        "plan_hash_rule",
+        "sign_off",
+        "generator",
+        "plan_copy_relative_path",
+        "plan_json_copy_relative_path",
+        "sign_off_copy_relative_path"
+      ],
+      "description": "Generated by orchard tools/declare.py from a signed run plan. Recorded by Orange as received (a claim); Orange checks form, tree_dirty, sign_off.by == declared_by, the three copy paths (derived from the hashes) and that the copies' bytes hash to their names. Same object as Citrus's citrus.subject_declaration v2 run_plan.",
+      "properties": {
+        "kind": {
+          "const": "orchard_run_plan"
+        },
+        "repo": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "description": "owner/name, not a remote URL."
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^(?!(?:[^/]*/)*\\.{1,2}(?:/|$))[^/\\\\\\u0000]+(?:/[^/\\\\\\u0000]+)*$",
+          "description": "Plan file, repo-relative POSIX path."
+        },
+        "file_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Plain sha256 of the plan file's bytes at commit:path (never a git blob id)."
+        },
+        "tree_dirty": {
+          "const": false,
+          "description": "Always false: a declaration from an edited or uncommitted plan is refused."
+        },
+        "plan_id": {
+          "type": "string",
+          "pattern": "^[^\\u0000-\\u001f]{1,256}$"
+        },
+        "plan_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "plan_session_id": {
+          "type": "string",
+          "pattern": "^[^\\u0000-\\u001f]{1,256}$"
+        },
+        "plan_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "plan_hash_rule": {
+          "const": "orchard_run_plan_v1_plan_sha256",
+          "description": "Closed set (Orange refuses any other); owned by orchard, test vectors by pancake-plate."
+        },
+        "sign_off": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "entry_id",
+            "entry_sha256",
+            "by",
+            "at_utc",
+            "record_path",
+            "record_commit"
+          ],
+          "properties": {
+            "entry_id": {
+              "type": "string",
+              "pattern": "^[^\\u0000-\\u001f]{1,256}$"
+            },
+            "entry_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "by": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+              "description": "Must equal declared_by."
+            },
+            "at_utc": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+            },
+            "record_path": {
+              "type": "string",
+              "pattern": "^(?!(?:[^/]*/)*\\.{1,2}(?:/|$))[^/\\\\\\u0000]+(?:/[^/\\\\\\u0000]+)*$"
+            },
+            "record_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          }
+        },
+        "generator": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repo",
+            "commit",
+            "tool"
+          ],
+          "properties": {
+            "repo": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            },
+            "commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "tool": {
+              "type": "string",
+              "pattern": "^(?!(?:[^/]*/)*\\.{1,2}(?:/|$))[^/\\\\\\u0000]+(?:/[^/\\\\\\u0000]+)*$"
+            }
+          }
+        },
+        "plan_copy_relative_path": {
+          "type": "string",
+          "pattern": "^run_plan/[0-9a-f]{64}\\.yaml$",
+          "description": "Exactly run_plan/<file_sha256>.yaml."
+        },
+        "plan_json_copy_relative_path": {
+          "type": "string",
+          "pattern": "^run_plan/[0-9a-f]{64}\\.json$",
+          "description": "Exactly run_plan/<plan_sha256>.json."
+        },
+        "sign_off_copy_relative_path": {
+          "type": "string",
+          "pattern": "^run_plan/sign_off/[0-9a-f]{64}\\.json$",
+          "description": "Exactly run_plan/sign_off/<sign_off.entry_sha256>.json."
+        }
+      }
+    }
+  }
+}

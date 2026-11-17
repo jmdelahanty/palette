@@ -1,0 +1,9 @@
+{
+  "schema_id": "orange.recording_start_declaration",
+  "schema_version": 1,
+  "declared_by": "delahantyj",
+  "recording_intent": "recording_only",
+  "subject_references": {
+    "schema_version": 1
+  }
+}

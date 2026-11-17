@@ -96,17 +96,51 @@ PRE_V4_STIMULUS_RENDER_RATE_HZ = 120
 # value is a recording fact in /geometry/calibration/z_eff.
 PROTOCOL_SEMANTIC_RECIPE_V5_NORMALIZATION_POLICY = "citrus.protocol.semantic.v5"
 Z_EFF_SOURCE_ARENA_MEDIA_STACK = "arena_media_stack"
+# Semantic recipe v6 (pairing revision 5, semantic_policy_pairing_v5.json;
+# Citrus #127): v5 with every chaser of every chaser step carrying a hashed
+# ``role``, "test" or "sham" (a sham is drawn in the background's displayed
+# code and never moves). v6 is the only policy paired with trial index v5,
+# whose chasers carry the same role. Render rate, ``z_eff_source`` and the
+# per-arena z_eff group are unchanged from v5. Pool v5 into v6 only through
+# ``semantic_v5_crosswalks_to_v6``.
+PROTOCOL_SEMANTIC_RECIPE_V6_NORMALIZATION_POLICY = "citrus.protocol.semantic.v6"
+CHASER_ROLES = ("test", "sham")
+CHASER_ROLE_ABSENT_HASHES_AS = "test"
+PASSIVE_BEHAVIOR_MODE_ID = 1
+# The recipes whose chaser steps hash z_eff_source and carry the z_eff group.
+PROTOCOL_SEMANTIC_Z_EFF_SOURCE_POLICIES = frozenset(
+    {
+        PROTOCOL_SEMANTIC_RECIPE_V5_NORMALIZATION_POLICY,
+        PROTOCOL_SEMANTIC_RECIPE_V6_NORMALIZATION_POLICY,
+    }
+)
 PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICIES = (
     PROTOCOL_SEMANTIC_ANGLE_V1_NORMALIZATION_POLICY,
     PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY,
     PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY,
     PROTOCOL_SEMANTIC_RECIPE_V5_NORMALIZATION_POLICY,
+    PROTOCOL_SEMANTIC_RECIPE_V6_NORMALIZATION_POLICY,
 )
 CHASER_STIMULUS_MODE_ID = 12
 PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION = 3
 PROTOCOL_TRIAL_INDEX_ANGLE_V1_NORMALIZATION_POLICY = "citrus.protocol.trial_index.v3"
 PROTOCOL_TRIAL_INDEX_RECIPE_V5_SCHEMA_VERSION = 4
 PROTOCOL_TRIAL_INDEX_RECIPE_V5_NORMALIZATION_POLICY = "citrus.protocol.trial_index.v4"
+PROTOCOL_TRIAL_INDEX_RECIPE_V6_SCHEMA_VERSION = 5
+PROTOCOL_TRIAL_INDEX_RECIPE_V6_NORMALIZATION_POLICY = "citrus.protocol.trial_index.v5"
+# Trial index v5 (Citrus src/schemas/protocol_trial_index_v5.schema.json,
+# vendored from agent-contracts; the pairing names its sha256).
+PROTOCOL_TRIAL_INDEX_V5_SCHEMA = (
+    "citrus_protocol_trial_index_v5.schema.json",
+    "f5f3047d746884ec09e26d414278305f20d1d5b56f2f91630a1e9fb39521c85c",
+)
+# Trial index versions whose chaser target names z_eff_source (v4 and v5).
+PROTOCOL_TRIAL_INDEX_Z_EFF_SOURCE_SCHEMA_VERSIONS = frozenset(
+    {
+        PROTOCOL_TRIAL_INDEX_RECIPE_V5_SCHEMA_VERSION,
+        PROTOCOL_TRIAL_INDEX_RECIPE_V6_SCHEMA_VERSION,
+    }
+)
 # Under angle_v1 the semantic policy fixes the trial index version; any other
 # pairing is corruption.
 PROTOCOL_TRIAL_INDEX_BY_ANGLE_V1_POLICY = MappingProxyType(
@@ -126,6 +160,10 @@ PROTOCOL_TRIAL_INDEX_BY_ANGLE_V1_POLICY = MappingProxyType(
         PROTOCOL_SEMANTIC_RECIPE_V5_NORMALIZATION_POLICY: (
             PROTOCOL_TRIAL_INDEX_RECIPE_V5_SCHEMA_VERSION,
             PROTOCOL_TRIAL_INDEX_RECIPE_V5_NORMALIZATION_POLICY,
+        ),
+        PROTOCOL_SEMANTIC_RECIPE_V6_NORMALIZATION_POLICY: (
+            PROTOCOL_TRIAL_INDEX_RECIPE_V6_SCHEMA_VERSION,
+            PROTOCOL_TRIAL_INDEX_RECIPE_V6_NORMALIZATION_POLICY,
         ),
     }
 )
@@ -600,14 +638,16 @@ def _validate_heading_split_step(
             f"{name} with fill type heading_split requires features.fill.style "
             "and features.reactive."
         )
-    # Trial index v4 is a copy of v3 apart from chaser z_eff, so both carry it.
+    # Trial index v4 is a copy of v3 apart from chaser z_eff, and v5 a copy of
+    # v4 apart from chaser role, so all three carry it.
     if trial_schema_version not in (
         PROTOCOL_TRIAL_INDEX_ANGLE_V1_SCHEMA_VERSION,
         PROTOCOL_TRIAL_INDEX_RECIPE_V5_SCHEMA_VERSION,
+        PROTOCOL_TRIAL_INDEX_RECIPE_V6_SCHEMA_VERSION,
     ):
         raise ProtocolSemanticContractError(
             f"{name} trial index schema_version for fill type heading_split "
-            "must be 3 or 4."
+            "must be 3, 4 or 5."
         )
     _require_exact(
         stimulus_mode_id,
@@ -740,6 +780,7 @@ def _validate_recipe_v3_chaser_parameters(
     """The four chaser fields semantic recipe v3 newly hashes are well formed.
 
     Recipe v5 replaces ``z_eff`` with ``z_eff_source``; the other three stay.
+    Recipe v6 keeps v5's fields (``recipe_v5`` is set for both).
     """
 
     name = f"semantic step {step_index}.parameters"
@@ -748,7 +789,7 @@ def _validate_recipe_v3_chaser_parameters(
     if recipe_v5:
         if "z_eff" in parameters:
             raise ProtocolSemanticContractError(
-                f"{name}.z_eff must be absent under recipe v5."
+                f"{name}.z_eff must be absent under recipes v5 and v6."
             )
         _require_exact(
             parameters.get("z_eff_source"),
@@ -758,7 +799,7 @@ def _validate_recipe_v3_chaser_parameters(
     else:
         if "z_eff_source" in parameters:
             raise ProtocolSemanticContractError(
-                f"{name}.z_eff_source is allowed only under recipe v5."
+                f"{name}.z_eff_source is allowed only under recipe v5 or v6."
             )
         if "z_eff" not in parameters:
             raise ProtocolSemanticContractError(f"{name}.z_eff is required by recipe v3.")
@@ -879,26 +920,85 @@ def semantic_v3_relabels_to_v4(
     return "sha256:" + sha256(relabeled).hexdigest() == v4_semantic_hash
 
 
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    ).encode("utf-8")
+
+
+def semantic_v5_crosswalks_to_v6(
+    v5_semantic_json_bytes: bytes, v5_semantic_hash: str, v6_semantic_hash: str
+) -> bool:
+    """Whether a v5 recording may join a v6 protocol_semantic_hash group.
+
+    Pairing revision 5's ``relabel_pooling_rule.rule_v5_to_v6`` (a crosswalk,
+    not a byte relabel): the recorded bytes hash to the recorded v5 hash and
+    are its canonical JSON with the v5 policy; T sets the policy to v6 and
+    role "test" on every chaser of every chaser step (stimulus_mode_id 12);
+    the canonical bytes of T (sorted keys, ``(",", ":")``, UTF-8, no NaN)
+    hash to exactly the v6 hash. Every pre-v6 chaser was a test chaser, so a
+    v5 recording never joins a group with a sham, and the render rate stays
+    in the identity. Semantic hash only; the v5 trial index is read with every
+    chaser as role "test".
+    """
+
+    if type(v5_semantic_json_bytes) is not bytes:
+        raise TypeError("semantic_v5_crosswalks_to_v6 takes the recorded bytes.")
+    for value in (v5_semantic_hash, v6_semantic_hash):
+        if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
+            raise ProtocolSemanticContractError(
+                "protocol_semantic_hash must be 'sha256:' plus 64 lowercase hex digits."
+            )
+    if "sha256:" + sha256(v5_semantic_json_bytes).hexdigest() != v5_semantic_hash:
+        return False
+    try:
+        document = _parse_object(v5_semantic_json_bytes.decode("utf-8"), name="v5 semantic")
+    except (ProtocolSemanticContractError, UnicodeDecodeError):
+        return False
+    document = json.loads(json.dumps(document))
+    if (
+        _canonical_json_bytes(document) != v5_semantic_json_bytes
+        or document.get("normalization_policy") != PROTOCOL_SEMANTIC_RECIPE_V5_NORMALIZATION_POLICY
+    ):
+        return False
+    identity = document.get("identity")
+    steps = identity.get("steps") if isinstance(identity, dict) else None
+    if not isinstance(steps, list):
+        return False
+    document["normalization_policy"] = PROTOCOL_SEMANTIC_RECIPE_V6_NORMALIZATION_POLICY
+    for step in steps:
+        if not isinstance(step, dict) or step.get("stimulus_mode_id") != CHASER_STIMULUS_MODE_ID:
+            continue
+        parameters = step.get("parameters")
+        chasers = parameters.get("chasers") if isinstance(parameters, dict) else None
+        if not isinstance(chasers, list) or any(not isinstance(c, dict) or "role" in c for c in chasers):
+            return False
+        for chaser in chasers:
+            chaser["role"] = CHASER_ROLE_ABSENT_HASHES_AS
+    return "sha256:" + sha256(_canonical_json_bytes(document)).hexdigest() == v6_semantic_hash
+
+
 def _validate_recipe_v4_render_rate(identity: object) -> None:
     rate = identity.get(STIMULUS_RENDER_RATE_KEY) if isinstance(identity, Mapping) else None
     if type(rate) is not int or rate not in ADMITTED_STIMULUS_RENDER_RATES_HZ:
         raise ProtocolSemanticContractError(
             f"identity.{STIMULUS_RENDER_RATE_KEY} must be one JSON integer in "
-            f"{sorted(ADMITTED_STIMULUS_RENDER_RATES_HZ)} under recipes v4 and v5."
+            f"{sorted(ADMITTED_STIMULUS_RENDER_RATES_HZ)} under recipes v4, v5 and v6."
         )
 
 
 def _validate_trial_target_z_eff(
     features: Mapping[str, Any], *, step_index: int, trial_schema_version: int
 ) -> None:
-    """Trial index v4 replaces chaser ``target.z_eff_mm`` with ``z_eff_source``."""
+    """Trial index v4 replaces chaser ``target.z_eff_mm`` with ``z_eff_source``;
+    v5 keeps it."""
 
     name = f"trial step {step_index}.features.target"
     target = features.get("target")
-    if trial_schema_version == PROTOCOL_TRIAL_INDEX_RECIPE_V5_SCHEMA_VERSION:
+    if trial_schema_version in PROTOCOL_TRIAL_INDEX_Z_EFF_SOURCE_SCHEMA_VERSIONS:
         if not isinstance(target, Mapping) or "z_eff_mm" in target:
             raise ProtocolSemanticContractError(
-                f"{name} must be one object without z_eff_mm under trial index v4."
+                f"{name} must be one object without z_eff_mm under trial index v4 or v5."
             )
         _require_exact(
             target.get("z_eff_source"),
@@ -907,8 +1007,186 @@ def _validate_trial_target_z_eff(
         )
     elif isinstance(target, Mapping) and "z_eff_source" in target:
         raise ProtocolSemanticContractError(
-            f"{name}.z_eff_source is allowed only under trial index v4."
+            f"{name}.z_eff_source is allowed only under trial index v4 or v5."
         )
+
+
+def _chaser_list(container: object, *, name: str) -> list:
+    chasers = container.get("chasers", []) if isinstance(container, Mapping) else []
+    if not isinstance(chasers, list) or any(not isinstance(c, Mapping) for c in chasers):
+        raise ProtocolSemanticContractError(f"{name}.chasers must be a list of objects.")
+    return chasers
+
+
+def _validate_chaser_roles(
+    semantic_parameters: object,
+    features: Mapping[str, Any],
+    *,
+    step_index: int,
+    stimulus_mode_id: int,
+    recipe_v6: bool,
+) -> None:
+    """Recipe v6: every chaser of a chaser step carries one role, the same in
+    the semantic identity and the trial index (by list position, which is
+    ``chaser_index``); no role anywhere else, and none before v6."""
+
+    semantic = _chaser_list(semantic_parameters, name=f"semantic step {step_index}.parameters")
+    trial = _chaser_list(features, name=f"trial step {step_index}.features")
+    if not recipe_v6 or stimulus_mode_id != CHASER_STIMULUS_MODE_ID:
+        if any("role" in chaser for chaser in semantic + trial):
+            raise ProtocolSemanticContractError(
+                f"step {step_index} chaser role is allowed only on a chaser step "
+                "under recipe v6."
+            )
+        return
+    for label, chasers in (("semantic", semantic), ("trial", trial)):
+        for position, chaser in enumerate(chasers):
+            role = chaser.get("role")
+            if type(role) is not str or role not in CHASER_ROLES:
+                raise ProtocolSemanticContractError(
+                    f"protocol_chaser_role_invalid: {label} step {step_index} "
+                    f"chasers[{position}].role must be one of {list(CHASER_ROLES)}."
+                )
+    if [c.get("chaser_index") for c in trial] != list(range(len(trial))):
+        raise ProtocolSemanticContractError(
+            f"trial step {step_index}.features.chasers must be ordered by chaser_index from 0."
+        )
+    if [c["role"] for c in semantic] != [c["role"] for c in trial]:
+        raise ProtocolSemanticContractError(
+            f"protocol_chaser_role_semantic_differs: step {step_index} chaser roles "
+            "differ between the semantic identity and the trial index."
+        )
+
+
+# semantic_v6.role_rules.intake_recheck (pairing revision 5). Palette's codes
+# for Citrus's rules R-role, S1-S6 and T1.
+CHASER_ROLE_INTAKE_CODES = MappingProxyType(
+    {
+        "R-role": "protocol_chaser_role_invalid",
+        "S1": "protocol_chaser_sham_not_background_code",
+        "S2": "protocol_chaser_sham_with_background_edge_falloff",
+        "S3": "protocol_chaser_sham_not_passive",
+        "S4": "protocol_chaser_sham_with_appearance",
+        "S5": "protocol_chaser_sham_with_proximity_feedback",
+        "S6": "protocol_chaser_sham_with_drawn_danger_zone",
+        "T1": "protocol_chaser_test_equals_background_code",
+    }
+)
+
+
+def _element_rgba8(elements: Mapping[str, Any], key: str, *, where: str) -> list:
+    element = elements.get(key)
+    color = element.get("resolved_color") if isinstance(element, Mapping) else None
+    rgba = color.get("rgba8") if isinstance(color, Mapping) else None
+    if (
+        not isinstance(rgba, list)
+        or len(rgba) != 4
+        or any(type(value) is not int or not 0 <= value <= 255 for value in rgba)
+    ):
+        raise ProtocolSemanticContractError(
+            f"protocol_chaser_role_displayed_code_missing: {where} "
+            f"features.appearance.elements.{key}.resolved_color.rgba8."
+        )
+    return rgba
+
+
+def chaser_role_intake_errors(trial_index: Mapping[str, Any]) -> list[str]:
+    """Every intake-recheck failure of a v6 trial index, as ``"<rule> <where>"``.
+
+    Port of agent-contracts ``intake_role_errors`` (the reference): sham S1-S6
+    and test T1 compare the displayed plain_v1 codes recorded in
+    ``features.appearance.elements``; an absent ``proximity_feedback`` or
+    ``danger_zone`` block counts as enabled, and an enabled danger zone with
+    ``draw`` false is admitted. A missing displayed code is refused outright.
+    """
+
+    errors: list[str] = []
+    for index, step in enumerate(trial_index.get("steps") or []):
+        if not isinstance(step, Mapping) or step.get("stimulus_mode_id") != CHASER_STIMULUS_MODE_ID:
+            continue
+        features = step.get("features")
+        features = features if isinstance(features, Mapping) else {}
+        appearance = features.get("appearance")
+        elements = appearance.get("elements") if isinstance(appearance, Mapping) else None
+        elements = elements if isinstance(elements, Mapping) else {}
+        for chaser in _chaser_list(features, name=f"trial step {index}.features"):
+            k = chaser.get("chaser_index")
+            where = f"steps[{index}].chasers[{k}]"
+            role = chaser.get("role")
+            if type(role) is not str or role not in CHASER_ROLES:
+                errors.append(f"R-role {where}")
+                continue
+            background = _element_rgba8(elements, "background", where=where)
+            displayed = _element_rgba8(elements, f"chaser_{k}", where=where)
+            if role == "test":
+                if displayed == background:
+                    errors.append(f"T1 {where}")
+                continue
+            element = elements[f"chaser_{k}"]
+            if displayed != background:
+                errors.append(f"S1 {where}")
+            if features.get("background_edge_falloff") is not None:
+                errors.append(f"S2 {where}")
+            mode = chaser.get("behavior_mode_id")
+            if type(mode) is not int or mode != PASSIVE_BEHAVIOR_MODE_ID:
+                errors.append(f"S3 {where}")
+            if "appearance" in chaser or element.get("contrast_profile_digest") is not None:
+                errors.append(f"S4 {where}")
+            feedback = features.get("proximity_feedback")
+            if not isinstance(feedback, Mapping) or feedback.get("enabled") is not False:
+                errors.append(f"S5 {where}")
+            zone = features.get("danger_zone")
+            zone = zone if isinstance(zone, Mapping) else {}
+            if (zone.get("enabled") is not False and zone.get("draw") is not False) or (
+                "danger_zone" in elements
+            ):
+                errors.append(f"S6 {where}")
+    return errors
+
+
+def _validate_chaser_role_intake(trial_index: Mapping[str, Any]) -> None:
+    errors = chaser_role_intake_errors(trial_index)
+    if errors:
+        first = errors[0].split(" ")[0]
+        raise ProtocolSemanticContractError(
+            f"{CHASER_ROLE_INTAKE_CODES[first]}: trial index v5 fails the chaser "
+            f"role intake recheck: {errors}."
+        )
+
+
+_TRIAL_INDEX_V5_VALIDATOR: Any = None
+
+
+def _validate_trial_index_v5_schema(trial_index: Mapping[str, Any]) -> None:
+    """Trial index v5 against Citrus's own schema (pinned by sha256)."""
+
+    global _TRIAL_INDEX_V5_VALIDATOR
+    if _TRIAL_INDEX_V5_VALIDATOR is None:
+        from importlib.resources import files
+
+        from jsonschema import Draft202012Validator
+
+        name, expected = PROTOCOL_TRIAL_INDEX_V5_SCHEMA
+        data = files("fisheye.shared").joinpath("contracts").joinpath(name).read_bytes()
+        if sha256(data).hexdigest() != expected:
+            raise ProtocolSemanticContractError(f"packaged_contract_drift:{name}")
+        _TRIAL_INDEX_V5_VALIDATOR = Draft202012Validator(json.loads(data))
+    errors = sorted(
+        "/".join(str(part) for part in error.absolute_path) + ": " + error.message
+        for error in _TRIAL_INDEX_V5_VALIDATOR.iter_errors(_json_plain(trial_index))
+    )
+    if errors:
+        raise ProtocolSemanticContractError(
+            f"protocol_trial_index_v5_schema: {errors[0]}"
+        )
+
+
+def _json_plain(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _json_plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_plain(item) for item in value]
+    return value
 
 
 def validate_protocol_semantic_snapshot(
@@ -927,10 +1205,12 @@ def validate_protocol_semantic_snapshot(
     ``stimulus_angle_convention`` is the convention the recording's admitted
     binding fixed (never read from the payloads). Under
     ``STIMULUS_ANGLE_CONVENTION`` the snapshot must be v2 with semantic policy
-    v2, recipe v3 or recipe v4 with trial index v3, or recipe v5 with trial
-    index v4, each declaring that id (recipes v3-v5 also require their
-    well-formed chaser fields, v5 its ``z_eff_source`` in place of ``z_eff``,
-    and v4/v5 the integer ``identity.stimulus_render_rate_hz``); under the legacy default
+    v2, recipe v3 or recipe v4 with trial index v3, recipe v5 with trial
+    index v4, or recipe v6 with trial index v5, each declaring that id
+    (recipes v3-v6 also require their well-formed chaser fields, v5 and v6
+    ``z_eff_source`` in place of ``z_eff``, v4-v6 the integer
+    ``identity.stimulus_render_rate_hz``, and v6 every chaser's role plus the
+    role intake recheck and the trial index v5 schema); under the legacy default
     the historical contract applies unchanged. ``admits_heading_split`` is
     likewise fixed by the admitted binding: only admission revision 6 admits a
     reactive heading-split step, and no binding sets it yet.
@@ -980,9 +1260,12 @@ def validate_protocol_semantic_snapshot(
         name="protocol_semantic_json.schema_version",
     )
     semantic_policy = semantic.get("normalization_policy")
-    # Recipes v4 and v5 hash everything v3 does (v5 with z_eff_source in place
-    # of z_eff), so they carry v3's chaser checks.
-    recipe_v5 = angle_v1 and semantic_policy == PROTOCOL_SEMANTIC_RECIPE_V5_NORMALIZATION_POLICY
+    # Recipes v4-v6 hash everything v3 does (v5 and v6 with z_eff_source in
+    # place of z_eff), so they carry v3's chaser checks; v6 adds chaser role.
+    recipe_v6 = angle_v1 and semantic_policy == PROTOCOL_SEMANTIC_RECIPE_V6_NORMALIZATION_POLICY
+    recipe_v5 = recipe_v6 or (
+        angle_v1 and semantic_policy == PROTOCOL_SEMANTIC_RECIPE_V5_NORMALIZATION_POLICY
+    )
     recipe_v4 = recipe_v5 or (
         angle_v1 and semantic_policy == PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY
     )
@@ -1061,7 +1344,7 @@ def validate_protocol_semantic_snapshot(
         _validate_recipe_v4_render_rate(identity)
     elif isinstance(identity, Mapping) and STIMULUS_RENDER_RATE_KEY in identity:
         raise ProtocolSemanticContractError(
-            f"identity.{STIMULUS_RENDER_RATE_KEY} is allowed only under recipe v4 or v5."
+            f"identity.{STIMULUS_RENDER_RATE_KEY} is allowed only under recipe v4, v5 or v6."
         )
     semantic_steps = identity.get("steps") if isinstance(identity, Mapping) else None
     trial_steps = trial.get("steps")
@@ -1193,6 +1476,13 @@ def validate_protocol_semantic_snapshot(
             _validate_trial_target_z_eff(
                 features, step_index=expected_index, trial_schema_version=trial_schema_version
             )
+        _validate_chaser_roles(
+            semantic_step.get("parameters"),
+            features,
+            step_index=expected_index,
+            stimulus_mode_id=semantic_mode_id,
+            recipe_v6=recipe_v6,
+        )
         if semantic_mode_id == 4:
             parameters = semantic_step.get("parameters")
             if not isinstance(parameters, Mapping):
@@ -1231,6 +1521,12 @@ def validate_protocol_semantic_snapshot(
                 resolved_color_rgba8=_optional_rgba8(features),
             )
         )
+
+    if recipe_v6:
+        # Palette does not trust Citrus's load check alone (pairing revision 5
+        # intake_recheck), then Citrus's own trial index v5 schema.
+        _validate_chaser_role_intake(trial)
+        _validate_trial_index_v5_schema(trial)
 
     computed_trial_hash = "sha256:" + sha256(
         trial_index_json.encode("utf-8")
@@ -1605,6 +1901,10 @@ __all__ = [
     "PROTOCOL_SEMANTIC_RECIPE_V3_NORMALIZATION_POLICY",
     "PROTOCOL_SEMANTIC_RECIPE_V4_NORMALIZATION_POLICY",
     "PROTOCOL_SEMANTIC_RECIPE_V5_NORMALIZATION_POLICY",
+    "PROTOCOL_SEMANTIC_RECIPE_V6_NORMALIZATION_POLICY",
+    "PROTOCOL_SEMANTIC_Z_EFF_SOURCE_POLICIES",
+    "CHASER_ROLES",
+    "CHASER_ROLE_INTAKE_CODES",
     "PROTOCOL_TRIAL_INDEX_BY_ANGLE_V1_POLICY",
     "Z_EFF_SOURCE_ARENA_MEDIA_STACK",
     "ADMITTED_STIMULUS_RENDER_RATES_HZ",
@@ -1620,5 +1920,7 @@ __all__ = [
     "read_protocol_semantic_snapshot",
     "semantic_v2_relabels_to_v3",
     "semantic_v3_relabels_to_v4",
+    "semantic_v5_crosswalks_to_v6",
+    "chaser_role_intake_errors",
     "validate_protocol_semantic_snapshot",
 ]

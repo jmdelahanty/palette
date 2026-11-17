@@ -531,13 +531,16 @@ CONFIRMED_V1 = {
 }
 PANEL_V2 = {**CONFIRMED_V1, "schema_version": 2, "declaration": None,
             "requester": {"transport": "gui_panel", "user": "operator"}}
+# The declaration's subject_references is the confirmation's config (rule C1).
+_DECLARED_CONFIG = {"schema_version": 1, "cameras": _CONFIRMED_CAMERAS}
 REMOTE_V2 = {
     **CONFIRMED_V1,
     "schema_version": 2,
     "confirmed_by": "local_control",
+    "config": _DECLARED_CONFIG,
     "declaration": {"schema_id": "orange.recording_start_declaration", "schema_version": 1,
-                    "declared_by": "someone@hhmi.org", "recording_intent": "recording_only",
-                    "subject_references": {"CAM-1": {"dish_id": "19220_1", "subject_count": 1}}},
+                    "declared_by": "someone", "recording_intent": "recording_only",
+                    "subject_references": _DECLARED_CONFIG},
     "requester": {"transport": "local_control_socket",
                   "peer": {"uid": 1000, "gid": 1000, "pid": 4242, "user": "rigaccount"},
                   "request_id": "r-1", "operation_id": "op-1", "command_source": "cli",
@@ -546,7 +549,8 @@ REMOTE_V2 = {
 
 # Orange 86d02fc: a headless orange_client start whose spec has fixed.declaration.
 # The spec bytes it ran are sealed at run_spec/<spec_sha256>.json.
-SPEC_BYTES = b'{"experiment_id": "chaser", "fixed": {"declaration": {}}}\n'
+SPEC_BYTES = (json.dumps({"experiment_id": "chaser", "fixed": {"declaration": REMOTE_V2["declaration"]}},
+                         indent=2) + "\n").encode()
 SPEC_SHA = hashlib.sha256(SPEC_BYTES).hexdigest()
 RUN_SPEC_V2 = {
     **REMOTE_V2,
@@ -557,6 +561,11 @@ RUN_SPEC_V2 = {
                   "run_stamp": "20261114_195922",
                   "experiment_id": "chaser_20261114_195922", "user": "rigaccount"},
 }
+
+
+# A malformed declared start is refused: by the pinned v2 schema and rules
+# (agent-contracts #138) when it breaks them, else by the requester check.
+DECLARED_REFUSAL = r"needs declaration|orange_start_declaration:"
 
 
 def _seal_file(plan, source_path, data, *, tamper=False):
@@ -603,26 +612,29 @@ def _agreeing_recording(tmp_path):
                     "orange_confirmed_by": "gui_operator"}),
         (REMOTE_V2, {"orange_reference_origin": "local_control_declared",
                      "orange_confirmed_by": "local_control",
-                     "orange_declared_by": "someone@hhmi.org",
-                     "orange_requester_user": "rigaccount"}),
+                     "orange_declared_by": "someone",
+                     "orange_requester_user": "rigaccount",
+                     "orange_declaration_schema_version": 1}),
         (RUN_SPEC_V2, {"orange_reference_origin": "spec_declared",
                        "orange_confirmed_by": "run_spec",
-                       "orange_declared_by": "someone@hhmi.org",
+                       "orange_declared_by": "someone",
                        "orange_requester_user": "rigaccount",
                        "orange_spec_path": "/home/rig/orange/experiment_specs/chaser.json",
                        "orange_spec_sha256": SPEC_SHA,
                        "orange_spec_copy_path": f"raw/acquisition/run_spec/{SPEC_SHA}.json",
                        "orange_run_stamp": "20261114_195922",
-                       "orange_experiment_id": "chaser_20261114_195922"}),
+                       "orange_experiment_id": "chaser_20261114_195922",
+                       "orange_declaration_schema_version": 1}),
         ({**RUN_SPEC_V2, "requester": {**RUN_SPEC_V2["requester"], "run_stamp": None,
                                        "experiment_id": "", "user": None}},
          {"orange_reference_origin": "spec_declared", "orange_confirmed_by": "run_spec",
-          "orange_declared_by": "someone@hhmi.org", "orange_requester_user": None,
+          "orange_declared_by": "someone", "orange_requester_user": None,
           "orange_spec_path": "/home/rig/orange/experiment_specs/chaser.json",
           "orange_spec_sha256": SPEC_SHA,
           "orange_spec_copy_path": f"raw/acquisition/run_spec/{SPEC_SHA}.json",
           "orange_run_stamp": None,
-          "orange_experiment_id": ""}),
+          "orange_experiment_id": "",
+          "orange_declaration_schema_version": 1}),
     ],
 )
 def test_subject_confirmation_origin_names_who_confirmed(tmp_path, confirmation, expected):
@@ -642,14 +654,14 @@ def test_subject_confirmation_origin_names_who_confirmed(tmp_path, confirmation,
         ({"schema_version": 3}, "unsupported schema_version"),
         ({"confirmed_by": "local_control"}, "unsupported schema_version"),  # v1 is panel-only
         ({"schema_version": 2, "confirmed_by": "robot"}, "unsupported schema_version"),
-        ({**REMOTE_V2, "declaration": None}, "needs declaration.declared_by"),
-        ({**REMOTE_V2, "requester": {"transport": "gui_panel", "user": "x"}}, "needs declaration"),
+        ({**REMOTE_V2, "declaration": None}, DECLARED_REFUSAL),
+        ({**REMOTE_V2, "requester": {"transport": "gui_panel", "user": "x"}}, DECLARED_REFUSAL),
         ({**REMOTE_V2, "requester": {**REMOTE_V2["requester"], "peer": {"uid": 1000}}},
-         "needs declaration"),
+         DECLARED_REFUSAL),
         ({"confirmed_by": "run_spec"}, "unsupported schema_version"),  # v1 is panel-only
-        ({**RUN_SPEC_V2, "declaration": None}, "needs declaration"),
-        ({**RUN_SPEC_V2, "requester": REMOTE_V2["requester"]}, "needs declaration"),
-        *[({**RUN_SPEC_V2, "requester": {**RUN_SPEC_V2["requester"], **bad}}, "needs declaration")
+        ({**RUN_SPEC_V2, "declaration": None}, DECLARED_REFUSAL),
+        ({**RUN_SPEC_V2, "requester": REMOTE_V2["requester"]}, DECLARED_REFUSAL),
+        *[({**RUN_SPEC_V2, "requester": {**RUN_SPEC_V2["requester"], **bad}}, DECLARED_REFUSAL)
           for bad in ({"spec_sha256": SPEC_SHA.upper()}, {"spec_sha256": SPEC_SHA[:63]},
                       {"spec_sha256": "c" * 64},  # names a spec that was not sealed
                       {"spec_copy_relative_path": None},
@@ -657,7 +669,7 @@ def test_subject_confirmation_origin_names_who_confirmed(tmp_path, confirmation,
                       {"run_stamp": "2026-11-14"}, {"spec_path": None},
                       {"experiment_id": None}, {"transport": "local_control_socket"})],
         ({**RUN_SPEC_V2, "requester": {k: v for k, v in RUN_SPEC_V2["requester"].items()
-                                       if k != "user"}}, "needs declaration"),
+                                       if k != "user"}}, DECLARED_REFUSAL),
     ],
 )
 def test_an_unreadable_subject_confirmation_refuses(tmp_path, mutate, match):
@@ -713,6 +725,7 @@ def test_the_first_real_remote_start_confirmation_is_labelled(tmp_path):
         "orange_subject_confirmation_sha256": digest,
         "orange_declared_by": "delahantyj",
         "orange_requester_user": "jeremy",
+        "orange_declaration_schema_version": 1,
     }
 
 
@@ -728,3 +741,102 @@ def test_a_run_spec_without_its_sealed_spec_bytes_refuses(tmp_path, spec, tamper
         match = "needs declaration"
     with pytest.raises(ValueError, match=match):
         importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+
+
+# agent-contracts #138: a v2 declaration from an orchard plan, started through a
+# run spec, with its run_plan/ copies sealed beside the confirmation.
+_ORCHARD = (Path(__file__).resolve().parents[2] / "contracts"
+            / "orange_recording_start_declaration_v2" / "orchard_v2")
+DECLARED_BLANK = {**NOT_COLLECTED, "schema_version": 2, "reason": "declared_blank"}
+
+
+def _orchard_confirmation(camera_entry):
+    declaration = json.loads(next(_ORCHARD.glob("*.orange_declaration.json")).read_bytes())
+    declaration["subject_references"] = {"schema_version": 2, "cameras": {"CAM-1": camera_entry}}
+    spec = (json.dumps({"experiment_id": "plan", "fixed": {"declaration": declaration}}, indent=2)
+            + "\n").encode()
+    sha = hashlib.sha256(spec).hexdigest()
+    blank = camera_entry.get("blank", False)
+    confirmation = {
+        "schema_id": "orange.recording_subject_confirmation", "schema_version": 2,
+        "confirmed_by": "run_spec", "confirmed_at_utc": "2026-11-16T03:28:12Z",
+        "cameras": {"CAM-1": {"dish_id": None if blank else camera_entry["dish_id"],
+                              "subject_count": None if blank else camera_entry["subject_count"]}},
+        "config": declaration["subject_references"],
+        "declaration": declaration,
+        "requester": {"transport": "run_spec", "spec_path": "/home/rig/plan_spec.json",
+                      "spec_sha256": sha, "spec_copy_relative_path": f"run_spec/{sha}.json",
+                      "run_stamp": None, "experiment_id": "plan", "user": "jeremy"},
+    }
+    return confirmation, spec
+
+
+def _seal_orchard(plan, confirmation, spec, *, skip=()):
+    for path in sorted((_ORCHARD / "run_plan").rglob("*")):
+        relative = path.relative_to(_ORCHARD).as_posix()
+        if path.is_file() and relative not in skip:
+            _seal_file(plan, relative, path.read_bytes())
+    _seal_confirmation(plan, confirmation, spec=spec)
+
+
+def test_an_orchard_declaration_is_recorded_for_a_stated_blank_camera(tmp_path):
+    importer, plan = _recording(tmp_path, DECLARED_BLANK)
+    confirmation, spec = _orchard_confirmation({"blank": True})
+    _seal_orchard(plan, confirmation, spec)
+    result = importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+    assert result == {"status": "not_collected", "reason": "declared_blank"}
+    record = zarr.open_group(str(plan.zarr_path), mode="r").attrs["orange_start_declaration"]
+    assert record["orange_reference_origin"] == "spec_declared"
+    assert record["orange_declaration_schema_version"] == 2
+    assert record["orange_declaration_source"] == confirmation["declaration"]["source"]
+    assert record["orange_run_plan_check"]["yaml_json_equivalence"] == "not_performed"
+    assert len(record["orange_run_plan_check"]["copies_verified"]) == 3
+
+
+@pytest.mark.parametrize(
+    "reference, entry",
+    [
+        (NOT_COLLECTED, {"blank": True}),  # stated blank, but the reference says undeclared
+        (DECLARED_BLANK, {"dish_id": "19220_1", "subject_count": 1}),  # blank nobody stated
+    ],
+)
+def test_a_stated_blank_must_match_the_cameras_reference(tmp_path, reference, entry):
+    importer, plan = _recording(tmp_path, reference)
+    _seal_orchard(plan, *_orchard_confirmation(entry))
+    with pytest.raises(ValueError, match="stated blank"):
+        importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+
+
+def test_a_confirmation_that_omits_this_camera_refuses(tmp_path):
+    importer, plan = _recording(tmp_path, DECLARED_BLANK)
+    confirmation, spec = _orchard_confirmation({"blank": True})
+    manifest_path = plan.recording_dir / "recording_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest_path.write_text(json.dumps({**manifest, "camera_id": "CAM-2"}))
+    _seal_orchard(plan, confirmation, spec)
+    with pytest.raises(ValueError, match="'CAM-2' is not confirmed"):
+        importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+
+
+def test_an_orchard_declaration_without_its_sealed_plan_copy_refuses(tmp_path):
+    importer, plan = _recording(tmp_path, DECLARED_BLANK)
+    confirmation, spec = _orchard_confirmation({"blank": True})
+    _seal_orchard(plan, confirmation, spec,
+                  skip={confirmation["declaration"]["source"]["plan_json_copy_relative_path"]})
+    with pytest.raises(ValueError, match="orange_start_declaration:run_plan_copy:"):
+        importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+
+
+def test_a_v2_local_control_start_without_a_kernel_peer_is_recorded(tmp_path):
+    importer, plan = _recording(tmp_path, NOT_COLLECTED)
+    _seal_confirmation(plan, {**REMOTE_V2, "requester": {**REMOTE_V2["requester"], "peer": None}})
+    importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+    record = zarr.open_group(str(plan.zarr_path), mode="r").attrs["orange_start_declaration"]
+    assert record["orange_requester_user"] is None
+    assert record["orange_reference_origin"] == "local_control_declared"
+
+
+def test_no_confirmation_records_no_declaration(tmp_path):
+    importer, plan = _recording(tmp_path, NOT_COLLECTED)
+    importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+    assert "orange_start_declaration" not in zarr.open_group(str(plan.zarr_path), mode="r").attrs
