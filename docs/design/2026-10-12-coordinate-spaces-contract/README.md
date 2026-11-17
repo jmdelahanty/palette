@@ -460,19 +460,19 @@ session, handed over by PR-monitor.
 | 10-17/18 phototaxis sessions | omnifin0's camera cannot see the projection, so they cannot be verified from their own frames. Jeremy states the projector has not flipped or changed orientation since October. Run the §5 asymmetric-pattern check on omnifin0 while the NIR filters are off. That check plus this statement lifts `orientation_unverified` for those sessions. |
 | `orientation_unverified` (§8 step 1) | **Derived, not stamped.** One resolver reports `orientation_status` per recording: verified only when a checked orientation evidence record exists for it, otherwise unverified. It may be projected into the registry. No existing run is mutated. New runs record the status in provenance when produced. |
 
-**§6 fixes (status 2026-11-16):**
+**§6 fixes (status 2026-11-17):**
 - §6a xrandr token: palette#450, merged `729a34cc`; live since intake re-pin `d190dd22` (2026-11-15 23:26Z).
 - §6b `detect_bbox_read.md:128`: agent-contracts#131, merged `1362d753` (head `b33b63e`). Crimson main `01b424b` has no bbox `pixel_convention` check, so no reader changes.
 - §6c: palette#451, merged `c1667a1c`; live since `d190dd22`.
 - §6d: not started.
 
-**Q-C5 declared orientation (status 2026-11-16):**
+**Q-C5 declared orientation (status 2026-11-17):**
 - Contract: agent-contracts#135, merged `3480e3e` (`citrus-palette/coordinate_spaces_v1/`, schema `citrus.declared_orientation_check` v1, sha256 `1bf06621…fa82`, rules R1–R4, consumer checks 1–4, admission by install-time cutoff).
 - Citrus #115 was reverted (Citrus #125, `fec43d0`): its START check read the homography before it was resolved. The redo merged as Citrus #126 (`027d292a`) and was installed on omnifin0 at 2026-11-15T23:17:22.675Z.
-- Palette: palette#458, merged `8f961c82`, checks the group in unified H5 admission. It is required on omnifin0 from **2026-11-15T23:17:22Z** (rounded down; no Citrus ran 23:17:07–23:18:17Z), kept in `contracts/palette_citrus_declared_orientation_cutoffs_v1.json`. Not live until an intake re-pin at or after `8f961c82`.
+- Palette: palette#458, merged `8f961c82`, checks the group in unified H5 admission. It is required on omnifin0 from **2026-11-15T23:17:22Z** (rounded down; no Citrus ran 23:17:07–23:18:17Z), kept in `contracts/palette_citrus_declared_orientation_cutoffs_v1.json`. Live since intake re-pin `8f961c82` (2026-11-16 04:11:45Z); live intake is now `72a44f07`. No omnifin0 recording reached Palette between the cutoff and that re-pin (checked 2026-11-16 05:20Z: no staging submission after 11-06, no registry rows), so none skipped the check.
 - Citrus's `selected_output_transform_token` now names the current rotation, matching palette#450. Files sealed before it need no change: Palette never trusted that attr alone, and all 236 legacy H5s re-derive `normal`/unreflected from their sealed raw block.
 
-**Rim v4 / dish-mask follow-ups merged 2026-11-15 (not part of §6):** palette#453 (geometry contract v3, rim v4, H5 scope v3; live `d190dd22`), #454 (Palette recomputes Orange's `orange_dish_rim_auto_accept_v1` gate; live `d190dd22`), #455 (exact Citrus daily match needs `translation_matches_runtime` and `canonical_geometry_preserved`; live `d190dd22`), #456 (Orange physical-registration masks with the 24 h freshness window; live `73ccf2c5`) and #457 (acquisition candidate record v2 for physical masks; live `73ccf2c5`). Open: the Citrus H5 path still reads daily registration only.
+**Rim v4 / dish-mask follow-ups merged 2026-11-15 (not part of §6):** palette#453 (geometry contract v3, rim v4, H5 scope v3; live `d190dd22`), #454 (Palette recomputes Orange's `orange_dish_rim_auto_accept_v1` gate; live `d190dd22`), #455 (exact Citrus daily match needs `translation_matches_runtime` and `canonical_geometry_preserved`; live `d190dd22`), #456 (Orange physical-registration masks with the 24 h freshness window; live `73ccf2c5`) and #457 (acquisition candidate record v2 for physical masks; live `73ccf2c5`). palette#462 (merged `aaf9204c`; live `72a44f07`) closes the last gap: the Citrus H5 path now applies the same rule as the folder path, so a camera's mask is Orange's physical registration when that is `selected_resolved`, else the daily one. Citrus does not apply Orange's physical registration, so those masks carry Citrus status `missing`. On 246 real H5s and 180 recording folders the output was identical, and none selects a physical registration yet.
 
 **Presentation parity: resolved by measurement (see "Orientation check" below).** Kept for the record:
 - #115's rule is `sign(det) = handedness × presentation_parity × xrandr_reflection`, with `presentation_parity = −1`. That value is a Citrus code constant (`presentation_mapping_contract.cpp`, `display_reflection = [[1,0,0],[0,−1,H],[0,0,1]]`), not a measurement.
@@ -480,6 +480,17 @@ session, handed over by PR-monitor.
 - If the presentation reflection really is applied at scan-out, then `citrus.display_canvas_px` is bottom-left-origin in xrandr output pixels, and the §2 row ("top-left of … one xrandr output") is wrong.
 - omnifin0 fits made before 2026-08-10 have det > 0 under the same presentation code, and nothing explains that yet.
 - Check proposed to Citrus: render a marker at canvas (0, 0) and capture DP-2's X screen. It needs no camera or filters, but it is a rig session, so it needs Jeremy's OK after Orange's hold clears.
+
+**Remaining (2026-11-17):**
+- Jeremy's calls:
+  - whether to require a printed asymmetric target in a dish (camera-vs-dish parity, finding 4 below);
+  - a physical read-off of omnifin0's mirror count;
+  - copying the pancake0 orientation-check evidence to `/groups`.
+- Agent work:
+  - the `orientation_status` resolver (derived, not stamped; nothing on main yet);
+  - §6d (mark the GoodCopBadCop canvas-mm route legacy-only);
+  - fixtures with one preserved rig and one reflected rig;
+  - a home for the registry and transform-record schemas (`systems/` holds links only).
 
 ### Orientation check, omnifin0, 2026-11-15 (NIR filters off)
 
