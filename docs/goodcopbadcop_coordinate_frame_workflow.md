@@ -1,7 +1,7 @@
 # GoodCopBadCop Coordinate-Frame Workflow
 <!-- contract-meta
 status: draft
-last_updated: 2026-06-22
+last_updated: 2026-11-18
 -->
 
 Purpose: document the current, active coordinate-frame contract for
@@ -12,6 +12,30 @@ projector/stimulus coordinates, or arena-relative coordinates.
 This document describes the workflow implemented by
 `src/fisheye/analysis/chaser_distance_runs.py` and consumed by the CRA primary
 endpoint and egocentric-bearing components.
+
+> **Millimetre scale, status 2026-11-18 (palette#377 §6d).** Both chaser-distance
+> writers convert canvas pixels to millimetres with
+> `distance_mm = distance_px / pixels_per_mm_projector`. They differ in where
+> the scale comes from:
+>
+> - **Canonical:** `src/fisheye/analysis/chaser_distance_coordinate_publication.py`
+>   reads only the selected calibration's
+>   `selected_calibration_manifest.camera_calibration.pixels_per_mm_projector`
+>   and refuses a recording without an exact positive value (`:742-752`). It
+>   records that authority in each run's measurement record (`:1122-1128`).
+> - **Legacy only:** the lookup in `chaser_distance_runs.py`
+>   (`_resolve_pixels_per_mm_projector`, `:311-323`). It reads the root
+>   `analysis/calibration.attrs["pixels_per_mm_projector"]` and otherwise falls
+>   back to the median `pixels_per_mm` of `tracking_data/chaser_states`. The
+>   canonical writer forbids both. New analyses must not use this lookup.
+>   Existing runs keep the scale they recorded and are not rewritten.
+>
+> Open question (palette#377 §10): canonical physical millimetres elsewhere in
+> Palette are camera-derived (`physical_mm.source_camera_y_down.v1`, scale
+> `pixels_per_mm_camera`). Chaser distances use the projector scale instead.
+> The two have not been compared on the same recordings. Whether chaser
+> distances should move to camera millimetres is undecided. That would be a
+> versioned schema change, not an edit to this document.
 
 ## Short Version
 
@@ -255,15 +279,25 @@ pixel distance.
 distance_mm = distance_px / pixels_per_mm_projector
 ```
 
-The conversion factor is resolved from:
+The canonical writer (`chaser_distance_coordinate_publication.py`) takes the
+conversion factor only from the selected calibration's
+`camera_calibration.pixels_per_mm_projector`. It refuses a recording that lacks
+an exact positive value.
+
+**Legacy only.** The older writer (`chaser_distance_runs.py`) resolves the
+factor from:
 
 1. `analysis/calibration.attrs["pixels_per_mm_projector"]`, if present and
    positive;
 2. otherwise the median positive `pixels_per_mm` value in
    `tracking_data/chaser_states`, if available.
 
-Because the current metric frame is canvas/projector-like, the writer uses
-`pixels_per_mm_projector`, not camera `pixel_to_mm`.
+Both of these sources are kept only for reading and reproducing historical
+runs. A run's recorded `pixels_per_mm_projector` attr says which value it used.
+
+Because the metric frame is canvas/projector-like, both writers use
+`pixels_per_mm_projector`, not camera `pixel_to_mm`. See the status note at the
+top for the open question about camera millimetres.
 
 ## Downstream Components
 
