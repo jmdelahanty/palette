@@ -265,8 +265,17 @@ c. **Arena origin type.**
 d. **Two mm definitions.** The GoodCopBadCop workflow computes canvas mm from
    `pixels_per_mm_projector`, with a median fallback from `chaser_states`
    (`docs/goodcopbadcop_coordinate_frame_workflow.md:255-266`). Canonical mm is
-   camera-derived. Mark the canvas route as legacy-only in that doc. New
-   analyses use `physical.camera_mm.v1`.
+   camera-derived.
+
+   > *Narrowed (Jeremy, 2026-11-18):* the canonical chaser-distance writer
+   > (`analysis/chaser_distance_coordinate_publication.py:742-752`) also uses
+   > `distance_px / pixels_per_mm_projector`, and about 20 maintained chaser
+   > components read that scale. So only the older writer's lookup is marked
+   > legacy-only: root `analysis/calibration` attrs, then the `chaser_states`
+   > median (`chaser_distance_runs.py:311-323`). The canonical writer already
+   > forbids both. Whether chaser distances should move to
+   > `physical.camera_mm.v1` is an open question (§10). It would be a
+   > versioned schema change.
 
 ## 7. Questions and answers
 
@@ -445,7 +454,7 @@ All other citations, including every `AC:` one, still hold.
   runtime geometry contract. That concerns registration status, not
   orientation, so it does not change any point here.
 
-## 10. Decisions and status (2026-11-15)
+## 10. Decisions and status (2026-11-15, updated 2026-11-18)
 
 Palette owner of this contract from 2026-11-15: the `coordinate_spaces`
 session, handed over by PR-monitor.
@@ -460,11 +469,11 @@ session, handed over by PR-monitor.
 | 10-17/18 phototaxis sessions | omnifin0's camera cannot see the projection, so they cannot be verified from their own frames. Jeremy states the projector has not flipped or changed orientation since October. Run the §5 asymmetric-pattern check on omnifin0 while the NIR filters are off. That check plus this statement lifts `orientation_unverified` for those sessions. |
 | `orientation_unverified` (§8 step 1) | **Derived, not stamped.** One resolver reports `orientation_status` per recording: verified only when a checked orientation evidence record exists for it, otherwise unverified. It may be projected into the registry. No existing run is mutated. New runs record the status in provenance when produced. |
 
-**§6 fixes (status 2026-11-17):**
+**§6 fixes (status 2026-11-18):**
 - §6a xrandr token: palette#450, merged `729a34cc`; live since intake re-pin `d190dd22` (2026-11-15 23:26Z).
 - §6b `detect_bbox_read.md:128`: agent-contracts#131, merged `1362d753` (head `b33b63e`). Crimson main `01b424b` has no bbox `pixel_convention` check, so no reader changes.
 - §6c: palette#451, merged `c1667a1c`; live since `d190dd22`.
-- §6d: not started.
+- §6d: narrowed by Jeremy on 2026-11-18 (see §6d); palette#470 (docs only) marks the older writer's `pixels_per_mm_projector` lookup legacy-only.
 
 **Q-C5 declared orientation (status 2026-11-17):**
 - Contract: agent-contracts#135, merged `3480e3e` (`citrus-palette/coordinate_spaces_v1/`, schema `citrus.declared_orientation_check` v1, sha256 `1bf06621…fa82`, rules R1–R4, consumer checks 1–4, admission by install-time cutoff).
@@ -481,16 +490,27 @@ session, handed over by PR-monitor.
 - omnifin0 fits made before 2026-08-10 have det > 0 under the same presentation code, and nothing explains that yet.
 - Check proposed to Citrus: render a marker at canvas (0, 0) and capture DP-2's X screen. It needs no camera or filters, but it is a rig session, so it needs Jeremy's OK after Orange's hold clears.
 
-**Remaining (2026-11-17):**
+**`orientation_status` resolver:** palette#468, merged `6c158781` (2026-11-17).
+- What it is: `fisheye.shared.unified_h5.orientation_status`, plus the command `scripts/py -m fisheye.utils.report_orientation_status`. It is read-only: nothing is stamped and no run is mutated.
+- When it reports `verified` for `camera_to_canvas`:
+  - the recording's Citrus `declared_orientation` record passes the palette#458 check; or
+  - the evidence contract `contracts/palette_orientation_evidence_v1.json` lists the recording by session, arena, camera and homography sha256. That contract lists exactly the 24 recordings of the 10-17/18 phototaxis sessions (Jeremy, 2026-11-17).
+- Every result has `camera_to_dish_parity: "declared"`.
+- On 382 real recording folders: 24 verified, 28 unified recordings unverified (no evidence), 330 legacy recordings with no unified Citrus H5.
+
+**Remaining (2026-11-18):**
 - Jeremy's calls:
   - whether to require a printed asymmetric target in a dish (camera-vs-dish parity, finding 4 below);
   - a physical read-off of omnifin0's mirror count;
-  - copying the pancake0 orientation-check evidence to `/groups`.
-- Agent work:
-  - the `orientation_status` resolver (derived, not stamped; nothing on main yet);
-  - §6d (mark the GoodCopBadCop canvas-mm route legacy-only);
-  - fixtures with one preserved rig and one reflected rig;
-  - a home for the registry and transform-record schemas (`systems/` holds links only).
+  - copying the pancake0 orientation-check evidence to `/groups` (the evidence contract cites the files' hashes; the only copy is on pancake0);
+  - projector mm vs camera mm for chaser distances (§6d): compare them on the same recordings, and decide whether chaser distances move to `physical.camera_mm.v1`;
+  - for #377 itself: merge it as the Palette design record, marked superseded by agent-contracts, or close it.
+- Agent work, in order:
+  - record `orientation_status` in new runs' provenance;
+  - project `orientation_status` into the registry (needs a migration);
+  - have left/right-dependent analyses refuse `unverified` rows;
+  - fixtures with one preserved rig and one reflected rig (omnifin0 as the reflected one);
+  - move the space registry and transform-record schemas to agent-contracts, next to `citrus-palette/coordinate_spaces_v1/` (`systems/` holds links only).
 
 ### Orientation check, omnifin0, 2026-11-15 (NIR filters off)
 
