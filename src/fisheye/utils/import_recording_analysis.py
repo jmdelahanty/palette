@@ -1061,8 +1061,26 @@ def _orange_reference_origin(
         return unproven
     return {
         "orange_reference_origin": ORANGE_REFERENCE_FROM_APP_CONFIG_DEFAULT,
-        "orange_app_config_sha256": app_config.get("sha256"),
+        "orange_app_config_sha256": _orange_app_config_sha256_token(app_config.get("sha256")),
     }
+
+
+def _orange_app_config_sha256_token(value: Any) -> Optional[str]:
+    """Orange's app_config digest as a ``sha256:<64 hex>`` token, or None.
+
+    Orange start snapshots before 2026-11-17 record a bare 64-hex digest and
+    later ones a ``sha256:`` token; both name the same bytes, so Palette stores
+    one form. Anything else is recorded as unknown rather than guessed at.
+    """
+
+    from fisheye.shared.canonical_onnx_model_manifest import sha256_token
+
+    if not isinstance(value, str):
+        return None
+    try:
+        return sha256_token(value)
+    except ValueError:
+        return None
 
 
 def _cross_check_h5_subject(

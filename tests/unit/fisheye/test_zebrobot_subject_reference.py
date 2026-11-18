@@ -394,14 +394,14 @@ H5_OTHER_DISH = {"dish_id": "19220_2", "dish_uuid": "11111111-1111-4111-8111-111
                  "subject_count": 1}
 
 
-def _with_start_snapshot(plan, reference, *, configured, tamper=False):
+def _with_start_snapshot(plan, reference, *, configured, tamper=False, app_config_sha256="a" * 64):
     """Seal a recording_snapshot_start.json into the parent's transfer mapping."""
 
     snapshot = {
         "session": {
             "subject_references": {"CAM-1": reference},
             "effective_configuration": {"app_config": {
-                "status": "loaded", "path": "/rig/app/default.json", "sha256": "a" * 64,
+                "status": "loaded", "path": "/rig/app/default.json", "sha256": app_config_sha256,
                 "size_bytes": 1, "error": None,
                 "contents": {"recording": {"subject_references": configured}},
             }},
@@ -445,7 +445,7 @@ def test_v2_app_config_default_dish_disagreement_is_recorded_not_refused(tmp_pat
     assert disagreement["h5"] == H5_OTHER_DISH["dish_uuid"] and disagreement["orange"] == UUID
     attrs = zarr.open_group(str(plan.zarr_path), mode="r").attrs
     assert attrs["orange_subject_reference_dish_disagreement"] == disagreement
-    assert attrs["orange_subject_reference_origin"]["orange_app_config_sha256"] == "a" * 64
+    assert attrs["orange_subject_reference_origin"]["orange_app_config_sha256"] == "sha256:" + "a" * 64
     # The H5 record stays the subject authority.
     root = zarr.open_group(str(plan.zarr_path), mode="r")
     assert resolve_subject_metadata(root).subject["dish_uuid"] == H5_OTHER_DISH["dish_uuid"]
@@ -840,3 +840,22 @@ def test_no_confirmation_records_no_declaration(tmp_path):
     importer, plan = _recording(tmp_path, NOT_COLLECTED)
     importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
     assert "orange_start_declaration" not in zarr.open_group(str(plan.zarr_path), mode="r").attrs
+
+
+@pytest.mark.parametrize(
+    ("recorded", "stored"),
+    [
+        ("b" * 64, "sha256:" + "b" * 64),  # start snapshot before the token form
+        ("sha256:" + "b" * 64, "sha256:" + "b" * 64),  # token form, kept as is
+        ("B" * 64, None),  # malformed: not lowercase hex
+        ("sha256:" + "b" * 63, None),  # malformed: short
+        (None, None),  # absent
+    ],
+)
+def test_app_config_digest_is_stored_as_a_sha256_token(tmp_path, recorded, stored):
+    importer, plan = _h5_dish_recording(tmp_path, _v2())
+    _with_start_snapshot(plan, _v2(), configured=DEFAULT_ONLY, app_config_sha256=recorded)
+    result = importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+    assert result["orange_reference_origin"] == "app_config_default"
+    attrs = zarr.open_group(str(plan.zarr_path), mode="r").attrs
+    assert attrs["orange_subject_reference_origin"]["orange_app_config_sha256"] == stored
