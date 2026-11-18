@@ -9425,3 +9425,51 @@ class RegistryMigrationMixin:
             );
             """
         )
+
+    def _migration_078_recording_orientation_status(self) -> None:
+        """Derived camera -> canvas orientation status per recording (palette#377 §10).
+
+        One row per current-source (Citrus unified) recording, recomputed by
+        the read-only resolver ``fisheye.shared.unified_h5.orientation_status``
+        on every receipt-bound registry refresh. The row is a projection, not
+        an authority: nothing is stamped into a run, and the status can change
+        when the packaged orientation evidence changes (``evidence_sha256``).
+        Legacy recordings have no unified Citrus H5 and get no row; for them
+        the absence means "not verified under palette#377".
+        """
+
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_orientation_status (
+                recording_id TEXT PRIMARY KEY,
+                session_uuid TEXT,
+                citrus_session_uuid TEXT,
+                h5_relative_path TEXT,
+                rig_id TEXT,
+                arena_id TEXT,
+                camera_serial TEXT,
+                orientation_status TEXT NOT NULL
+                    CHECK (orientation_status IN ('verified', 'unverified')),
+                verified_link TEXT,
+                basis TEXT,
+                evidence_sha256 TEXT,
+                reason TEXT,
+                camera_to_dish_parity TEXT NOT NULL,
+                status_schema_id TEXT NOT NULL,
+                status_schema_version INTEGER NOT NULL,
+                status_json TEXT NOT NULL CHECK (json_valid(status_json)),
+                updated_utc TEXT NOT NULL,
+                CHECK (
+                    (orientation_status = 'verified'
+                        AND verified_link IS NOT NULL AND basis IS NOT NULL AND reason IS NULL)
+                    OR (orientation_status = 'unverified'
+                        AND verified_link IS NULL AND basis IS NULL AND reason IS NOT NULL)
+                ),
+                FOREIGN KEY(recording_id) REFERENCES recordings(recording_id) ON DELETE CASCADE
+            );
+            """
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_orientation_status_status "
+            "ON recording_orientation_status(orientation_status);"
+        )
