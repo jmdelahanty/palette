@@ -41,11 +41,13 @@ from fisheye.shared.type_conversions import normalize_attr as _shared_decode_att
 from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from .analytics_reports import RegistryAnalyticsReportMixin
 from .realtime_products import RegistryRealtimeProductsMixin
+from .orientation_status import RegistryOrientationStatusMixin
 from .extractors.acquisition_video_streams import (
     _extract_acquisition_video_stream_rows,
     collection_video_facts,
 )
 from .extractors.realtime_products import extract_realtime_product_rows
+from .extractors.orientation_status import extract_recording_orientation_status
 from .extractors.chaser_metadata import extract_recording_chaser_metadata
 from .extractors.stimulus_metadata import extract_stimulus_metadata
 from .extractors.crop import _extract_crop_quality_rows
@@ -1233,6 +1235,7 @@ class Registry(
     RegistryAcquisitionBatchMixin,
     RegistryAnalyticsReportMixin,
     RegistryRealtimeProductsMixin,
+    RegistryOrientationStatusMixin,
     RegistryRecordingIdentityMixin,
     RegistryMigrationMixin,
 ):
@@ -6619,15 +6622,16 @@ class Registry(
                         "current source non-identity projection requires verified "
                         "recording, session, and camera identity"
                     )
+                recording_dir = recording_directory_for_source_target(Path(zarr_path).resolve())
                 self._update_current_source_recording_metadata(
                     recording_id=recording_id,
                     session_uuid=metadata.session_uuid,
-                    recording_path=recording_directory_for_source_target(
-                        Path(zarr_path).resolve()
-                    ),
+                    recording_path=recording_dir,
                     camera_id=verified_camera_id,
                     context=recording_context,
                 )
+                self.replace_recording_orientation_status(recording_id, extract_recording_orientation_status(
+                    recording_dir, session_uuid=metadata.session_uuid, camera_id=verified_camera_id))
             else:
                 self.upsert_recording(**recording_context)
         self.upsert_provenance(

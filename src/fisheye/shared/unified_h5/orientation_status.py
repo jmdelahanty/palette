@@ -134,6 +134,27 @@ def _status(identity: Mapping[str, Any], status: str, **fields: Any) -> dict[str
     }
 
 
+IDENTITY_FIELDS = ("rig_id", "session_uuid", "arena_id", "camera_serial")
+
+
+def unverified_status(reason: str, **identity: Any) -> dict[str, Any]:
+    """An ``unverified`` result for a recording the resolver could not read.
+
+    For callers that fail before an H5 is open (no H5, unresolvable path,
+    unreadable file) or that refuse a resolved result; ``identity`` holds the
+    known :data:`IDENTITY_FIELDS`, the rest are ``None``.
+    """
+
+    unknown = set(identity) - set(IDENTITY_FIELDS)
+    if unknown:
+        raise TypeError(f"unknown identity fields: {sorted(unknown)}")
+    return _status(
+        {name: identity.get(name) for name in IDENTITY_FIELDS},
+        UNVERIFIED,
+        reason=reason,
+    )
+
+
 def _identity(h5: h5py.File) -> dict[str, Any]:
     session = (
         h5[declared_orientation.SESSION].attrs
@@ -219,6 +240,7 @@ def resolve_orientation_status(source_h5: str | Path) -> dict[str, Any]:
 __all__ = [
     "BASIS_CITRUS_CHECK",
     "CAMERA_TO_CANVAS",
+    "IDENTITY_FIELDS",
     "SCHEMA_ID",
     "UNVERIFIED",
     "VERIFIED",
@@ -226,4 +248,5 @@ __all__ = [
     "homography_sha256",
     "resolve_orientation_status",
     "resolve_orientation_status_h5",
+    "unverified_status",
 ]

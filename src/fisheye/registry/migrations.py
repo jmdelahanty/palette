@@ -308,6 +308,11 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
         "crop_collection_consumer_readiness",
         "_migration_077_crop_collection_consumer_readiness",
     ),
+    (
+        78,
+        "recording_orientation_status",
+        "_migration_078_recording_orientation_status",
+    ),
 )
 
 
@@ -318,7 +323,7 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
 # applied migration is recorded additive (schema_compatibility_problem). A
 # migration not listed here is treated as non-additive: list it only when that
 # holds.
-ADDITIVE_MIGRATIONS = frozenset({76, 77})
+ADDITIVE_MIGRATIONS = frozenset({76, 77, 78})
 LATEST_MIGRATION_VERSION = MIGRATION_METHODS[-1][0]
 
 

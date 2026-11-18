@@ -279,6 +279,20 @@ def test_real_current_clipped_import_to_receipt_registry_and_pixel_resolver(
         assert streams["full"] == (64, 48, 2.0, codec)
         if crop:
             assert streams["crop"][:2] == (16, 16)
+        # palette#377: the derived orientation status is projected per
+        # recording. This fixture's H5 is empty, so it is unverified.
+        orientation = registry.conn.execute(
+            "SELECT orientation_status, reason, h5_relative_path, session_uuid "
+            "FROM recording_orientation_status WHERE recording_id = ?",
+            ("recording-clipped",),
+        ).fetchall()
+        assert len(orientation) == 1
+        status, reason, h5_relative, session = orientation[0]
+        assert (status, session) == ("unverified", "session-clipped")
+        if h5:
+            assert h5_relative == "raw/acquisition/protocol.h5" and reason
+        else:
+            assert (h5_relative, reason) == (None, "no_manifest_citrus_h5")
     finally:
         registry.close()
     before = {
