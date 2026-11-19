@@ -110,16 +110,23 @@ def test_marker_for_the_old_consumer_profile_is_refused(tmp_path, capsys):
     assert "not a complete transfer-v2 marker" in capsys.readouterr().out
 
 
-def test_duplicate_run_does_not_resubmit_but_changed_marker_does(tmp_path):
+def test_duplicate_run_does_not_resubmit_and_rewritten_marker_waits_for_the_first(tmp_path):
+    # Enforcement correction (2026-11-19): a rewritten marker for the same
+    # snapshot used to be submitted at once, beside the first import. It now
+    # waits for the first claim and is submitted only if that ended unregistered.
     session = _session(tmp_path)
     config, runner = _config(tmp_path), FakeRunner()
     poller.poll(config, dry_run=False, runner=runner)
     poller.poll(config, dry_run=False, runner=runner)
     assert len(runner.calls) == 1
+    [first] = (tmp_path / "state").glob("*.claimed")
     marker_path = session / poller.MARKER_NAME
     marker = json.loads(marker_path.read_text())
     marker["delivery"]["attempt_id"] = "1" * 32
     marker_path.write_text(json.dumps(marker))
+    poller.poll(config, dry_run=False, runner=runner)
+    assert len(runner.calls) == 1
+    (tmp_path / "state" / f"{first.name[: -len('.claimed')]}.import_failed").write_text("{}")
     poller.poll(config, dry_run=False, runner=runner)
     assert len(runner.calls) == 2
     assert runner.calls[0] != runner.calls[1]  # new marker key
@@ -213,3 +220,86 @@ def test_every_submission_tells_the_job_not_to_register(tmp_path):
         command = poller.build_command(_config(tmp_path, **overrides), Path("/s"), "k")
         assert "--no-register" in command[-1]
         assert "--writer-host" not in command[-1] and "--register " not in command[-1]
+
+
+def _resend(session: Path) -> None:
+    """Rewrite the completion marker as a re-send does: same snapshot, new attempt."""
+
+    marker_path = session / poller.MARKER_NAME
+    marker = json.loads(marker_path.read_text())
+    marker.setdefault("delivery", {})["attempt_id"] = "second-attempt"
+    marker_path.write_text(json.dumps(marker))
+
+
+def _first_delivery(tmp_path: Path, *, outcome: str | None) -> tuple[dict, Path, FakeRunner]:
+    config = _config(tmp_path)
+    session = _session(tmp_path)
+    runner = FakeRunner()
+    assert poller.poll(config, dry_run=False, runner=runner) == 0
+    [claimed] = (tmp_path / "state").glob("*.claimed")
+    if outcome is not None:
+        key = claimed.name[: -len(".claimed")]
+        (tmp_path / "state" / f"{key}.{outcome}").write_text("{}")
+    return config, session, runner
+
+
+def test_resent_registered_delivery_is_recorded_as_duplicate_not_submitted(tmp_path, capsys):
+    config, session, runner = _first_delivery(tmp_path, outcome="registered")
+    _resend(session)
+    assert poller.poll(config, dry_run=False, runner=runner) == 0
+    assert len(runner.calls) == 1
+    [duplicate] = (tmp_path / "state").glob("*.duplicate")
+    record = json.loads(duplicate.read_text())
+    assert record["snapshot_id"] == record["earlier_snapshot_id"]
+    assert session.is_dir()  # the staging copy is left for the operator
+    assert "duplicate:" in capsys.readouterr().out
+    # Later polls skip it quietly.
+    assert poller.poll(config, dry_run=False, runner=runner) == 0
+    assert len(runner.calls) == 1
+
+
+def test_duplicate_dry_run_writes_nothing(tmp_path):
+    config, session, runner = _first_delivery(tmp_path, outcome="registered")
+    _resend(session)
+    assert poller.poll(config, dry_run=True, runner=runner) == 0
+    assert list((tmp_path / "state").glob("*.duplicate")) == []
+
+
+def test_resend_while_the_first_is_in_flight_waits(tmp_path, capsys):
+    config, session, runner = _first_delivery(tmp_path, outcome=None)
+    _resend(session)
+    assert poller.poll(config, dry_run=False, runner=runner) == 0
+    assert len(runner.calls) == 1
+    assert list((tmp_path / "state").glob("*.duplicate")) == []
+    assert "waiting:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("outcome", ["import_failed", "registration_refused", "attached_unresolved"])
+def test_resend_after_an_unregistered_end_is_submitted_as_a_retry(tmp_path, outcome):
+    config, session, runner = _first_delivery(tmp_path, outcome=outcome)
+    _resend(session)
+    assert poller.poll(config, dry_run=False, runner=runner) == 0
+    assert len(runner.calls) == 2
+
+
+def test_changed_delivery_for_a_registered_session_is_held_until_released(tmp_path, capsys):
+    config, session, runner = _first_delivery(tmp_path, outcome="registered")
+    [first] = (tmp_path / "state").glob("*.claimed")
+    record = json.loads(first.read_text())
+    record["snapshot_id"] = "sha256:" + "0" * 64  # the registered bytes differ
+    first.write_text(json.dumps(record))
+    _resend(session)
+    assert poller.poll(config, dry_run=False, runner=runner) == 0
+    assert len(runner.calls) == 1
+    [held] = (tmp_path / "state").glob("*.held")
+    assert "held:" in capsys.readouterr().out
+    key = held.name[: -len(".held")]
+    (tmp_path / "state" / f"{key}.release").write_text("")
+    assert poller.poll(config, dry_run=False, runner=runner) == 0
+    assert len(runner.calls) == 2
+
+
+def test_claim_records_the_acquisition_session(tmp_path):
+    _first_delivery(tmp_path, outcome=None)
+    [claimed] = (tmp_path / "state").glob("*.claimed")
+    assert "acquisition_session_id" in json.loads(claimed.read_text())

@@ -18,6 +18,23 @@ retired, so a config declaring ``"registration": "job"`` is refused rather
 than silently reinterpreted. A config that still declares recording context
 is refused. Marker validation is ``fisheye.intake.discovery.check_marker``.
 
+A re-sent delivery is not imported twice. Citrus's ``snapshot_id`` is the
+sha256 of the transfer inventory, so a delivery whose ``snapshot_id`` equals
+an earlier claim's is the same delivery:
+
+- earlier claim registered: ``<key>.duplicate`` records which claim it
+  repeats, and nothing is submitted. The staging copy is left for the
+  operator; the source is retained by Citrus.
+- earlier claim still in flight (no terminal state yet): wait; the next poll
+  decides.
+- earlier claim ended without registering (``import_failed``,
+  ``registration_refused`` or ``attached_unresolved``): submit, as a retry.
+
+A delivery for a session that is already registered under a different
+``snapshot_id`` (same staging folder name or ``acquisition_session_id``) means
+the session's files changed. It is held (``<key>.held``) and not submitted
+until the operator creates ``<key>.release`` in the state directory.
+
 Installation (cron entry, config file, retiring the v1 poller) is a separate,
 user-authorized step. This module installs nothing and edits no crontab; run
 ``--dry-run`` first to see exactly what would be submitted.
@@ -94,6 +111,68 @@ def claim_key(marker_path: Path, marker_sha256: str) -> str:
     return hashlib.sha256(f"{marker_path.resolve()}\0{marker_sha256}".encode()).hexdigest()
 
 
+TERMINAL_UNREGISTERED = ("import_failed", "registration_refused", "attached_unresolved")
+
+
+def _earlier_claims(state: Path, key: str) -> list[dict]:
+    """Every other claim in the state directory, with its outcome."""
+
+    claims = []
+    for claimed in sorted(state.glob("*.claimed")):
+        other = claimed.name[: -len(".claimed")]
+        if other == key:
+            continue
+        try:
+            record = json.loads(claimed.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        if (state / f"{other}.registered").exists():
+            outcome = "registered"
+        elif any((state / f"{other}.{name}").exists() for name in TERMINAL_UNREGISTERED):
+            outcome = "ended_unregistered"
+        else:
+            outcome = "in_flight"
+        marker = record.get("marker")
+        claims.append({
+            "key": other,
+            "outcome": outcome,
+            "snapshot_id": record.get("snapshot_id"),
+            "session": record.get("acquisition_session_id"),
+            "folder": Path(marker).parent.name if isinstance(marker, str) else None,
+        })
+    return claims
+
+
+def redelivery_decision(state: Path, key: str, marker: dict, session_dir: Path) -> tuple[str, dict | None]:
+    """``submit``, ``duplicate``, ``wait`` or ``held`` for one delivery, and the claim that decided it.
+
+    The same snapshot_id as a registered claim is a duplicate; as an in-flight
+    claim it waits. A different snapshot_id for a session that is already
+    registered is held unless ``<key>.release`` exists.
+    """
+
+    claims = _earlier_claims(state, key)
+    same = [c for c in claims if c["snapshot_id"] == marker["snapshot_id"]]
+    for outcome, decision in (("registered", "duplicate"), ("in_flight", "wait")):
+        match = next((c for c in same if c["outcome"] == outcome), None)
+        if match is not None:
+            return decision, match
+    if same:
+        return "submit", None  # every earlier claim of these bytes ended unregistered: a retry
+    session = marker.get("acquisition_session_id")
+    changed = next(
+        (c for c in claims
+         if c["outcome"] == "registered"
+         and (c["folder"] == session_dir.name or (session and c["session"] == session))),
+        None,
+    )
+    if changed is not None and not (state / f"{key}.release").exists():
+        return "held", changed
+    return "submit", None
+
+
 def build_command(config: dict, session_dir: Path, key: str) -> list[str]:
     launcher = [
         LAUNCHER,
@@ -137,7 +216,28 @@ def poll(config: dict, *, dry_run: bool, runner: Runner = _run) -> int:
         key = claim_key(marker_path, marker["_marker_sha256"])
         command = build_command(config, session_dir, key)
         claimed, submitted = state / f"{key}.claimed", state / f"{key}.submitted"
-        if submitted.exists():
+        if submitted.exists() or (state / f"{key}.duplicate").exists():
+            continue
+        decision, earlier = redelivery_decision(state, key, marker, session_dir)
+        if decision == "wait":
+            log(f"waiting: key={key} repeats in-flight key={earlier['key']} ({marker['snapshot_id']})")
+            continue
+        if decision in ("duplicate", "held"):
+            record = {"marker": str(marker_path), "marker_sha256": marker["_marker_sha256"],
+                      "snapshot_id": marker["snapshot_id"],
+                      "acquisition_session_id": marker.get("acquisition_session_id"),
+                      "earlier_key": earlier["key"], "earlier_snapshot_id": earlier["snapshot_id"]}
+            held = state / f"{key}.held"
+            if decision == "duplicate":
+                log(f"duplicate: key={key} repeats registered key={earlier['key']} "
+                    f"({marker['snapshot_id']}); not submitted, staging copy left in place")
+                if not dry_run:
+                    (state / f"{key}.duplicate").write_text(json.dumps(record))
+            else:
+                log(f"held: key={key} session {session_dir.name} is registered under key={earlier['key']} "
+                    f"with another snapshot_id; create {key}.release to submit it")
+                if not dry_run and not held.exists():
+                    held.write_text(json.dumps(record))
             continue
         if claimed.exists():
             # Polls run one at a time under poller.lock, so a claim without a
@@ -150,7 +250,9 @@ def poll(config: dict, *, dry_run: bool, runner: Runner = _run) -> int:
         fd = os.open(claimed, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
         with os.fdopen(fd, "w") as handle:
             json.dump({"marker": str(marker_path), "marker_sha256": marker["_marker_sha256"],
-                       "snapshot_id": marker["snapshot_id"], "command": command}, handle)
+                       "snapshot_id": marker["snapshot_id"],
+                       "acquisition_session_id": marker.get("acquisition_session_id"),
+                       "command": command}, handle)
         log(f"submitting {shlex.join(command)}")
         result = runner(command)
         if result.returncode == 0:
@@ -202,6 +304,7 @@ __all__ = [
     "load_config",
     "main",
     "poll",
+    "redelivery_decision",
 ]
 
 
