@@ -443,3 +443,64 @@ def test_failed_import_keeps_its_staging_folder(tmp_path):
     delivery = _claimed_delivery(tmp_path)
     registrar.register_completed(config, dry_run=False, register=Register())
     assert delivery.is_dir()
+
+
+def test_cleanup_outcome_is_recorded_once(tmp_path):
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    _status(tmp_path)
+    delivery = _claimed_delivery(tmp_path)
+    assert registrar.register_completed(config, dry_run=False, register=Register()) == 0
+    record = json.loads((tmp_path / "state" / f"{KEY}.staging_cleanup").read_text())
+    assert record["outcome"] == "removed" and not delivery.exists()
+    # A later delivery to the same folder name is never touched by this key.
+    delivery.mkdir()
+    registrar.register_completed(config, dry_run=False, register=Register())
+    assert delivery.is_dir()
+
+
+def test_folder_refilled_by_a_later_delivery_is_left_alone(tmp_path, capsys):
+    # The 2026-11-19 re-send of 2026_11_19_12_46_10: a new marker in the
+    # registered delivery's folder name.
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    delivery = _claimed_delivery(tmp_path)
+    claim = tmp_path / "state" / f"{KEY}.claimed"
+    claim.write_text(json.dumps({**json.loads(claim.read_text()), "marker_sha256": "e" * 64}))
+    (tmp_path / "state" / f"{KEY}.registered").write_text("{}")
+    (delivery / poller.MARKER_NAME).write_text('{"attempt": "second"}')
+    registrar.register_completed(config, dry_run=False, register=Register())
+    assert (delivery / poller.MARKER_NAME).exists()
+    record = json.loads((tmp_path / "state" / f"{KEY}.staging_cleanup").read_text())
+    assert record["outcome"] == "later_delivery"
+    assert "now holds a later delivery" in capsys.readouterr().out
+
+
+def test_empty_folder_recreated_after_registration_is_left_alone(tmp_path):
+    # A re-delivery that has created its folder but not yet its marker.
+    import os
+
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    delivery = _claimed_delivery(tmp_path)
+    registered = tmp_path / "state" / f"{KEY}.registered"
+    registered.write_text("{}")
+    old = registered.stat().st_mtime - 3600
+    os.utime(registered, (old, old))
+    registrar.register_completed(config, dry_run=False, register=Register())
+    assert delivery.is_dir()
+    record = json.loads((tmp_path / "state" / f"{KEY}.staging_cleanup").read_text())
+    assert record["outcome"] == "later_delivery"
+
+
+def test_non_empty_folder_is_retried_not_recorded(tmp_path):
+    config = _config(tmp_path)
+    _submitted(tmp_path)
+    _status(tmp_path)
+    delivery = _claimed_delivery(tmp_path)
+    (delivery / ".nfs0001").write_bytes(b"x")
+    registrar.register_completed(config, dry_run=False, register=Register())
+    assert not (tmp_path / "state" / f"{KEY}.staging_cleanup").exists()
+    (delivery / ".nfs0001").unlink()
+    registrar.register_completed(config, dry_run=False, register=Register())
+    assert not delivery.exists()

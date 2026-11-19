@@ -29,7 +29,11 @@ and not yet registered, it reads the job's status JSON
   empty after moving every file into the recordings store, is removed with a
   non-recursive ``rmdir``. A folder that is missing, not directly under
   ``staging_dir``, or not empty is left alone and logged; this never changes
-  the delivery's registration state.
+  the delivery's registration state. A removed, missing or foreign folder is
+  recorded once in ``<key>.staging_cleanup`` and not revisited; a folder that
+  is still not empty is retried. A folder changed after ``<key>.registered``
+  or holding another marker belongs to a later delivery to the same folder
+  name and is never touched.
 - a job whose payload exited 75 found the delivery held by another live job:
   it is attached, never recorded as a failed import. Its delivery (the claimed
   snapshot_id) is registered once its import probe is true; otherwise it stays
@@ -49,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -263,27 +268,71 @@ def _resolve_attached(
     return 0
 
 
-def _remove_empty_staging_folder(config: dict, state: Path, key: str) -> None:
-    """Remove a registered delivery's empty staging folder, never recursively."""
+LATER_DELIVERY_SLACK_SECONDS = 300
 
+
+def _remove_empty_staging_folder(config: dict, state: Path, key: str) -> None:
+    """Remove a registered delivery's empty staging folder once, never recursively.
+
+    A decided outcome (removed, missing, not a delivery folder, later delivery)
+    is recorded in ``<key>.staging_cleanup`` and not revisited. A folder that
+    changed after this key registered, or holds a marker other than this key's
+    claimed one, belongs to a later delivery and is left alone.
+    """
+
+    record_path = state / f"{key}.staging_cleanup"
+    if record_path.exists():
+        return
     try:
-        marker = Path(json.loads((state / f"{key}.claimed").read_text())["marker"])
+        claim = json.loads((state / f"{key}.claimed").read_text())
+        marker = Path(claim["marker"])
     except (OSError, ValueError, KeyError, TypeError):
         return
     if not config.get("staging_dir"):
         return
     folder = marker.parent
     staging = Path(config["staging_dir"])
+
+    def record(outcome: str, detail: str | None = None) -> None:
+        _write(record_path, {"folder": str(folder), "outcome": outcome, "detail": detail,
+                             "decided_utc": datetime.now(timezone.utc).isoformat()})
+
     if folder.parent != staging or folder.name.startswith("."):
         log(f"staging cleanup skipped: key={key} {folder} is not a delivery folder under {staging}")
+        record("not_a_delivery_folder")
         return
     if folder.is_symlink() or not folder.is_dir():
+        record("missing")
         return
+    registered = state / f"{key}.registered"
+    try:
+        # The slack absorbs clock skew between the import's compute node and
+        # this host; a re-delivery minutes later is still caught.
+        later = folder.stat().st_mtime > registered.stat().st_mtime + LATER_DELIVERY_SLACK_SECONDS
+    except OSError:
+        later = False
+    if later:
+        # Changed after this key registered: a later delivery is arriving
+        # (its marker is written last, so it may not exist yet).
+        log(f"staging cleanup skipped: key={key} {folder} changed after registration")
+        record("later_delivery")
+        return
+    if marker.exists():
+        try:
+            current = hashlib.sha256(marker.read_bytes()).hexdigest()
+        except OSError:
+            current = None
+        if current != claim.get("marker_sha256"):
+            log(f"staging cleanup skipped: key={key} {folder} now holds a later delivery")
+            record("later_delivery")
+            return
     try:
         folder.rmdir()
     except OSError as exc:
+        # Not recorded: an NFS leftover can clear, so the next run retries.
         log(f"staging cleanup skipped: key={key} {folder}: {exc.strerror or exc}")
         return
+    record("removed")
     log(f"staging folder removed: key={key} {folder}")
 
 
