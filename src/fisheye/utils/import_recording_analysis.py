@@ -838,6 +838,36 @@ _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 _RUN_STAMP = re.compile(r"[0-9]{8}_[0-9]{6}")
 
 
+def import_empty_background(plan: RecordingAnalysisPlan) -> Optional[dict[str, Any]]:
+    """Store Orange's sealed empty-dish background as this parent's background run.
+
+    The start snapshot is read through the sealed inventory (digest re-checked);
+    a recording without one predates the capture and is left untouched. The
+    record is also written to the archive root. A capture that breaks its
+    contract is recorded as refused and does not fail the import.
+    """
+
+    from fisheye.preprocessing.orange_empty_background_import import (
+        import_orange_empty_background,
+    )
+    from fisheye.shared.acquisition_realtime_products import sealed_parent_files
+
+    manifest = _load_recording_manifest(plan.recording_dir)
+    item = (sealed_parent_files(manifest) or {}).get("recording_snapshot_start.json")
+    if item is None:
+        return None
+    snapshot, _ = _sealed_json(plan.recording_dir, item, name="recording_snapshot_start.json")
+    if not isinstance(snapshot, Mapping):
+        return None
+    root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    return import_orange_empty_background(
+        root,
+        acquisition_dir=(Path(plan.recording_dir) / item["relative_path"]).parent,
+        camera_serial=str(manifest.get("camera_id")),
+        start_snapshot=snapshot,
+    )
+
+
 def _sealed_spec_copy(recording_dir: Path, sealed: Mapping[str, dict], requester: Mapping[str, Any]) -> str | None:
     """The organized path of the sealed run_spec copy, or None if it is not proven.
 
@@ -1762,6 +1792,21 @@ def process_recording_import(
             recording_dir=str(plan.recording_dir),
             zarr_path=str(plan.zarr_path),
             **subject_reference,
+        )
+
+    try:
+        empty_background = import_empty_background(plan)
+    except Exception as exc:
+        return RecordingImportResult(
+            ok=False, failed_step="import_empty_background", error=str(exc)
+        )
+    if empty_background is not None:
+        _log(
+            logger,
+            "empty_background_imported",
+            recording_dir=str(plan.recording_dir),
+            zarr_path=str(plan.zarr_path),
+            **empty_background,
         )
 
     crop_ledger = (
