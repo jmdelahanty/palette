@@ -49,10 +49,12 @@ def test_an_attached_capture_becomes_the_latest_background_run(tmp_path: Path) -
     assert resolve_latest_complete_run_name(parent, legacy_default=False) == RUN
     assert resolve_authoritative_run_name(parent) == RUN
     group = parent[RUN]
-    # The named camera's pixels, at the native raster, and nothing downsampled.
+    # The named camera's pixels at the native raster, plus Palette's 640 x 640 copy.
     assert np.array_equal(group["background_full"][:], images[SERIALS[1]])
     assert group["background_full"].dtype == np.uint8
-    assert "background_ds" not in group
+    assert group["background_ds"].shape == (640, 640) and group["background_ds"].dtype == np.uint8
+    assert np.array_equal(group["background_ds"][:], ingest.downsample_background(images[SERIALS[1]]))
+    assert group.attrs["parameters"]["compute_ds"] is True
     attrs = dict(group.attrs)
     assert attrs["method"] == "orange_empty_background"
     assert attrs["parameters"]["method"] == "orange_empty_background"
@@ -75,6 +77,34 @@ def test_importing_the_same_capture_again_writes_nothing_new(tmp_path: Path) -> 
 
     assert again["status"] == "already_imported"
     assert list(root["background_runs"].group_keys()) == [RUN]
+
+
+def test_a_run_imported_before_the_downsampled_copy_existed_gains_it(tmp_path: Path) -> None:
+    acquisition_dir = _acquisition(tmp_path)
+    root = _root(tmp_path)
+    kwargs = {"acquisition_dir": acquisition_dir, "camera_serial": SERIALS[0]}
+    ingest.import_orange_empty_background(root, **kwargs)
+    group = root["background_runs"][RUN]
+    full = group["background_full"][:]
+    del group["background_ds"]
+
+    record = ingest.import_orange_empty_background(root, **kwargs)
+
+    assert record["status"] == "downsampled_copy_added"
+    assert np.array_equal(group["background_full"][:], full)
+    assert np.array_equal(group["background_ds"][:], ingest.downsample_background(full))
+    assert ingest.import_orange_empty_background(root, **kwargs)["status"] == "already_imported"
+
+
+def test_a_downsampled_copy_that_is_not_this_captures_is_refused(tmp_path: Path) -> None:
+    acquisition_dir = _acquisition(tmp_path)
+    root = _root(tmp_path)
+    kwargs = {"acquisition_dir": acquisition_dir, "camera_serial": SERIALS[0]}
+    ingest.import_orange_empty_background(root, **kwargs)
+    root["background_runs"][RUN]["background_ds"][0, 0] ^= 0xFF
+
+    with pytest.raises(ValueError, match="not the 640 x 640 copy"):
+        ingest.import_orange_empty_background(root, **kwargs)
 
 
 def test_a_run_of_that_name_with_other_pixels_is_not_overwritten(tmp_path: Path) -> None:

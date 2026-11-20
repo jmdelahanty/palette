@@ -91,6 +91,23 @@ def test_applying_twice_keeps_one_run(tmp_path: Path) -> None:
     assert list(root["background_runs"].group_keys()) == [RUN]
 
 
+def test_a_run_backfilled_before_the_downsampled_copy_existed_gains_it(tmp_path: Path) -> None:
+    recording_dir = _published(tmp_path)
+    backfill.apply_recording(recording_dir)
+    zarr_path = recording_dir / "zarr" / "rec_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="r+", use_consolidated=False)
+    del root["background_runs"][RUN]["background_ds"]
+    consolidate_metadata_capture_expected_warnings(zarr_path)
+
+    assert backfill.plan_recording(recording_dir)["status"] == "would_add_downsampled_copy"
+    result = backfill.apply_recording(recording_dir)
+
+    assert result["status"] == "downsampled_copy_added" and result["applied"] is True
+    published = zarr.open_group(str(zarr_path), mode="r", use_consolidated=True)
+    assert published["background_runs"][RUN]["background_ds"].shape == (640, 640)
+    assert backfill.plan_recording(recording_dir)["status"] == "already_imported"
+
+
 def test_a_capture_that_breaks_its_contract_leaves_the_archive_untouched(tmp_path: Path) -> None:
     recording_dir = _published(tmp_path)
     image_path = (
