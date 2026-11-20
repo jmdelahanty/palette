@@ -838,32 +838,53 @@ _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 _RUN_STAMP = re.compile(r"[0-9]{8}_[0-9]{6}")
 
 
+def sealed_empty_background_inputs(
+    recording_dir: Path,
+) -> Optional[tuple[Path, str, Mapping[str, Any]]]:
+    """Where a parent's sealed empty-dish capture is read from, or None.
+
+    Returns the acquisition folder, the parent's camera serial and the sealed
+    start snapshot (digest re-checked against the sealed inventory). None means
+    the recording was sealed without a start snapshot and predates the capture.
+    """
+
+    from fisheye.shared.acquisition_realtime_products import sealed_parent_files
+
+    manifest = _load_recording_manifest(recording_dir)
+    item = (sealed_parent_files(manifest) or {}).get("recording_snapshot_start.json")
+    if item is None:
+        return None
+    snapshot, _ = _sealed_json(recording_dir, item, name="recording_snapshot_start.json")
+    if not isinstance(snapshot, Mapping):
+        return None
+    return (
+        (Path(recording_dir) / item["relative_path"]).parent,
+        str(manifest.get("camera_id")),
+        snapshot,
+    )
+
+
 def import_empty_background(plan: RecordingAnalysisPlan) -> Optional[dict[str, Any]]:
     """Store Orange's sealed empty-dish background as this parent's background run.
 
-    The start snapshot is read through the sealed inventory (digest re-checked);
-    a recording without one predates the capture and is left untouched. The
-    record is also written to the archive root. A capture that breaks its
-    contract is recorded as refused and does not fail the import.
+    A recording without a sealed start snapshot predates the capture and is
+    left untouched. The record is also written to the archive root. A capture
+    that breaks its contract is recorded as refused and does not fail the import.
     """
 
     from fisheye.preprocessing.orange_empty_background_import import (
         import_orange_empty_background,
     )
-    from fisheye.shared.acquisition_realtime_products import sealed_parent_files
 
-    manifest = _load_recording_manifest(plan.recording_dir)
-    item = (sealed_parent_files(manifest) or {}).get("recording_snapshot_start.json")
-    if item is None:
+    inputs = sealed_empty_background_inputs(plan.recording_dir)
+    if inputs is None:
         return None
-    snapshot, _ = _sealed_json(plan.recording_dir, item, name="recording_snapshot_start.json")
-    if not isinstance(snapshot, Mapping):
-        return None
+    acquisition_dir, camera_serial, snapshot = inputs
     root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
     return import_orange_empty_background(
         root,
-        acquisition_dir=(Path(plan.recording_dir) / item["relative_path"]).parent,
-        camera_serial=str(manifest.get("camera_id")),
+        acquisition_dir=acquisition_dir,
+        camera_serial=camera_serial,
         start_snapshot=snapshot,
     )
 
