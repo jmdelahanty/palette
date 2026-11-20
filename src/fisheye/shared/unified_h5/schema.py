@@ -6,6 +6,7 @@ from copy import deepcopy
 from functools import lru_cache
 from hashlib import sha256
 from importlib.resources import files
+import re
 
 import h5py
 import numpy as np
@@ -125,6 +126,11 @@ PROTOCOL_ANGLE_DECLARATIONS = (
     "/protocol/authored/protocol_trial_index_json",
     "/protocol/authored/protocol_semantic_json",
 )
+PROTOCOL_AUTHORED = "/protocol/authored"
+# Citrus writes this, in place of a hashed semantic identity, for a protocol
+# its own loader refused; its reason codes are named in the refusal.
+PROTOCOL_SEMANTIC_STATUS = PROTOCOL_AUTHORED + "/protocol_semantic_status_json"
+_PRODUCER_REASON = re.compile(r"[a-z0-9_]{1,64}")
 CORRESPONDENCE_RECEIPT_SCHEMAS = {
     2: "experimental_h5_correspondence_receipt_v2.schema.json",
     3: "experimental_h5_correspondence_receipt_v3.schema.json",
@@ -300,6 +306,51 @@ def admitted_binding(h5, declared_policy_sha256: str, preflight: dict | None = N
         "correspondence_receipt_version": receipt_pin["schema_version"],
         **binding,
     }
+
+
+def _producer_reasons(h5) -> list[str]:
+    """Reason codes from the producer's semantic status document, if readable."""
+
+    try:
+        document = read_json(h5, PROTOCOL_SEMANTIC_STATUS)
+    except Exception:  # an unreadable status names no reasons; the refusal stands
+        return []
+    reasons = document.get("reasons") if isinstance(document, dict) else None
+    codes = [
+        reason["code"]
+        for reason in (reasons if isinstance(reasons, list) else [])
+        if isinstance(reason, dict)
+        and isinstance(reason.get("code"), str)
+        and _PRODUCER_REASON.fullmatch(reason["code"])
+    ]
+    return codes[:8]
+
+
+def require_valid_protocol_snapshot(h5) -> None:
+    """The authored protocol snapshot is one its producer marked valid.
+
+    Citrus marks a protocol its loader refused (for example a sham chaser in a
+    step with proximity feedback) ``contract_status`` other than ``valid`` and
+    writes no hashed semantic identity, only
+    ``/protocol/authored/protocol_semantic_status_json``. Checked before the
+    angle declarations, whose semantic identity such a file lacks, so the
+    refusal is ``native_protocol_snapshot_status`` with the producer's reason
+    codes rather than ``stimulus_angle_convention_mismatch``. A file without
+    the group is left to ``validate_protocol``.
+    """
+    if PROTOCOL_AUTHORED not in h5:
+        return
+    attrs = h5[PROTOCOL_AUTHORED].attrs
+    if attrs.get("schema_id") == "citrus.protocol.snapshot" and attrs.get("contract_status") == "valid":
+        return
+    status = attrs.get("contract_status")
+    if isinstance(status, bytes):
+        status = status.decode("utf-8", errors="replace")
+    detail = f"contract_status={repr(status)[:64]}"
+    reasons = _producer_reasons(h5)
+    if reasons:
+        detail += "; producer reasons: " + ", ".join(reasons)
+    require(False, f"native_protocol_snapshot_status:{detail}")
 
 
 def require_stimulus_angle_convention(h5, binding: dict) -> str:

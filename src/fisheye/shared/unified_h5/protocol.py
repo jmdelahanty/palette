@@ -12,7 +12,7 @@ from fisheye.shared.protocol_semantic_contract import (
 
 from .common import require, text
 from .hdf5_types import dataset_bytes
-from .schema import read_json
+from .schema import read_json, require_valid_protocol_snapshot
 
 
 def validate_protocol(
@@ -46,11 +46,7 @@ def validate_protocol(
             version.shape == () and version.dtype == np.dtype("<i4"),
             "native_protocol_version_type",
         )
-    require(
-        authored.attrs.get("schema_id") == "citrus.protocol.snapshot"
-        and authored.attrs.get("contract_status") == "valid",
-        "native_protocol_snapshot_status",
-    )
+    require_valid_protocol_snapshot(h5)
     # Parse first with the bounded duplicate-key/nonfinite parser, even for v1.
     for path in (
         "protocol_definition_json",
