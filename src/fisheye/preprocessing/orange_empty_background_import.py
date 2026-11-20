@@ -6,9 +6,10 @@ recording (``raw/acquisition/empty_background``). This module stores that
 image as a ``background_runs/<run>`` entry, so the existing background
 consumers find it through the usual ``latest`` selector.
 
-The run carries ``background_full`` only: the image at the camera's native
-raster, byte-for-byte the pixels of the sealed PNG. No ``background_ds`` is
-written, because an analysis archive has no ``images_ds`` raster to match.
+The run carries ``background_full``, the image at the camera's native raster,
+byte-for-byte the pixels of the sealed PNG, and ``background_ds``, that image
+resized to the canonical 640 x 640 raster. ``background_ds`` is Palette's
+derivation, not part of what Orange sealed.
 
 The capture is a prior, not a truth: the dish can move when the fish are
 added. Consumers that need the dish position still fit it on the recording.
@@ -29,6 +30,7 @@ from ..shared.orange_empty_background import (
     load_empty_background,
 )
 from ..shared.run_provenance import build_writer_run_provenance
+from .video_keyframe_median_background import BACKGROUND_DS_SHAPE, downsample_background
 from ..shared.zarr_run_completion import (
     is_run_complete_in_parent,
     mark_run_complete,
@@ -45,10 +47,39 @@ RECORD_ATTR = "orange_empty_background_import"
 STATUS_IMPORTED = "imported"
 STATUS_ALREADY_IMPORTED = "already_imported"
 STATUS_REFUSED = "refused"
+# An existing run of this capture that predates the 640 x 640 copy gained one.
+STATUS_DOWNSAMPLED_COPY_ADDED = "downsampled_copy_added"
+BACKGROUND_DS_DERIVATION = "cv2.INTER_AREA resize of background_full"
 
 
 def run_name_for(capture_id: str) -> str:
     return f"{RUN_PREFIX}{capture_id}"
+
+
+def _write_image(group: zarr.Group, name: str, image: np.ndarray) -> None:
+    # One chunk, like the computed backgrounds (schema.create_background_arrays).
+    array = group.create_array(
+        name,
+        shape=image.shape,
+        chunks=image.shape,
+        dtype="uint8",
+        fill_value=0,
+        serializer=zarr.codecs.BytesCodec(),
+        compressors=[zarr.codecs.BloscCodec(cname="lz4", clevel=1, shuffle="bitshuffle")],
+    )
+    array[:] = image
+    if not np.array_equal(array[:], image):
+        raise ValueError(f"{group.path}/{name} does not read back equal")
+
+
+def _parameters() -> dict[str, Any]:
+    return {
+        "method": METHOD,
+        "compute_full": True,
+        "compute_ds": True,
+        "background_ds_shape": list(BACKGROUND_DS_SHAPE),
+        "background_ds_derivation": BACKGROUND_DS_DERIVATION,
+    }
 
 
 def _capture_attrs(background: EmptyBackground) -> dict[str, Any]:
@@ -94,6 +125,7 @@ def import_orange_empty_background(
 
     - ``imported``: a new run holds the image and is now ``latest``;
     - ``already_imported``: the run for this capture already holds this image;
+    - ``downsampled_copy_added``: that run lacked ``background_ds`` and gained it;
     - ``refused``: a declared capture breaks its contract (``code`` names the
       rule) or its camera settings changed before the recording; no run;
     - the loader's own status (``undeclared``, ``not_selected``,
@@ -152,30 +184,23 @@ def import_orange_empty_background(
                 f"background_runs/{run_name} exists and is not this capture's complete image"
             )
         record["status"] = STATUS_ALREADY_IMPORTED
+        if "background_ds" not in existing:
+            _write_image(existing, "background_ds", downsample_background(image))
+            existing.attrs["parameters"] = _parameters()
+            record["status"] = STATUS_DOWNSAMPLED_COPY_ADDED
+        elif not np.array_equal(existing["background_ds"][:], downsample_background(image)):
+            raise ValueError(
+                f"background_runs/{run_name}/background_ds is not the 640 x 640 copy of this capture"
+            )
         root.attrs[RECORD_ATTR] = record
         return record
 
     group = parent.create_group(run_name)
     mark_run_started(group, run_name=run_name, stage="background")
     note_pending_latest(parent, run_name)
-    # One chunk, like the computed backgrounds (schema.create_background_arrays).
-    array = group.create_array(
-        "background_full",
-        shape=image.shape,
-        chunks=image.shape,
-        dtype="uint8",
-        fill_value=0,
-        serializer=zarr.codecs.BytesCodec(),
-        compressors=[zarr.codecs.BloscCodec(cname="lz4", clevel=1, shuffle="bitshuffle")],
-    )
-    array[:] = image
-    if not np.array_equal(array[:], image):
-        raise ValueError(f"background_runs/{run_name}/background_full does not read back equal")
-    parameters = {
-        "method": METHOD,
-        "compute_full": True,
-        "compute_ds": False,
-    }
+    _write_image(group, "background_full", image)
+    _write_image(group, "background_ds", downsample_background(image))
+    parameters = _parameters()
     capture = _capture_attrs(background)
     group.attrs.update(
         {
@@ -208,6 +233,7 @@ __all__ = [
     "METHOD",
     "RECORD_ATTR",
     "RUN_PREFIX",
+    "STATUS_DOWNSAMPLED_COPY_ADDED",
     "import_orange_empty_background",
     "run_name_for",
 ]

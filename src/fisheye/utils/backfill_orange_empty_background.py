@@ -27,6 +27,7 @@ import zarr
 from fisheye.preprocessing.orange_empty_background_import import (
     RECORD_ATTR,
     STATUS_ALREADY_IMPORTED,
+    STATUS_DOWNSAMPLED_COPY_ADDED,
     STATUS_IMPORTED,
     STATUS_REFUSED,
     run_name_for,
@@ -51,6 +52,7 @@ PLAN_WOULD_IMPORT = "would_import"
 PLAN_ALREADY_IMPORTED = STATUS_ALREADY_IMPORTED
 PLAN_NO_SEALED_SNAPSHOT = "no_sealed_start_snapshot"
 PLAN_CONFLICT = "conflict"
+PLAN_WOULD_ADD_DOWNSAMPLED_COPY = "would_add_downsampled_copy"
 
 
 def analysis_zarr_path(recording_dir: Path) -> Path:
@@ -97,6 +99,8 @@ def plan_recording(recording_dir: Path) -> dict[str, Any]:
         return {**plan, "status": PLAN_WOULD_IMPORT}
     held = dict(runs[run_name].attrs.get("orange_empty_background") or {})
     if held.get("image_sha256") == background.image_sha256:
+        if "background_ds" not in runs[run_name]:
+            return {**plan, "status": PLAN_WOULD_ADD_DOWNSAMPLED_COPY}
         return {**plan, "status": PLAN_ALREADY_IMPORTED}
     return {**plan, "status": PLAN_CONFLICT}
 
@@ -110,7 +114,11 @@ def apply_recording(recording_dir: Path) -> dict[str, Any]:
         raise ValueError(
             f"{plan['recording']}: background_runs/{plan['run_name']} holds a different image"
         )
-    if plan["status"] not in (PLAN_WOULD_IMPORT, PLAN_ALREADY_IMPORTED):
+    if plan["status"] not in (
+        PLAN_WOULD_IMPORT,
+        PLAN_ALREADY_IMPORTED,
+        PLAN_WOULD_ADD_DOWNSAMPLED_COPY,
+    ):
         # Nothing to store: leave the published archive exactly as it is.
         return {**plan, "applied": False}
     zarr_path = Path(plan["zarr_path"])
@@ -126,13 +134,16 @@ def apply_recording(recording_dir: Path) -> dict[str, Any]:
         if not isinstance(record, Mapping) or record.get("status") not in (
             STATUS_IMPORTED,
             STATUS_ALREADY_IMPORTED,
+            STATUS_DOWNSAMPLED_COPY_ADDED,
         ):
             raise ValueError(f"{plan['recording']}: backfill wrote no run: {record!r}")
         consolidate_metadata_capture_expected_warnings(zarr_path)
         published = zarr.open_group(str(zarr_path), mode="r", use_consolidated=True)
         run_name = str(record["run_name"])
         runs = published["background_runs"]
-        if run_name not in runs or "background_full" not in runs[run_name]:
+        if run_name not in runs or not {"background_full", "background_ds"} <= set(
+            runs[run_name].array_keys()
+        ):
             raise ValueError(f"{plan['recording']}: consolidated metadata lacks {run_name}")
         if dict(published.attrs.get(RECORD_ATTR) or {}).get("run_name") != run_name:
             raise ValueError(f"{plan['recording']}: consolidated root lacks the import record")
@@ -140,7 +151,7 @@ def apply_recording(recording_dir: Path) -> dict[str, Any]:
     return {
         **plan,
         "status": record["status"],
-        "applied": record["status"] == STATUS_IMPORTED,
+        "applied": record["status"] in (STATUS_IMPORTED, STATUS_DOWNSAMPLED_COPY_ADDED),
         "latest": latest,
         "selected_as_latest": latest == run_name,
     }
