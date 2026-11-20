@@ -614,6 +614,10 @@ def _agreeing_recording(tmp_path):
                      "orange_confirmed_by": "local_control",
                      "orange_declared_by": "someone",
                      "orange_requester_user": "rigaccount",
+                     "orange_requester_uid": 1000, "orange_requester_gid": 1000,
+                     "orange_requester_pid": 4242, "orange_request_id": "r-1",
+                     "orange_operation_id": "op-1", "orange_command_source": "cli",
+                     "orange_received_at_utc": "2026-11-14T19:59:20Z",
                      "orange_declaration_schema_version": 1}),
         (RUN_SPEC_V2, {"orange_reference_origin": "spec_declared",
                        "orange_confirmed_by": "run_spec",
@@ -725,6 +729,13 @@ def test_the_first_real_remote_start_confirmation_is_labelled(tmp_path):
         "orange_subject_confirmation_sha256": digest,
         "orange_declared_by": "delahantyj",
         "orange_requester_user": "jeremy",
+        "orange_requester_uid": 1000,
+        "orange_requester_gid": 1000,
+        "orange_requester_pid": 1928209,
+        "orange_request_id": "fb5a4792-9dae-42f6-b857-17f48c79ad3b",
+        "orange_operation_id": "start-recording-fb5a4792-9dae-42f6-b857-17f48c79ad3b",
+        "orange_command_source": "orange_local_control_client",
+        "orange_received_at_utc": "2026-11-15T00:59:22Z",
         "orange_declaration_schema_version": 1,
     }
 
@@ -833,6 +844,8 @@ def test_a_v2_local_control_start_without_a_kernel_peer_is_recorded(tmp_path):
     importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
     record = zarr.open_group(str(plan.zarr_path), mode="r").attrs["orange_start_declaration"]
     assert record["orange_requester_user"] is None
+    assert (record["orange_requester_uid"], record["orange_requester_pid"]) == (None, None)
+    assert record["orange_operation_id"] == "op-1"
     assert record["orange_reference_origin"] == "local_control_declared"
 
 
@@ -859,3 +872,60 @@ def test_app_config_digest_is_stored_as_a_sha256_token(tmp_path, recorded, store
     assert result["orange_reference_origin"] == "app_config_default"
     attrs = zarr.open_group(str(plan.zarr_path), mode="r").attrs
     assert attrs["orange_subject_reference_origin"]["orange_app_config_sha256"] == stored
+
+
+# Fish-free gate run G1 (scratch 2026_11_20_11_46_06, Orange .8 272fc685): a
+# plan-declared local_control start. Its sealed subject_confirmation.json and
+# run_plan/ copies are vendored byte for byte; the first pin (#138, f65f6991)
+# refused this route, the in-place relaxation (agent-contracts #142) admits it.
+_G1 = Path(__file__).resolve().parents[2] / "fixtures" / "orange_start_declaration_g1_2026_11_20_11_46_06"
+
+
+def _seal_g1(plan):
+    for path in sorted(_G1.rglob("*")):
+        if path.is_file():
+            _seal_file(plan, path.relative_to(_G1).as_posix(), path.read_bytes())
+
+
+@pytest.mark.parametrize("camera", ["2010093", "2010094", "2010095", "2010096"])
+def test_a_real_plan_declared_local_control_start_is_recorded(tmp_path, camera):
+    importer, plan = _recording(tmp_path, DECLARED_BLANK)
+    manifest_path = plan.recording_dir / "recording_manifest.json"
+    manifest_path.write_text(json.dumps({**json.loads(manifest_path.read_text()), "camera_id": camera}))
+    _seal_g1(plan)
+    result = importer.import_zebrobot_subject_reference(plan, fetch=_fetch())
+    assert result == {"status": "not_collected", "reason": "declared_blank"}
+    record = zarr.open_group(str(plan.zarr_path), mode="r").attrs["orange_start_declaration"]
+    source = json.loads((_G1 / "subject_confirmation.json").read_bytes())["declaration"]["source"]
+    assert {k: v for k, v in record.items() if k not in ("orange_declaration_source", "orange_run_plan_check")} == {
+        "orange_reference_origin": "local_control_declared",
+        "orange_confirmed_by": "local_control",
+        "orange_subject_confirmation_sha256": "905d4493f32f56069adf4fbdf73fb6ce098613642807c18c6b807c1b6e5ef371",
+        "orange_declared_by": "delahantyj",
+        "orange_requester_user": "jeremy",
+        "orange_requester_uid": 1000,
+        "orange_requester_gid": 1000,
+        "orange_requester_pid": 888337,
+        "orange_request_id": "orange_citrus_20261120T164541Z_c52cc21a:orange:start_recording",
+        "orange_operation_id": "orange_citrus_20261120T164541Z_c52cc21a",
+        "orange_command_source": "orange_citrus_orchestrator",
+        "orange_received_at_utc": "2026-11-20T16:46:05Z",
+        "orange_declaration_schema_version": 2,
+    }
+    assert record["orange_declaration_source"] == source
+    assert record["orange_run_plan_check"] == {
+        "copies_verified": sorted(source[k] for k in (
+            "plan_copy_relative_path", "plan_json_copy_relative_path", "sign_off_copy_relative_path")),
+        "yaml_json_equivalence": "not_performed",
+    }
+
+
+def test_a_real_plan_declared_start_without_its_sign_off_copy_refuses(tmp_path):
+    importer, plan = _recording(tmp_path, DECLARED_BLANK)
+    manifest_path = plan.recording_dir / "recording_manifest.json"
+    manifest_path.write_text(json.dumps({**json.loads(manifest_path.read_text()), "camera_id": "2010093"}))
+    for path in sorted(_G1.rglob("*")):
+        if path.is_file() and "sign_off" not in path.parts:
+            _seal_file(plan, path.relative_to(_G1).as_posix(), path.read_bytes())
+    with pytest.raises(ValueError, match="orange_start_declaration:run_plan_copy:"):
+        importer.import_zebrobot_subject_reference(plan, fetch=_fetch())

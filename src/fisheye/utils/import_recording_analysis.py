@@ -926,7 +926,15 @@ def _declaring_requester(
         # peer.user is the OS account that sent it (null when the uid has no
         # passwd entry); peer itself is null when the kernel reported none
         # (agent-contracts #138: Orange cb4b65ee does not refuse that start).
-        return {"orange_requester_user": None if peer is None else peer["user"]}
+        recorded = {"orange_requester_user": None if peer is None else peer["user"]}
+        # agent-contracts #142 R6: a local_control orchard start has no run_spec
+        # copy; the sealed run_plan/ copies and this requester bind it, so the
+        # requester is recorded as provenance (claims, except SO_PEERCRED).
+        for field in ("uid", "gid", "pid"):
+            recorded[f"orange_requester_{field}"] = None if peer is None else peer.get(field)
+        for field in ("request_id", "operation_id", "command_source", "received_at_utc"):
+            recorded[f"orange_{field}"] = requester.get(field)
+        return recorded
     stamp = requester.get("run_stamp")
     sha = requester.get("spec_sha256")
     if (requester.get("transport") != "run_spec"

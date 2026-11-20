@@ -72,7 +72,7 @@ def test_invalid_fixtures_are_refused_for_their_rule(path):
 
 
 def test_fixture_counts_match_the_contract():
-    assert len(list((FIXTURES / "valid").glob("*.json"))) == 7
+    assert len(list((FIXTURES / "valid").glob("*.json"))) == 8
     assert len(list((FIXTURES / "invalid").glob("*.json"))) == 39
 
 
@@ -216,3 +216,28 @@ def test_check_declared_files_records_the_source_verbatim():
 def test_a_panel_confirmation_names_no_files():
     panel = json.loads((FIXTURES / "valid" / "confirmation_gui_operator.json").read_bytes())
     assert declaration.check_declared_files(panel, {}.get) == {}
+
+
+G1 = Path(__file__).resolve().parents[2] / "fixtures" / "orange_start_declaration_g1_2026_11_20_11_46_06"
+
+
+def test_a_real_local_control_orchard_confirmation_is_admitted():
+    """Fish-free gate run G1 (Orange .8): the route agent-contracts #142 relaxed in place."""
+
+    data = (G1 / "subject_confirmation.json").read_bytes()
+    confirmation = declaration.validate_confirmation_v2(declaration.parse_document(data, label="g1"))
+    assert confirmation["confirmed_by"] == "local_control"
+    assert confirmation["declaration"]["source"]["kind"] == "orchard_run_plan"
+    files = {p.relative_to(G1).as_posix(): p.read_bytes() for p in (G1 / "run_plan").rglob("*") if p.is_file()}
+    record = declaration.check_declared_files(confirmation, files.get)
+    assert record["orange_declaration_schema_version"] == 2
+    assert record["orange_run_plan_check"]["copies_verified"] == sorted(files)
+    assert all(declaration.stated_blank(confirmation, camera) for camera in confirmation["cameras"])
+
+
+@pytest.mark.parametrize("confirmed_by", ["run_spec", "gui_operator"])
+def test_the_route_rule_still_refuses_other_origins_for_a_real_orchard_declaration(confirmed_by):
+    confirmation = json.loads((G1 / "subject_confirmation.json").read_bytes())
+    confirmation["confirmed_by"] = confirmed_by
+    with pytest.raises(StartDeclarationError, match="^orange_start_declaration:schema:"):
+        declaration.validate_confirmation_v2(confirmation)

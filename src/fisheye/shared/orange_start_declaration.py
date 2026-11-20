@@ -44,7 +44,7 @@ SCHEMA_FILES = {
     ),
     "confirmation_v2": (
         "orange_recording_subject_confirmation_v2.schema.json",
-        "f65f6991b159ae4dc31f44a5924745c07e5f313d08e8669e5726511aa100d6dd",
+        "1e1249e30b50f628286921455eeb3d5a8ac57d8d9ffe6054d3e49bd0bd6867a9",
     ),
 }
 _TEXT_LIMIT_BYTES = 256

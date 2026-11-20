@@ -1,0 +1,132 @@
+# Run plan for a fish-free gate run declared from the plan (schema/run_plan.v3.schema.json).
+# One session, every arena blank. It tests plan loading end to end: orchard's declarations, Citrus's
+# declare_subjects (acceptance v4) loading each arena's protocol itself, and Orange's load step. No larva
+# is used. Asked for by Orange on Jeremy's request, 2026-11-20.
+schema_id: orchard.run_plan.v3
+plan_id: omnifin0-dot-contrast-corners-2026-11-20-gate
+revision: 2
+created: 2026-11-20
+created_by: experiment-spec
+note: >-
+  Fish-free. No larva is loaded, so no source dish is declared and MetaZebrobot gets no usage link. Every
+  arena names the same short protocol, protocols/moving_grating_direction_validation.json (21 s, three
+  moving-grating steps, no chaser), suggested by citrus-agent. Each arena is blank and names a protocol,
+  so Citrus gets a blank declaration with a protocol for all four arenas. The camera preset is the
+  100 frames per second one of the chaser pilot's fish sessions, with the folder digest as it was when
+  this revision was written; a change of exposure or iris after Orange's brightness check gives a new
+  digest and a new revision. Revision 2 changes only requires.orange_commit. The first attempt at G1 on
+  Orange release .7 was refused before any recording by a bug in the runner's re-check of Citrus's
+  declarations; release orange-v2026.11.20 fixes it. The preset digest stood at the brightness check.
+
+spec:
+  spec_id: omnifin0-dot-contrast-corners
+  revision: 11
+  orchard_commit: 6734402f0e2f285db02167507eb19347359270a7
+
+rig_id: omnifin0
+
+requires:
+  citrus_commit: ed33e0e16c185961c700a917909ec9e7c6e31d5d     # main after PRs 120 and 136; citrus-agent installs it for this run
+  orange_commit: 272fc685d636280f6e5379089d5ca6ecebf5a1a7     # release orange-v2026.11.20, /opt/orange/current
+  rig_config_revision: 16
+  render_rate_hz: 240
+  sealer_version: 3.3.0
+  photometric_release: null    # r1 is not released
+
+execution:
+  mode: operator_gui
+  operator_at_rig: required
+  gap_between_sessions_s: null
+
+sessions:
+  - session_id: G1
+    order: 1
+    intent: gate
+    expected_duration_s: 21
+    max_duration_s: 120
+    orange:
+      recording_intent: stimulus_experiment
+      preset:
+        name: 100_cam4_ptp_fourcam     # the preset of the fish sessions, so the gate tests what they use
+        sha256: "sha256:2018dac9515112cb73fe707440050009679cf45ad36529c3cf5e2c62d5076991"
+        hash_rule: orange_camera_config_dir_sha256_v1
+      empty_background: capture_at_setup
+      context_type: behavior
+      context_subtype: plan_loading_gate
+    citrus:
+      canvas: shadow
+      commissioning_release: commissioning_rig_canvas_commissioning_2026-11-19_full_recommission_after_refocus
+    arenas:
+      - arena_id: arena_1
+        camera_serial: "2010093"
+        subject_type: blank
+        subject_count: 0
+        source: null
+        members: []
+        destination: null
+        protocol:
+          path: protocols/moving_grating_direction_validation.json
+          file_sha256: 2e9250d3e00356be6a407a59b7e44b6d9656a2e4b690d50af26e44fad1a09a34
+          protocol_semantic_hash: "sha256:a7f44bab9a4d9ffc251cf7f285910d0aea1c7538bcfe9d4f6d7f20a3b9690206"   # citrus-agent, protocol_identity_dump at 240 Hz
+          semantic_version: 6
+          render_rate_hz: 240
+      - arena_id: arena_2
+        camera_serial: "2010094"
+        subject_type: blank
+        subject_count: 0
+        source: null
+        members: []
+        destination: null
+        protocol:
+          path: protocols/moving_grating_direction_validation.json
+          file_sha256: 2e9250d3e00356be6a407a59b7e44b6d9656a2e4b690d50af26e44fad1a09a34
+          protocol_semantic_hash: "sha256:a7f44bab9a4d9ffc251cf7f285910d0aea1c7538bcfe9d4f6d7f20a3b9690206"   # citrus-agent, protocol_identity_dump at 240 Hz
+          semantic_version: 6
+          render_rate_hz: 240
+      - arena_id: arena_3
+        camera_serial: "2010095"
+        subject_type: blank
+        subject_count: 0
+        source: null
+        members: []
+        destination: null
+        protocol:
+          path: protocols/moving_grating_direction_validation.json
+          file_sha256: 2e9250d3e00356be6a407a59b7e44b6d9656a2e4b690d50af26e44fad1a09a34
+          protocol_semantic_hash: "sha256:a7f44bab9a4d9ffc251cf7f285910d0aea1c7538bcfe9d4f6d7f20a3b9690206"   # citrus-agent, protocol_identity_dump at 240 Hz
+          semantic_version: 6
+          render_rate_hz: 240
+      - arena_id: arena_4
+        camera_serial: "2010096"
+        subject_type: blank
+        subject_count: 0
+        source: null
+        members: []
+        destination: null
+        protocol:
+          path: protocols/moving_grating_direction_validation.json
+          file_sha256: 2e9250d3e00356be6a407a59b7e44b6d9656a2e4b690d50af26e44fad1a09a34
+          protocol_semantic_hash: "sha256:a7f44bab9a4d9ffc251cf7f285910d0aea1c7538bcfe9d4f6d7f20a3b9690206"   # citrus-agent, protocol_identity_dump at 240 Hz
+          semantic_version: 6
+          render_rate_hz: 240
+    preconditions:
+      - "Projector on before boot or any display-manager restart; projector state read over RS-232 matches the recorded settings (Brightness 50)."
+      - "A fresh daily registration is run and selected in Citrus (status daily_registration_mode = selected_daily_registration), not base_only."
+      - "Commissioning release current for the installed rig config."
+      - "Citrus runs with subject acceptance 4, so declare_subjects takes the plan's declarations."
+      - "No larva is loaded."
+      - "Nothing heavy runs on the host during the session (builds, decodes, hashing)."
+
+abort_rules:
+  - { id: A1, when: "An installed build, rig config revision or render rate differs from requires.", scope: batch, action: refuse_start, status: proposed }
+  - { id: A2, when: "No sign-off covers the session, or the run record's plan_sha256 does not match the plan.", scope: session, action: refuse_start, status: proposed }
+  - { id: A3, when: "Citrus computes a protocol_semantic_hash different from the plan's.", scope: session, action: refuse_start, status: proposed }
+  - { id: A5, when: "Citrus or Orange refuses START for any reason.", scope: session, action: skip_session, status: proposed }
+  - { id: A6, when: "Any H5 of the session seals FAILED.", scope: batch, action: stop_batch, status: proposed }
+  - { id: A7, when: "A precondition check fails.", scope: session, action: refuse_start, status: proposed }
+  - { id: A8, when: "The Orange preset folder the session names is missing on the host or its digest differs from the plan's, or the commissioning release is missing.", scope: session, action: refuse_start, status: proposed }
+  - { id: A10, when: "The plan file is not committed or has edits.", scope: batch, action: refuse_start, status: proposed }
+
+transfer:
+  mode: manual_domain_user
+  destination: null
