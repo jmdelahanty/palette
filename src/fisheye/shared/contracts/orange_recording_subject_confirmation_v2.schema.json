@@ -174,10 +174,43 @@
                 "type": "object",
                 "properties": {
                   "kind": {
-                    "enum": [
-                      "orchard_run_plan",
-                      "orange_run_spec"
-                    ]
+                    "const": "orchard_run_plan"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "confirmed_by": {
+            "enum": [
+              "local_control",
+              "run_spec"
+            ]
+          }
+        }
+      },
+      "description": "Route rule, relaxed in place 2026-11-20: an orchard_run_plan declaration arrives through run_spec (cb4b65ee) or local_control (Orange spec-runner route, in every installed release since orange-v2026.11.18 9d4829cf; first recordings written by .8 272fc685). A local_control start has no run_spec/ copy; the sealed run_plan/ copies and the local_control_socket requester bind it (README R6)."
+    },
+    {
+      "if": {
+        "properties": {
+          "declaration": {
+            "type": "object",
+            "required": [
+              "source"
+            ],
+            "properties": {
+              "source": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "orange_run_spec"
                   }
                 },
                 "required": [
@@ -195,7 +228,7 @@
           }
         }
       },
-      "description": "Route rule at cb4b65ee (CheckDeclarationRoute). PENDING, not in production: branch agent/gui/spec-runner-20261116 would also allow orchard_run_plan with local_control; a later schema version will relax this."
+      "description": "Route rule at cb4b65ee (CheckDeclarationRoute): an orange_run_spec declaration arrives only through run_spec."
     },
     {
       "if": {

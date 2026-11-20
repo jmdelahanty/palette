@@ -1,0 +1,112 @@
+{
+  "cameras": {
+    "2010093": {
+      "dish_id": "PLACEHOLDER_SOURCE_DISH",
+      "subject_count": 5
+    },
+    "2010094": {
+      "dish_id": "PLACEHOLDER_PLATE",
+      "subject_count": 1
+    },
+    "2010095": {
+      "dish_id": "PLACEHOLDER_SOURCE_DISH",
+      "subject_count": 1
+    },
+    "2010096": {
+      "dish_id": null,
+      "subject_count": null
+    }
+  },
+  "config": {
+    "cameras": {
+      "2010093": {
+        "dish_id": "PLACEHOLDER_SOURCE_DISH",
+        "subject_count": 5
+      },
+      "2010094": {
+        "dish_id": "PLACEHOLDER_PLATE",
+        "subject_count": 1
+      },
+      "2010095": {
+        "dish_id": "PLACEHOLDER_SOURCE_DISH",
+        "subject_count": 1
+      },
+      "2010096": {
+        "blank": true
+      }
+    },
+    "schema_version": 2
+  },
+  "confirmed_at_utc": "2026-11-16T03:28:12Z",
+  "confirmed_by": "local_control",
+  "declaration": {
+    "declared_by": "delahantyj",
+    "recording_intent": "stimulus_experiment",
+    "schema_id": "orange.recording_start_declaration",
+    "schema_version": 2,
+    "source": {
+      "commit": "ccbdd67da37f27732dd68bb0fd335d91fd86e4f6",
+      "file_sha256": "221e0914a0c0e545e87180f7a2bf6d9043195fe3ebc598490b90885355f871a9",
+      "generator": {
+        "commit": "ccbdd67da37f27732dd68bb0fd335d91fd86e4f6",
+        "repo": "jmdelahanty/orchard",
+        "tool": "tools/declare.py"
+      },
+      "kind": "orchard_run_plan",
+      "path": "specs/omnifin0-dot-contrast-corners/run_plans/example_one_session.plan.yaml",
+      "plan_copy_relative_path": "run_plan/221e0914a0c0e545e87180f7a2bf6d9043195fe3ebc598490b90885355f871a9.yaml",
+      "plan_hash_rule": "orchard_run_plan_v1_plan_sha256",
+      "plan_id": "omnifin0-dot-contrast-corners-example",
+      "plan_json_copy_relative_path": "run_plan/328901b36094e73885eba780dd53c8261e9f23656e3e44ebd891876227bdf2ef.json",
+      "plan_revision": 5,
+      "plan_session_id": "S1",
+      "plan_sha256": "328901b36094e73885eba780dd53c8261e9f23656e3e44ebd891876227bdf2ef",
+      "repo": "jmdelahanty/orchard",
+      "sign_off": {
+        "at_utc": "2026-11-18T14:55:00Z",
+        "by": "delahantyj",
+        "entry_id": "signoff-1",
+        "entry_sha256": "89e62a0cab49f676438bf8a29a69c5d7c3300168a467261d05d9d38990592573",
+        "record_commit": "ccbdd67da37f27732dd68bb0fd335d91fd86e4f6",
+        "record_path": "specs/omnifin0-dot-contrast-corners/run_plans/example_one_session.record.yaml"
+      },
+      "sign_off_copy_relative_path": "run_plan/sign_off/89e62a0cab49f676438bf8a29a69c5d7c3300168a467261d05d9d38990592573.json",
+      "tree_dirty": false
+    },
+    "subject_references": {
+      "cameras": {
+        "2010093": {
+          "dish_id": "PLACEHOLDER_SOURCE_DISH",
+          "subject_count": 5
+        },
+        "2010094": {
+          "dish_id": "PLACEHOLDER_PLATE",
+          "subject_count": 1
+        },
+        "2010095": {
+          "dish_id": "PLACEHOLDER_SOURCE_DISH",
+          "subject_count": 1
+        },
+        "2010096": {
+          "blank": true
+        }
+      },
+      "schema_version": 2
+    }
+  },
+  "requester": {
+    "transport": "local_control_socket",
+    "peer": {
+      "uid": 1000,
+      "gid": 1000,
+      "pid": 4242,
+      "user": "jeremy"
+    },
+    "request_id": "req-1",
+    "operation_id": "op-1",
+    "command_source": "orange_local_control_client",
+    "received_at_utc": "2026-11-16T14:00:00Z"
+  },
+  "schema_id": "orange.recording_subject_confirmation",
+  "schema_version": 2
+}
