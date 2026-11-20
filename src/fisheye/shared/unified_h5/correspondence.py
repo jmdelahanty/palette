@@ -30,6 +30,7 @@ from .schema import (
     require_selected_catalog_versions,
     require_declared_core_tables,
     require_stimulus_angle_convention,
+    require_valid_protocol_snapshot,
     contract,
     describe_internal_dataset,
     describe_table,
@@ -238,6 +239,9 @@ def validate_capacity_preflight(h5) -> dict:
         h5, (table["path"] for table in document["tables"]), binding["catalog_file"]
     )
     require_selected_catalog_versions(h5, binding["catalog_file"])
+    # A protocol its producer refused carries no semantic identity to declare
+    # an angle convention; name that refusal first.
+    require_valid_protocol_snapshot(h5)
     # The binding fixes the stimulus angle convention; the file's session and
     # protocol declarations must agree with it (absent on legacy bindings).
     require_stimulus_angle_convention(h5, binding)
