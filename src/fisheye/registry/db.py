@@ -49,9 +49,6 @@ from .extractors.acquisition_video_streams import (
 )
 from .extractors.realtime_products import extract_realtime_product_rows
 from .extractors.orientation_status import extract_recording_orientation_status
-from .extractors.acquisition_video_stream_encoders import (
-    extract_acquisition_video_stream_encoder_rows,
-)
 from .extractors.chaser_metadata import extract_recording_chaser_metadata
 from .extractors.stimulus_metadata import extract_stimulus_metadata
 from .extractors.crop import _extract_crop_quality_rows
@@ -6661,14 +6658,7 @@ class Registry(
             root, zarr_path=zarr_path, recording_id=recording_id, zarr_use=zarr_use
         )
         self.replace_acquisition_video_streams(dataset_id, acquisition_rows)
-        self.replace_acquisition_video_stream_encoders(
-            dataset_id,
-            extract_acquisition_video_stream_encoder_rows(
-                _recording_dir_for_zarr_path(Path(zarr_path)),
-                acquisition_rows,
-                dataset_id=dataset_id,
-            ),
-        )
+        self.project_acquisition_video_stream_encoders(dataset_id, zarr_path, acquisition_rows)
         self.replace_recording_realtime_products(
             dataset_id, extract_realtime_product_rows(root, recording_id=recording_id)
         )

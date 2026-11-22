@@ -2,12 +2,28 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable
+from pathlib import Path
+from typing import Any, Dict, Iterable, Mapping
 
-from .extractors.acquisition_video_stream_encoders import ENCODER_COLUMNS
+from .extractors.acquisition_video_stream_encoders import (
+    ENCODER_COLUMNS,
+    extract_acquisition_video_stream_encoder_rows,
+)
 
 
 class RegistryAcquisitionVideoStreamEncodersMixin:
+    def project_acquisition_video_stream_encoders(
+        self, dataset_id: str, zarr_path: Any, streams: Iterable[Mapping[str, Any]]
+    ) -> None:
+        """Re-read every stream's recorder summary and replace the dataset's rows."""
+
+        zarr_path = Path(zarr_path)
+        recording_dir = zarr_path.parent.parent if zarr_path.parent.name == "zarr" else zarr_path.parent
+        self.replace_acquisition_video_stream_encoders(
+            dataset_id,
+            extract_acquisition_video_stream_encoder_rows(recording_dir, streams, dataset_id=dataset_id),
+        )
+
     def replace_acquisition_video_stream_encoders(
         self, dataset_id: str, rows: Iterable[Dict[str, Any]]
     ) -> None:
