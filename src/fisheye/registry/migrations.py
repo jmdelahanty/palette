@@ -313,6 +313,11 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
         "recording_orientation_status",
         "_migration_078_recording_orientation_status",
     ),
+    (
+        79,
+        "acquisition_video_stream_encoders",
+        "_migration_079_acquisition_video_stream_encoders",
+    ),
 )
 
 
@@ -323,7 +328,7 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
 # applied migration is recorded additive (schema_compatibility_problem). A
 # migration not listed here is treated as non-additive: list it only when that
 # holds.
-ADDITIVE_MIGRATIONS = frozenset({76, 77, 78})
+ADDITIVE_MIGRATIONS = frozenset({76, 77, 78, 79})
 LATEST_MIGRATION_VERSION = MIGRATION_METHODS[-1][0]
 
 
