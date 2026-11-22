@@ -635,8 +635,8 @@
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-a1bc8fdf8e3faf7b",
-            "schema-writer-ba3e53f886267038"
+            "schema-writer-2d5410a513b262b9",
+            "schema-writer-795cd84cf108c7f2"
           ],
           "shape": "shape(selection.bbox_crop_norm_xywh)"
         },
@@ -712,8 +712,8 @@
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-274bc6a9c9bf3cc8",
-            "schema-writer-77ebd1f617cbcaaf"
+            "schema-writer-14c450ed5ba59b61",
+            "schema-writer-5256f729bdcb80d8"
           ],
           "shape": "shape(selection.bbox_img_xyxy)"
         },
@@ -899,8 +899,8 @@
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-72779454295a56ad",
-            "schema-writer-b5e4e94e693c3309"
+            "schema-writer-be91eea463a524c6",
+            "schema-writer-d5d326e2b414464c"
           ],
           "shape": "shape(selection.bbox_norm_xywh)"
         },
@@ -986,14 +986,14 @@
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-399ac54f3e2b6a28"
+            "schema-writer-665fbf737606fc35"
           ],
           "shape": "shape(selection.bbox_roi_xyxy)"
         },
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-2950fb742d4c952e"
+            "schema-writer-edd972ef5342a35b"
           ],
           "shape": "shape(selection.realtime_detection_bbox_roi_xyxy)"
         }
@@ -1891,14 +1891,14 @@
         {
           "dtype": "float64",
           "occurrence_ids": [
-            "schema-writer-c93549c4b45ff7d8"
+            "schema-writer-4771aa357e81803e"
           ],
           "shape": "row_count"
         },
         {
           "dtype": "float64",
           "occurrence_ids": [
-            "schema-writer-9831d5e9fa3c880f"
+            "schema-writer-136d44d17053ebe8"
           ],
           "shape": "shape(keypoints.confidences[selection.source_keypoint_rows])"
         },
@@ -2314,9 +2314,9 @@
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-5601bb4244646d34",
-            "schema-writer-a252637d48f95e9b",
-            "schema-writer-d72c5f687fb41f21"
+            "schema-writer-27b991a45b4fa926",
+            "schema-writer-c23a67a49f3dd750",
+            "schema-writer-d020b3ca6eaf16ec"
           ],
           "shape": "shape(np.arange(row_count, dtype=np.int32))"
         },
@@ -2461,8 +2461,8 @@
         {
           "dtype": "int8",
           "occurrence_ids": [
-            "schema-writer-ba30d4fed95df097",
-            "schema-writer-f5457118bf59e241"
+            "schema-writer-599481eebcd328b8",
+            "schema-writer-fffea29f19d36e39"
           ],
           "shape": "row_count"
         },
@@ -2586,14 +2586,14 @@
         {
           "dtype": "bool",
           "occurrence_ids": [
-            "schema-writer-4188c2676888c491"
+            "schema-writer-2843c15d4fa0c419"
           ],
           "shape": "row_count"
         },
         {
           "dtype": "bool",
           "occurrence_ids": [
-            "schema-writer-33e1ede0c0166788"
+            "schema-writer-652d2f02aa691755"
           ],
           "shape": "shape(selection.success)"
         },
@@ -3518,7 +3518,7 @@
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-1185e721473eef5b"
+            "schema-writer-01217ab49028a53b"
           ],
           "shape": "(max_frame + 1,)"
         },
@@ -3539,8 +3539,8 @@
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-1858bbfc4ceab60a",
-            "schema-writer-9ffdd8d3784c1601"
+            "schema-writer-69fbe983062ced09",
+            "schema-writer-8d15aac9bfc9c696"
           ],
           "shape": "shape(np.bincount(selection.source_frames.astype(np.int64, copy=False), minlength=int(np.max(selection.source_frames)) + 1))"
         },
@@ -3805,9 +3805,9 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-4aefbb60cb2eb95f",
-            "schema-writer-a097ceaeb2af672e",
-            "schema-writer-e6136c643ddbde27"
+            "schema-writer-1d75c7256e3928d8",
+            "schema-writer-5311c0a2e04ac224",
+            "schema-writer-5b4411423974e503"
           ],
           "shape": "shape(selection.source_frames)"
         },
@@ -4000,7 +4000,7 @@
         {
           "dtype": "float64",
           "occurrence_ids": [
-            "schema-writer-8ca4ac6df2ca2f33"
+            "schema-writer-f45bf55ae35302c6"
           ],
           "shape": "shape(keypoints.heading[selection.source_keypoint_rows])"
         },
@@ -4626,7 +4626,7 @@
         {
           "dtype": "float64",
           "occurrence_ids": [
-            "schema-writer-ad4d74b4f0de9864"
+            "schema-writer-f55aacdbc5de4363"
           ],
           "shape": "shape(keypoints.keypoint_confidences[selection.source_keypoint_rows])"
         },
@@ -4673,7 +4673,7 @@
         {
           "dtype": "float64",
           "occurrence_ids": [
-            "schema-writer-8b0432ca08d644ee"
+            "schema-writer-eeb05f23f5aa00c3"
           ],
           "shape": "shape(selection.keypoints_roi)"
         },
@@ -4721,7 +4721,7 @@
         {
           "dtype": "float64",
           "occurrence_ids": [
-            "schema-writer-d3493e33b1e7eaf4"
+            "schema-writer-ac4f74034fda9233"
           ],
           "shape": "shape(selection.keypoints_norm)"
         },
@@ -4784,7 +4784,7 @@
         {
           "dtype": "float64",
           "occurrence_ids": [
-            "schema-writer-a4775eb16ed0b728"
+            "schema-writer-b383b89da38077ff"
           ],
           "shape": "shape(selection.keypoints_roi)"
         },
@@ -5634,7 +5634,7 @@
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-7542650bd32d9aed"
+            "schema-writer-49bb48bf3ab5a847"
           ],
           "shape": "frame_counts.shape[0]"
         },
@@ -6547,8 +6547,8 @@
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-1cfc9fad79edbdd8",
-            "schema-writer-6823239a3262d5ca"
+            "schema-writer-6e0e150835e86614",
+            "schema-writer-9280031af68a55ac"
           ],
           "shape": "shape(selection.realtime_detection_bbox_roi_xyxy)"
         }
@@ -6876,8 +6876,8 @@
         {
           "dtype": "int32",
           "occurrence_ids": [
-            "schema-writer-10a1d063239d6b7c",
-            "schema-writer-4daea840edf153ad"
+            "schema-writer-87478142ca632535",
+            "schema-writer-fe9a12e29f258329"
           ],
           "shape": "shape(selection.source_crop_xywh[:, :2])"
         },
@@ -6922,11 +6922,11 @@
             "schema-writer-1ae4e298b32635c4",
             "schema-writer-1bf240d4f2c7c689",
             "schema-writer-36e83bc6de3cfd9b",
-            "schema-writer-6ebc3cc49b499fb6",
             "schema-writer-aad8890112ca8741",
             "schema-writer-abd50f97e68618df",
             "schema-writer-ac49645e5afb8100",
             "schema-writer-bd26cd0955e64a30",
+            "schema-writer-c4d19c7869588b38",
             "schema-writer-e5a8adbb73617b89"
           ],
           "shape": "<unresolved>"
@@ -6934,14 +6934,14 @@
         {
           "dtype": "<unresolved>",
           "occurrence_ids": [
-            "schema-writer-efa117661f80bd71"
+            "schema-writer-9b0ba4c818497ec5"
           ],
           "shape": "shape(images)"
         },
         {
           "dtype": "uint8",
           "occurrence_ids": [
-            "schema-writer-e1cae3fc7ccd729f"
+            "schema-writer-0144ccd0a9f4e896"
           ],
           "shape": "shape(images)"
         },
@@ -7419,8 +7419,8 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-5aefc43555399d8f",
-            "schema-writer-db373340541905aa"
+            "schema-writer-8cf58748ced7350c",
+            "schema-writer-b97d004992f87291"
           ],
           "shape": "shape(selection.crop_local_frame_ids)"
         }
@@ -7449,8 +7449,8 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-980cd161ec70909e",
-            "schema-writer-ba45701c47f9d7d1"
+            "schema-writer-200eeb5eea749b97",
+            "schema-writer-4e0b07352693daa3"
           ],
           "shape": "shape(selection.crop_meta_rows)"
         }
@@ -7580,8 +7580,8 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-7ebfbaf1e00a3194",
-            "schema-writer-9e1d4c3a79197ba2"
+            "schema-writer-82b871c6a79d2877",
+            "schema-writer-eb9f5c30d479a80f"
           ],
           "shape": "shape(selection.crop_video_frame_indices)"
         }
@@ -7631,8 +7631,8 @@
         {
           "dtype": "float32",
           "occurrence_ids": [
-            "schema-writer-babd7050dae09a37",
-            "schema-writer-fb4e33ea9d119f6f"
+            "schema-writer-29b6b0ec6b41a3b8",
+            "schema-writer-ea918739ead6a0b4"
           ],
           "shape": "shape(selection.source_crop_xywh)"
         },
@@ -7842,7 +7842,7 @@
           "dtype": "<unresolved>",
           "occurrence_ids": [
             "schema-required-a04fe63ae10e4a36",
-            "schema-writer-52b9f9d798093363",
+            "schema-writer-10fa68a24f8416eb",
             "schema-writer-d013e4d474889a94"
           ],
           "shape": "<unresolved>"
@@ -7871,8 +7871,8 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-3e47e413cd432643",
-            "schema-writer-6673a30d8e00c986"
+            "schema-writer-7c4e091bc8963c63",
+            "schema-writer-9c6398caed3e06a9"
           ],
           "shape": "shape(selection.source_frames)"
         },
@@ -8021,8 +8021,8 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-a24165288535a185",
-            "schema-writer-f1c19aa82639acd3"
+            "schema-writer-22b6d20c1b69d4c7",
+            "schema-writer-6fa515d06fe33b82"
           ],
           "shape": "shape(selection.source_recording_frame_ids)"
         }
@@ -8088,7 +8088,7 @@
         {
           "dtype": "int64",
           "occurrence_ids": [
-            "schema-writer-3390fd7c3fe3936d"
+            "schema-writer-633a509ba75ce180"
           ],
           "shape": "shape(keypoints.source_row_indices[selection.source_keypoint_rows])"
         },
@@ -62966,8 +62966,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/training/sampled_training_acquisition_crop_materialization.py",
-      "line": 717,
-      "occurrence_id": "schema-writer-52b9f9d798093363",
+      "line": 760,
+      "occurrence_id": "schema-writer-10fa68a24f8416eb",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<candidate>/source_frame_indices",
       "required": null,
       "shape_expression": null,
@@ -62979,7 +62979,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-eea6f8788c08c383"
+      "writer_site_id": "writer-8ab221cdbbd6ede0"
     },
     {
       "access_pattern": "per_row",
@@ -63000,8 +63000,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/training/sampled_training_acquisition_crop_materialization.py",
-      "line": 748,
-      "occurrence_id": "schema-writer-6ebc3cc49b499fb6",
+      "line": 791,
+      "occurrence_id": "schema-writer-c4d19c7869588b38",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<candidate>/roi_images",
       "required": null,
       "shape_expression": null,
@@ -63013,7 +63013,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-6a8d293feb884788"
+      "writer_site_id": "writer-93099c6698e0cf24"
     },
     {
       "access_pattern": "windowed",
@@ -64496,8 +64496,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 259,
-      "occurrence_id": "schema-writer-e1cae3fc7ccd729f",
+      "line": 260,
+      "occurrence_id": "schema-writer-0144ccd0a9f4e896",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/roi_images",
       "required": null,
       "shape_expression": "shape(images)",
@@ -64509,7 +64509,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-33810ab49817f7e7"
+      "writer_site_id": "writer-7a9f22994fd71d00"
     },
     {
       "access_pattern": "windowed",
@@ -64530,8 +64530,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 260,
-      "occurrence_id": "schema-writer-e6136c643ddbde27",
+      "line": 261,
+      "occurrence_id": "schema-writer-5311c0a2e04ac224",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/frame_indices",
       "required": null,
       "shape_expression": "shape(selection.source_frames)",
@@ -64543,7 +64543,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-95a2b696675c39cf"
+      "writer_site_id": "writer-75759b58ec6998d9"
     },
     {
       "access_pattern": "windowed",
@@ -64564,8 +64564,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 261,
-      "occurrence_id": "schema-writer-6673a30d8e00c986",
+      "line": 262,
+      "occurrence_id": "schema-writer-7c4e091bc8963c63",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/source_frame_indices",
       "required": null,
       "shape_expression": "shape(selection.source_frames)",
@@ -64577,7 +64577,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-e63d1bdc0d66b0f8"
+      "writer_site_id": "writer-80ac218d88318098"
     },
     {
       "access_pattern": "windowed",
@@ -64598,8 +64598,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 262,
-      "occurrence_id": "schema-writer-4341cf157fb1133f",
+      "line": 263,
+      "occurrence_id": "schema-writer-7b832c75f0435dae",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/source_training_row_indices",
       "required": null,
       "shape_expression": "shape(selection.source_training_rows)",
@@ -64611,7 +64611,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-52e77bb3846239a2"
+      "writer_site_id": "writer-9e7fcaa996b3c07a"
     },
     {
       "access_pattern": "windowed",
@@ -64632,8 +64632,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 263,
-      "occurrence_id": "schema-writer-f1c19aa82639acd3",
+      "line": 264,
+      "occurrence_id": "schema-writer-22b6d20c1b69d4c7",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/source_recording_frame_ids",
       "required": null,
       "shape_expression": "shape(selection.source_recording_frame_ids)",
@@ -64645,7 +64645,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-c4feb4d1551e597f"
+      "writer_site_id": "writer-ef243d6e14025d9d"
     },
     {
       "access_pattern": "windowed",
@@ -64666,8 +64666,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 264,
-      "occurrence_id": "schema-writer-ba45701c47f9d7d1",
+      "line": 265,
+      "occurrence_id": "schema-writer-4e0b07352693daa3",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/source_crop_meta_row_indices",
       "required": null,
       "shape_expression": "shape(selection.crop_meta_rows)",
@@ -64679,7 +64679,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-63fc35cfaecd5d5b"
+      "writer_site_id": "writer-912532d1445713d1"
     },
     {
       "access_pattern": "windowed",
@@ -64700,8 +64700,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 265,
-      "occurrence_id": "schema-writer-9e1d4c3a79197ba2",
+      "line": 266,
+      "occurrence_id": "schema-writer-eb9f5c30d479a80f",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/source_crop_video_frame_indices",
       "required": null,
       "shape_expression": "shape(selection.crop_video_frame_indices)",
@@ -64713,7 +64713,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-d72f62b5a5e1145c"
+      "writer_site_id": "writer-a54b1373f3711ad3"
     },
     {
       "access_pattern": "windowed",
@@ -64734,8 +64734,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 266,
-      "occurrence_id": "schema-writer-db373340541905aa",
+      "line": 267,
+      "occurrence_id": "schema-writer-b97d004992f87291",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/source_crop_local_frame_ids",
       "required": null,
       "shape_expression": "shape(selection.crop_local_frame_ids)",
@@ -64747,7 +64747,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-64d761cbc1bd082a"
+      "writer_site_id": "writer-cf23145ea4dfc101"
     },
     {
       "access_pattern": "unclassified",
@@ -64768,8 +64768,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 267,
-      "occurrence_id": "schema-writer-babd7050dae09a37",
+      "line": 268,
+      "occurrence_id": "schema-writer-29b6b0ec6b41a3b8",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/source_crop_xywh",
       "required": null,
       "shape_expression": "shape(selection.source_crop_xywh)",
@@ -64781,7 +64781,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-9df8d8eef345084b"
+      "writer_site_id": "writer-3bb13bd8b83b52bb"
     },
     {
       "access_pattern": "windowed",
@@ -64802,8 +64802,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 268,
-      "occurrence_id": "schema-writer-10a1d063239d6b7c",
+      "line": 269,
+      "occurrence_id": "schema-writer-87478142ca632535",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/roi_coordinates_full",
       "required": null,
       "shape_expression": "shape(selection.source_crop_xywh[:, :2])",
@@ -64815,7 +64815,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-92b2a37a4c410388"
+      "writer_site_id": "writer-4424035efad5e5b2"
     },
     {
       "access_pattern": "unclassified",
@@ -64836,8 +64836,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 269,
-      "occurrence_id": "schema-writer-2950fb742d4c952e",
+      "line": 270,
+      "occurrence_id": "schema-writer-edd972ef5342a35b",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/bbox_roi_xyxy",
       "required": null,
       "shape_expression": "shape(selection.realtime_detection_bbox_roi_xyxy)",
@@ -64849,7 +64849,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-eaab80e4db4446a9"
+      "writer_site_id": "writer-fa4cb37f99c75f2a"
     },
     {
       "access_pattern": "unclassified",
@@ -64870,8 +64870,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 270,
-      "occurrence_id": "schema-writer-274bc6a9c9bf3cc8",
+      "line": 271,
+      "occurrence_id": "schema-writer-5256f729bdcb80d8",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/bbox_img_xyxy",
       "required": null,
       "shape_expression": "shape(selection.bbox_img_xyxy)",
@@ -64883,7 +64883,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-01e454b45b280716"
+      "writer_site_id": "writer-d609b972f7b46c98"
     },
     {
       "access_pattern": "unclassified",
@@ -64904,8 +64904,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 271,
-      "occurrence_id": "schema-writer-72779454295a56ad",
+      "line": 272,
+      "occurrence_id": "schema-writer-be91eea463a524c6",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/bbox_norm_coords",
       "required": null,
       "shape_expression": "shape(selection.bbox_norm_xywh)",
@@ -64917,7 +64917,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-e542f28b6b54f0c8"
+      "writer_site_id": "writer-4adb90626ce27dca"
     },
     {
       "access_pattern": "unclassified",
@@ -64938,8 +64938,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 272,
-      "occurrence_id": "schema-writer-ba3e53f886267038",
+      "line": 273,
+      "occurrence_id": "schema-writer-2d5410a513b262b9",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/bbox_crop_norm_coords",
       "required": null,
       "shape_expression": "shape(selection.bbox_crop_norm_xywh)",
@@ -64951,7 +64951,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-527729523b6f6186"
+      "writer_site_id": "writer-362d2cad9b3acafa"
     },
     {
       "access_pattern": "unclassified",
@@ -64972,8 +64972,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 273,
-      "occurrence_id": "schema-writer-1cfc9fad79edbdd8",
+      "line": 274,
+      "occurrence_id": "schema-writer-6e0e150835e86614",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/realtime_detection_bbox_roi_xyxy",
       "required": null,
       "shape_expression": "shape(selection.realtime_detection_bbox_roi_xyxy)",
@@ -64985,7 +64985,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-a2819561f60c6d53"
+      "writer_site_id": "writer-5d35af8631383528"
     },
     {
       "access_pattern": "windowed",
@@ -65006,8 +65006,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 274,
-      "occurrence_id": "schema-writer-5601bb4244646d34",
+      "line": 275,
+      "occurrence_id": "schema-writer-c23a67a49f3dd750",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/detection_indices",
       "required": null,
       "shape_expression": "shape(np.arange(row_count, dtype=np.int32))",
@@ -65019,7 +65019,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-58f89d3ea221e629"
+      "writer_site_id": "writer-408866da431523f4"
     },
     {
       "access_pattern": "unclassified",
@@ -65040,8 +65040,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 275,
-      "occurrence_id": "schema-writer-4188c2676888c491",
+      "line": 276,
+      "occurrence_id": "schema-writer-2843c15d4fa0c419",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/detection_success",
       "required": null,
       "shape_expression": "row_count",
@@ -65053,7 +65053,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-2582394b8fc5b830"
+      "writer_site_id": "writer-cdb6f0a586e5d48c"
     },
     {
       "access_pattern": "unclassified",
@@ -65074,8 +65074,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 276,
-      "occurrence_id": "schema-writer-f5457118bf59e241",
+      "line": 277,
+      "occurrence_id": "schema-writer-fffea29f19d36e39",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/detection_source",
       "required": null,
       "shape_expression": "row_count",
@@ -65087,7 +65087,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-4a8a9cbf2371d909"
+      "writer_site_id": "writer-2fcfeb26848e9ec5"
     },
     {
       "access_pattern": "windowed",
@@ -65108,8 +65108,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/append_acquisition_crop_video_training.py",
-      "line": 277,
-      "occurrence_id": "schema-writer-1185e721473eef5b",
+      "line": 278,
+      "occurrence_id": "schema-writer-01217ab49028a53b",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<run_name>/frame_counts",
       "required": null,
       "shape_expression": "(max_frame + 1,)",
@@ -65121,7 +65121,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-1cefc6cafbe68bfa"
+      "writer_site_id": "writer-2d8ae25e22970db4"
     },
     {
       "access_pattern": "windowed",
@@ -67552,8 +67552,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 751,
-      "occurrence_id": "schema-writer-efa117661f80bd71",
+      "line": 809,
+      "occurrence_id": "schema-writer-9b0ba4c818497ec5",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/roi_images",
       "required": null,
       "shape_expression": "shape(images)",
@@ -67565,7 +67565,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-a9eb9162bc2e0df3"
+      "writer_site_id": "writer-cf5795a0c0d1d7ff"
     },
     {
       "access_pattern": "windowed",
@@ -67586,8 +67586,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 752,
-      "occurrence_id": "schema-writer-a097ceaeb2af672e",
+      "line": 810,
+      "occurrence_id": "schema-writer-5b4411423974e503",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/frame_indices",
       "required": null,
       "shape_expression": "shape(selection.source_frames)",
@@ -67599,7 +67599,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-6dcf5109d2f4d6ec"
+      "writer_site_id": "writer-7abd388402243e20"
     },
     {
       "access_pattern": "windowed",
@@ -67620,8 +67620,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 753,
-      "occurrence_id": "schema-writer-3e47e413cd432643",
+      "line": 811,
+      "occurrence_id": "schema-writer-9c6398caed3e06a9",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/source_frame_indices",
       "required": null,
       "shape_expression": "shape(selection.source_frames)",
@@ -67633,7 +67633,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-6f74b1ca067f6af3"
+      "writer_site_id": "writer-09610c08abcc0455"
     },
     {
       "access_pattern": "windowed",
@@ -67654,8 +67654,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 754,
-      "occurrence_id": "schema-writer-a24165288535a185",
+      "line": 812,
+      "occurrence_id": "schema-writer-6fa515d06fe33b82",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/source_recording_frame_ids",
       "required": null,
       "shape_expression": "shape(selection.source_recording_frame_ids)",
@@ -67667,7 +67667,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-7b5e59393afe69ef"
+      "writer_site_id": "writer-a419defe78692f95"
     },
     {
       "access_pattern": "windowed",
@@ -67688,8 +67688,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 755,
-      "occurrence_id": "schema-writer-980cd161ec70909e",
+      "line": 813,
+      "occurrence_id": "schema-writer-200eeb5eea749b97",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/source_crop_meta_row_indices",
       "required": null,
       "shape_expression": "shape(selection.crop_meta_rows)",
@@ -67701,7 +67701,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-a194ed1ea630efb8"
+      "writer_site_id": "writer-ff9403f0b863cc8e"
     },
     {
       "access_pattern": "windowed",
@@ -67722,8 +67722,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 756,
-      "occurrence_id": "schema-writer-7ebfbaf1e00a3194",
+      "line": 814,
+      "occurrence_id": "schema-writer-82b871c6a79d2877",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/source_crop_video_frame_indices",
       "required": null,
       "shape_expression": "shape(selection.crop_video_frame_indices)",
@@ -67735,7 +67735,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-ba7d4c83f10b4afa"
+      "writer_site_id": "writer-877f514a683aae30"
     },
     {
       "access_pattern": "windowed",
@@ -67756,8 +67756,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 757,
-      "occurrence_id": "schema-writer-5aefc43555399d8f",
+      "line": 815,
+      "occurrence_id": "schema-writer-8cf58748ced7350c",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/source_crop_local_frame_ids",
       "required": null,
       "shape_expression": "shape(selection.crop_local_frame_ids)",
@@ -67769,7 +67769,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-d97b85e4694e0b50"
+      "writer_site_id": "writer-99e0745e069afae6"
     },
     {
       "access_pattern": "unclassified",
@@ -67790,8 +67790,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 758,
-      "occurrence_id": "schema-writer-fb4e33ea9d119f6f",
+      "line": 816,
+      "occurrence_id": "schema-writer-ea918739ead6a0b4",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/source_crop_xywh",
       "required": null,
       "shape_expression": "shape(selection.source_crop_xywh)",
@@ -67803,7 +67803,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-3a7ed808954b9bdb"
+      "writer_site_id": "writer-33fdc8cc25f74c27"
     },
     {
       "access_pattern": "windowed",
@@ -67824,8 +67824,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 759,
-      "occurrence_id": "schema-writer-4daea840edf153ad",
+      "line": 817,
+      "occurrence_id": "schema-writer-fe9a12e29f258329",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/roi_coordinates_full",
       "required": null,
       "shape_expression": "shape(selection.source_crop_xywh[:, :2])",
@@ -67837,7 +67837,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-70dd264cc37bc0a2"
+      "writer_site_id": "writer-5de528ef48a7c415"
     },
     {
       "access_pattern": "unclassified",
@@ -67858,8 +67858,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 760,
-      "occurrence_id": "schema-writer-399ac54f3e2b6a28",
+      "line": 818,
+      "occurrence_id": "schema-writer-665fbf737606fc35",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/bbox_roi_xyxy",
       "required": null,
       "shape_expression": "shape(selection.bbox_roi_xyxy)",
@@ -67871,7 +67871,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-705de85fe40b6a8c"
+      "writer_site_id": "writer-c76dbcd96cc30b22"
     },
     {
       "access_pattern": "unclassified",
@@ -67892,8 +67892,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 761,
-      "occurrence_id": "schema-writer-77ebd1f617cbcaaf",
+      "line": 819,
+      "occurrence_id": "schema-writer-14c450ed5ba59b61",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/bbox_img_xyxy",
       "required": null,
       "shape_expression": "shape(selection.bbox_img_xyxy)",
@@ -67905,7 +67905,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-c8c459a3033447cf"
+      "writer_site_id": "writer-29f8f8bdb0f7694b"
     },
     {
       "access_pattern": "unclassified",
@@ -67926,8 +67926,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 762,
-      "occurrence_id": "schema-writer-b5e4e94e693c3309",
+      "line": 820,
+      "occurrence_id": "schema-writer-d5d326e2b414464c",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/bbox_norm_coords",
       "required": null,
       "shape_expression": "shape(selection.bbox_norm_xywh)",
@@ -67939,7 +67939,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-f02eafbf6a392020"
+      "writer_site_id": "writer-0da1564b79431277"
     },
     {
       "access_pattern": "unclassified",
@@ -67960,8 +67960,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 763,
-      "occurrence_id": "schema-writer-a1bc8fdf8e3faf7b",
+      "line": 821,
+      "occurrence_id": "schema-writer-795cd84cf108c7f2",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/bbox_crop_norm_coords",
       "required": null,
       "shape_expression": "shape(selection.bbox_crop_norm_xywh)",
@@ -67973,7 +67973,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-cfbb5cafd1f980fc"
+      "writer_site_id": "writer-bc2d3177b322c867"
     },
     {
       "access_pattern": "unclassified",
@@ -67994,8 +67994,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 764,
-      "occurrence_id": "schema-writer-6823239a3262d5ca",
+      "line": 822,
+      "occurrence_id": "schema-writer-9280031af68a55ac",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/realtime_detection_bbox_roi_xyxy",
       "required": null,
       "shape_expression": "shape(selection.realtime_detection_bbox_roi_xyxy)",
@@ -68007,7 +68007,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-ffdc5ab8fff52e96"
+      "writer_site_id": "writer-84f62489976c0ba9"
     },
     {
       "access_pattern": "windowed",
@@ -68028,8 +68028,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 765,
-      "occurrence_id": "schema-writer-a252637d48f95e9b",
+      "line": 823,
+      "occurrence_id": "schema-writer-27b991a45b4fa926",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/detection_indices",
       "required": null,
       "shape_expression": "shape(np.arange(row_count, dtype=np.int32))",
@@ -68041,7 +68041,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-3dfd25f656516a8c"
+      "writer_site_id": "writer-d1b47cdf88b67358"
     },
     {
       "access_pattern": "windowed",
@@ -68062,8 +68062,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 766,
-      "occurrence_id": "schema-writer-1858bbfc4ceab60a",
+      "line": 824,
+      "occurrence_id": "schema-writer-69fbe983062ced09",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/frame_counts",
       "required": null,
       "shape_expression": "shape(np.bincount(selection.source_frames.astype(np.int64, copy=False), minlength=int(np.max(selection.source_frames)) + 1))",
@@ -68075,7 +68075,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-b790ac462dc74fc1"
+      "writer_site_id": "writer-a522b012afca4538"
     },
     {
       "access_pattern": "unclassified",
@@ -68096,8 +68096,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 767,
-      "occurrence_id": "schema-writer-ba30d4fed95df097",
+      "line": 825,
+      "occurrence_id": "schema-writer-599481eebcd328b8",
       "path_pattern": "<require_runs_parent(root, 'crop_runs')>/<crop_run_name>/detection_source",
       "required": null,
       "shape_expression": "row_count",
@@ -68109,7 +68109,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-807efc5a67f7863d"
+      "writer_site_id": "writer-1cb8c06ea60d38a7"
     },
     {
       "access_pattern": "windowed",
@@ -68130,8 +68130,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 769,
-      "occurrence_id": "schema-writer-4aefbb60cb2eb95f",
+      "line": 827,
+      "occurrence_id": "schema-writer-1d75c7256e3928d8",
       "path_pattern": "<require_runs_parent(root, 'keypoints_runs')>/<keypoint_run_name>/frame_indices",
       "required": null,
       "shape_expression": "shape(selection.source_frames)",
@@ -68143,7 +68143,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-a0cde3f692a5d054"
+      "writer_site_id": "writer-f40dddbc8b71d8fb"
     },
     {
       "access_pattern": "windowed",
@@ -68164,8 +68164,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 770,
-      "occurrence_id": "schema-writer-9ffdd8d3784c1601",
+      "line": 828,
+      "occurrence_id": "schema-writer-8d15aac9bfc9c696",
       "path_pattern": "<require_runs_parent(root, 'keypoints_runs')>/<keypoint_run_name>/frame_counts",
       "required": null,
       "shape_expression": "shape(np.bincount(selection.source_frames.astype(np.int64, copy=False), minlength=int(np.max(selection.source_frames)) + 1))",
@@ -68177,7 +68177,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-a692b6c78615a7d1"
+      "writer_site_id": "writer-91ce90eccf8bf105"
     },
     {
       "access_pattern": "windowed",
@@ -68198,8 +68198,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 771,
-      "occurrence_id": "schema-writer-d72c5f687fb41f21",
+      "line": 829,
+      "occurrence_id": "schema-writer-d020b3ca6eaf16ec",
       "path_pattern": "<require_runs_parent(root, 'keypoints_runs')>/<keypoint_run_name>/detection_indices",
       "required": null,
       "shape_expression": "shape(np.arange(row_count, dtype=np.int32))",
@@ -68211,7 +68211,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-ea897f249d28c592"
+      "writer_site_id": "writer-d5599aa4a4dee67a"
     },
     {
       "access_pattern": "windowed",
@@ -68232,8 +68232,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 772,
-      "occurrence_id": "schema-writer-3390fd7c3fe3936d",
+      "line": 830,
+      "occurrence_id": "schema-writer-633a509ba75ce180",
       "path_pattern": "<require_runs_parent(root, 'keypoints_runs')>/<keypoint_run_name>/source_refined_row_ids",
       "required": null,
       "shape_expression": "shape(keypoints.source_row_indices[selection.source_keypoint_rows])",
@@ -68245,7 +68245,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-c9b913279ff054bc"
+      "writer_site_id": "writer-62e3a5dfc74979d6"
     },
     {
       "access_pattern": "windowed",
@@ -68266,8 +68266,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 773,
-      "occurrence_id": "schema-writer-a4775eb16ed0b728",
+      "line": 831,
+      "occurrence_id": "schema-writer-b383b89da38077ff",
       "path_pattern": "<require_runs_parent(root, 'keypoints_runs')>/<keypoint_run_name>/keypoints_roi",
       "required": null,
       "shape_expression": "shape(selection.keypoints_roi)",
@@ -68279,7 +68279,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-8ca473b3fec205cd"
+      "writer_site_id": "writer-28f0b9b243fcad5c"
     },
     {
       "access_pattern": "windowed",
@@ -68300,8 +68300,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 774,
-      "occurrence_id": "schema-writer-8b0432ca08d644ee",
+      "line": 832,
+      "occurrence_id": "schema-writer-eeb05f23f5aa00c3",
       "path_pattern": "<require_runs_parent(root, 'keypoints_runs')>/<keypoint_run_name>/keypoints_img",
       "required": null,
       "shape_expression": "shape(selection.keypoints_roi)",
@@ -68313,7 +68313,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-17de5da484f2a959"
+      "writer_site_id": "writer-4c3ed4abc100a9e9"
     },
     {
       "access_pattern": "windowed",
@@ -68334,8 +68334,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 775,
-      "occurrence_id": "schema-writer-d3493e33b1e7eaf4",
+      "line": 833,
+      "occurrence_id": "schema-writer-ac4f74034fda9233",
       "path_pattern": "<require_runs_parent(root, 'keypoints_runs')>/<keypoint_run_name>/keypoints_norm",
       "required": null,
       "shape_expression": "shape(selection.keypoints_norm)",
@@ -68347,7 +68347,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-8ae3362e65ea924f"
+      "writer_site_id": "writer-6f382e892ed31058"
     },
     {
       "access_pattern": "windowed",
@@ -68368,8 +68368,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 776,
-      "occurrence_id": "schema-writer-1baa2331ca0ee2d6",
+      "line": 834,
+      "occurrence_id": "schema-writer-5c56742a9b497e6c",
       "path_pattern": "<require_runs_parent(root, 'keypoints_runs')>/<keypoint_run_name>/source_keypoints_img",
       "required": null,
       "shape_expression": "shape(selection.keypoints_img)",
@@ -68381,7 +68381,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-10cc18e19a468241"
+      "writer_site_id": "writer-16433adc3aeff7f0"
     },
     {
       "access_pattern": "unclassified",
@@ -68402,8 +68402,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 777,
-      "occurrence_id": "schema-writer-33e1ede0c0166788",
+      "line": 835,
+      "occurrence_id": "schema-writer-652d2f02aa691755",
       "path_pattern": "<require_runs_parent(root, 'keypoints_runs')>/<keypoint_run_name>/detection_success",
       "required": null,
       "shape_expression": "shape(selection.success)",
@@ -68415,7 +68415,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-718f16610591cbbe"
+      "writer_site_id": "writer-a2469b905832b7d9"
     },
     {
       "access_pattern": "windowed",
@@ -68436,8 +68436,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 778,
-      "occurrence_id": "schema-writer-7542650bd32d9aed",
+      "line": 836,
+      "occurrence_id": "schema-writer-49bb48bf3ab5a847",
       "path_pattern": "<require_runs_parent(root, 'keypoints_runs')>/<keypoint_run_name>/n_keypoints",
       "required": null,
       "shape_expression": "frame_counts.shape[0]",
@@ -68449,7 +68449,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-7af41699479f88b5"
+      "writer_site_id": "writer-98b96fef1017397a"
     },
     {
       "access_pattern": "unclassified",
@@ -68470,8 +68470,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 780,
-      "occurrence_id": "schema-writer-9831d5e9fa3c880f",
+      "line": 838,
+      "occurrence_id": "schema-writer-136d44d17053ebe8",
       "path_pattern": "<require_runs_parent(root, 'keypoints_runs')>/<keypoint_run_name>/confidence",
       "required": null,
       "shape_expression": "shape(keypoints.confidences[selection.source_keypoint_rows])",
@@ -68483,7 +68483,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-2a0c21a0bf9add04"
+      "writer_site_id": "writer-31f82b2da8e2d9fc"
     },
     {
       "access_pattern": "unclassified",
@@ -68504,8 +68504,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 782,
-      "occurrence_id": "schema-writer-c93549c4b45ff7d8",
+      "line": 840,
+      "occurrence_id": "schema-writer-4771aa357e81803e",
       "path_pattern": "<require_runs_parent(root, 'keypoints_runs')>/<keypoint_run_name>/confidence",
       "required": null,
       "shape_expression": "row_count",
@@ -68517,7 +68517,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-fe4f074e379d3345"
+      "writer_site_id": "writer-8ea3b945f055041e"
     },
     {
       "access_pattern": "windowed",
@@ -68538,8 +68538,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 784,
-      "occurrence_id": "schema-writer-ad4d74b4f0de9864",
+      "line": 842,
+      "occurrence_id": "schema-writer-f55aacdbc5de4363",
       "path_pattern": "<require_runs_parent(root, 'keypoints_runs')>/<keypoint_run_name>/keypoint_confidences",
       "required": null,
       "shape_expression": "shape(keypoints.keypoint_confidences[selection.source_keypoint_rows])",
@@ -68551,7 +68551,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-de41b667ddb02251"
+      "writer_site_id": "writer-bde61a9d033808ef"
     },
     {
       "access_pattern": "unclassified",
@@ -68572,8 +68572,8 @@
       "dtype_expression": null,
       "dynamic_name": false,
       "file": "src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py",
-      "line": 791,
-      "occurrence_id": "schema-writer-8ca4ac6df2ca2f33",
+      "line": 849,
+      "occurrence_id": "schema-writer-f45bf55ae35302c6",
       "path_pattern": "<require_runs_parent(root, 'keypoints_runs')>/<keypoint_run_name>/heading",
       "required": null,
       "shape_expression": "shape(keypoints.heading[selection.source_keypoint_rows])",
@@ -68585,7 +68585,7 @@
       "subgroup": null,
       "write_lifecycle": "training_build_then_immutable",
       "write_lifecycle_basis": "training artifact surface",
-      "writer_site_id": "writer-63a3ab5a302f6116"
+      "writer_site_id": "writer-f3a5867254469743"
     },
     {
       "access_pattern": "unclassified",
