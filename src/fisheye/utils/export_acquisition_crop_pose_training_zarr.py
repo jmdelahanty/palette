@@ -268,7 +268,8 @@ def crop_source_compression(recording_dir: Path, crop_video_path: Path) -> dict[
 
     summary_path = resolve_crop_summary_path(recording_dir, crop_video_path)
     try:
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        raw = summary_path.read_bytes()
+        summary = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeError, ValueError) as exc:
         raise ValueError(f"Orange crop summary is unreadable: {summary_path}: {exc}") from exc
     if not isinstance(summary, dict):
@@ -280,7 +281,7 @@ def crop_source_compression(recording_dir: Path, crop_video_path: Path) -> dict[
     return {
         **compression,
         "summary_path": str(summary_path),
-        "summary_sha256": hashlib.sha256(summary_path.read_bytes()).hexdigest(),
+        "summary_sha256": hashlib.sha256(raw).hexdigest(),  # the bytes classified
     }
 
 
