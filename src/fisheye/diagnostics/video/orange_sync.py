@@ -5,6 +5,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional, TextIO
 
+from fisheye.shared.orange_crop_compression import (
+    CropCompressionRefusal,
+    cqp_gop1_compression,
+)
+
 
 _SUMMARY_MAX_BYTES = 16 * 1024 * 1024
 _JSON_TOKEN_MAX_CHARS = 64 * 1024
@@ -36,6 +41,10 @@ class OrangeSyncAssessment:
     sidecar_total_frames: Optional[int] = None
     keyframe_count: Optional[int] = None
     error: Optional[str] = None
+    # Set only for a constant-QP crop admitted by
+    # fisheye.shared.orange_crop_compression; lossless crops omit it, so their
+    # assessment bytes are unchanged.
+    crop_compression: Optional[dict[str, Any]] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {key: value for key, value in asdict(self).items() if value is not None}
@@ -412,10 +421,15 @@ def assess_orange_crop_sync_evidence(
             error="Orange evidence does not describe a crop stream",
         )
     if profile["tuning"] != "lossless":
-        return result(
-            "orange_idr_sidecar_contradiction",
-            error=f"Orange crop tuning is not lossless: {profile['tuning']!r}",
-        )
+        # Not lossless: admitted only as exactly Orange's constant-QP all-intra
+        # profile (palette.orange_crop_cqp_gop1.v1), recorded with its QP.
+        try:
+            base["crop_compression"] = cqp_gop1_compression(summary)
+        except CropCompressionRefusal as exc:
+            return result(
+                "orange_idr_sidecar_contradiction",
+                error=f"Orange crop tuning is not lossless: {profile['tuning']!r}; {exc}",
+            )
 
     resolved_gop_length = _encoder_gop_length(summary)
     frames_encoded = _optional_nonnegative_int(summary.get("frames_encoded"))

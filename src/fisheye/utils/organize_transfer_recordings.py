@@ -1203,7 +1203,41 @@ def _video_sync_assessment(plan: dict, parent: dict) -> dict:
             f"Orange sync-sample evidence contradicts {relative}: {result.get('message')}",
         )
         assessments[relative] = result
+    _require_sealed_crop_qp(plan, assessments)
     return {"schema_id": "palette.transfer_parent_video_sync_assessment.v1", "videos": assessments}
+
+
+def _require_sealed_crop_qp(plan: dict, assessments: dict) -> None:
+    """A constant-QP crop's QP must be the one Orange sealed at record start.
+
+    Only videos admitted under ``palette.orange_crop_cqp_gop1.v1`` carry
+    ``orange_evidence.crop_compression``; lossless crops are not affected.
+    """
+
+    from fisheye.shared.orange_crop_compression import (
+        CropCompressionRefusal,
+        require_start_snapshot_qp,
+    )
+
+    compressed = {
+        relative: result["orange_evidence"]["crop_compression"]
+        for relative, result in assessments.items()
+        if isinstance(result.get("orange_evidence"), dict)
+        and result["orange_evidence"].get("crop_compression")
+    }
+    if not compressed:
+        return
+    snapshot_path = Path(plan["source_dir"]) / "recording_snapshot_start.json"
+    require(
+        snapshot_path.is_file(),
+        f"constant-QP crops need the start snapshot's sealed QP: {snapshot_path} is missing",
+    )
+    snapshot = strict_json(snapshot_path)
+    for relative, compression in compressed.items():
+        try:
+            require_start_snapshot_qp(snapshot, compression["qp"])
+        except CropCompressionRefusal as exc:
+            require(False, f"{relative}: {exc}")
 
 
 def _parent_manifest(plan: dict, parent: dict) -> dict:
