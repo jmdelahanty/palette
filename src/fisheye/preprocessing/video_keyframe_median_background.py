@@ -103,6 +103,7 @@ def probe_video(video_path: Path) -> dict[str, Any]:
         ],
         check=True,
         capture_output=True,
+        stdin=subprocess.DEVNULL,
     ).stdout
     stream = json.loads(out)["streams"][0]
     return {
@@ -142,9 +143,12 @@ def decode_keyframes(
     stack = np.empty((len(wanted), height, width), dtype=np.uint8)
     process = subprocess.Popen(
         [
-            "ffmpeg", "-v", "error", "-threads", str(int(threads)), "-skip_frame", "nokey",
+            # -nostdin and a closed stdin: ffmpeg otherwise reads its caller's standard
+            # input for interactive commands and consumes whatever a loop or pipeline feeds.
+            "ffmpeg", "-nostdin", "-v", "error", "-threads", str(int(threads)), "-skip_frame", "nokey",
             "-i", str(video_path), "-vsync", "0", "-f", "rawvideo", "-pix_fmt", "gray", "-",
         ],
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         bufsize=frame_bytes,
     )

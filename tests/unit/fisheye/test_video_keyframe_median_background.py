@@ -211,3 +211,27 @@ def test_a_video_with_fewer_keyframes_than_declared_fails(tmp_path: Path) -> Non
 
     with pytest.raises(RuntimeError, match="decoding stopped"):
         stage.decode_keyframes(video, declared_keyframes=declared, wanted=[FRAMES * 2 - 1], shape_hw=SHAPE)
+
+
+@needs_ffmpeg
+def test_decoding_leaves_the_callers_standard_input_alone(tmp_path: Path) -> None:
+    """A loop that feeds recording names on stdin must still see them after a decode."""
+
+    recording_dir = _recording(tmp_path, with_video=True)
+    video = recording_dir / "cams" / "acquisition" / "external_recorder" / f"Cam{CAMERA}_external.mp4"
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from fisheye.preprocessing import video_keyframe_median_background as stage\n"
+        f"stage.probe_video(Path({str(video)!r}))\n"
+        f"stage.decode_keyframes(Path({str(video)!r}), declared_keyframes=list(range({FRAMES})), "
+        f"wanted=[0, 30, 59], shape_hw={SHAPE!r})\n"
+        "sys.stdout.write(sys.stdin.read())\n"
+    )
+    import sys
+
+    out = subprocess.run(
+        [sys.executable, "-c", script], input=b"next recording\n", capture_output=True, check=True
+    ).stdout
+
+    assert out == b"next recording\n"
