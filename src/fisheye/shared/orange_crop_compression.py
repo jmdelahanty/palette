@@ -94,6 +94,30 @@ def cqp_gop1_compression(summary: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+LOSSLESS_RULE_ID = "palette.orange_crop_lossless.v1"
+
+
+def classify_crop_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """Lossless or exactly constant-QP; anything else is refused.
+
+    For training sources that previously read crops without any compression
+    check. Lossless means the summary's top-level ``tuning`` is "lossless"
+    and its encoder block, when present, does not say otherwise. Every other
+    crop must satisfy ``palette.orange_crop_cqp_gop1.v1``.
+    """
+
+    metadata = summary.get("video_metadata")
+    encoder = metadata.get("encoder") if isinstance(metadata, Mapping) else None
+    encoder_tuning = encoder.get("tuning") if isinstance(encoder, Mapping) else None
+    if summary.get("tuning") == "lossless":
+        if encoder_tuning not in (None, "lossless"):
+            raise CropCompressionRefusal(
+                f"crop summary tuning 'lossless' contradicts encoder tuning {encoder_tuning!r}"
+            )
+        return {"rule": LOSSLESS_RULE_ID, "tuning": "lossless", "lossless": True}
+    return {**cqp_gop1_compression(summary), "lossless": False}
+
+
 def start_snapshot_crop_qp(snapshot: Mapping[str, Any]) -> int:
     """The crop QP Orange's recorder received, from the sealed start snapshot."""
 
@@ -123,6 +147,8 @@ __all__ = [
     "CQP_GOP1_PROFILE",
     "CQP_GOP1_RULE_ID",
     "CropCompressionRefusal",
+    "LOSSLESS_RULE_ID",
+    "classify_crop_summary",
     "cqp_gop1_compression",
     "require_start_snapshot_qp",
     "start_snapshot_crop_qp",
