@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import shutil
 import subprocess
@@ -27,6 +28,10 @@ from fisheye.shared.crop_geometry import (
     bbox_img_xyxy_to_norm_cxcywh,
     bbox_roi_xyxy_to_img_xyxy,
     resolve_full_frame_shape,
+)
+from fisheye.shared.orange_crop_compression import (
+    CropCompressionRefusal,
+    classify_crop_summary,
 )
 from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
 from fisheye.shared.roi_pixel_contract import (
@@ -67,6 +72,9 @@ class CropVideoStreamInfo:
     color_space: str | None
     nb_frames: str | None
     frame_format_confirmation_status: str
+    # fisheye.shared.orange_crop_compression.classify_crop_summary of the
+    # crop's recorder summary. Writers refuse a stream without it.
+    source_compression: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -237,7 +245,55 @@ def _ffprobe_stream(path: Path) -> dict[str, Any]:
     return stream if isinstance(stream, dict) else {"available": False, "error": "ffprobe stream is not an object"}
 
 
+def resolve_crop_summary_path(recording_dir: Path, crop_video_path: Path) -> Path:
+    """Orange's recorder summary for this crop video: sibling, else the manifest's."""
+
+    sibling = crop_video_path.with_name(f"{crop_video_path.stem}_summary.json")
+    if sibling.is_file():
+        return sibling
+    declared = _crop_stream(recording_dir).get("summary")
+    if declared:
+        path = Path(str(declared))
+        if not path.is_absolute():
+            path = recording_dir / path
+        if path.is_file():
+            return path
+    raise ValueError(
+        f"No Orange crop summary for {crop_video_path}; its compression cannot be verified."
+    )
+
+
+def crop_source_compression(recording_dir: Path, crop_video_path: Path) -> dict[str, Any]:
+    """Lossless or palette.orange_crop_cqp_gop1.v1, with the summary it came from."""
+
+    summary_path = resolve_crop_summary_path(recording_dir, crop_video_path)
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError(f"Orange crop summary is unreadable: {summary_path}: {exc}") from exc
+    if not isinstance(summary, dict):
+        raise ValueError(f"Orange crop summary is not a JSON object: {summary_path}")
+    try:
+        compression = classify_crop_summary(summary)
+    except CropCompressionRefusal as exc:
+        raise ValueError(f"Acquisition crop video is not an admitted training source: {exc}") from exc
+    return {
+        **compression,
+        "summary_path": str(summary_path),
+        "summary_sha256": hashlib.sha256(summary_path.read_bytes()).hexdigest(),
+    }
+
+
+def require_source_compression(info: CropVideoStreamInfo) -> dict[str, Any]:
+    if not info.source_compression:
+        raise ValueError(
+            f"Crop video {info.crop_video_path} has no verified compression; refusing to export it."
+        )
+    return dict(info.source_compression)
+
+
 def inspect_crop_video_stream(recording_dir: Path, crop_meta_path: Path, crop_video_path: Path) -> CropVideoStreamInfo:
+    source_compression = crop_source_compression(recording_dir, crop_video_path)
     stream = _ffprobe_stream(crop_video_path)
     return CropVideoStreamInfo(
         crop_video_path=str(crop_video_path),
@@ -250,6 +306,7 @@ def inspect_crop_video_stream(recording_dir: Path, crop_meta_path: Path, crop_vi
         color_space=str(stream.get("color_space")) if stream.get("color_space") is not None else None,
         nb_frames=str(stream.get("nb_frames")) if stream.get("nb_frames") is not None else None,
         frame_format_confirmation_status="pending_orange_confirmation",
+        source_compression=source_compression,
     )
 
 
@@ -796,6 +853,7 @@ def _write_output_zarr(
     )
     crop_attrs = {
         "schema_id": SCHEMA_ID,
+        "source_crop_compression": require_source_compression(report.crop_video),
         "crop_storage_mode": "materialized",
         "roi_size": [height, width],
         "roi_pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,

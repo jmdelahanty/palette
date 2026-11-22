@@ -64,6 +64,12 @@ def _write_source_zarr(path: Path) -> None:
     mark_run_complete(run, parent_group=parent, run_name="refined_kp")
 
 
+def _write_lossless_summary(crop_video: Path) -> None:
+    crop_video.with_name(f"{crop_video.stem}_summary.json").write_text(
+        '{"tuning": "lossless"}', encoding="utf-8"
+    )
+
+
 def _patch_ffprobe(monkeypatch, *, color_range: str | None = "tv") -> None:
     monkeypatch.setattr(
         mod,
@@ -88,6 +94,7 @@ def test_inspect_acquisition_crop_pose_training_selects_sufficient_rows(tmp_path
     crop_video = recording_dir / "derived" / "external_crop_recorder" / "Cam2010093_crop_external.mp4"
     crop_video.parent.mkdir(parents=True, exist_ok=True)
     crop_video.write_bytes(b"placeholder")
+    _write_lossless_summary(crop_video)
     _write_crop_meta(crop_meta)
     _write_source_zarr(zarr_path)
 
@@ -156,6 +163,7 @@ def test_export_acquisition_crop_pose_training_writes_training_zarr(tmp_path, mo
     crop_video = recording_dir / "derived" / "external_crop_recorder" / "Cam2010093_crop_external.mp4"
     crop_video.parent.mkdir(parents=True, exist_ok=True)
     crop_video.write_bytes(b"placeholder")
+    _write_lossless_summary(crop_video)
     _write_crop_meta(crop_meta)
     _write_source_zarr(zarr_path)
 
@@ -181,6 +189,7 @@ def test_export_acquisition_crop_pose_training_writes_training_zarr(tmp_path, mo
     crop = root["crop_runs"]["crop_acq_test"]
     keypoints = root["keypoints_runs"]["keypoints_acq_test"]
     assert crop.attrs["source_type"] == "acquisition_crop_video"
+    assert crop.attrs["source_crop_compression"]["rule"] == "palette.orange_crop_lossless.v1"
     assert crop.attrs["container_color_range_observed"] == "pc"
     assert crop.attrs["frame_format_confirmation_status"] == "pending_orange_confirmation"
     assert keypoints.attrs["source_crop_run"] == "crop_acq_test"
@@ -231,6 +240,7 @@ def test_export_acquisition_crop_pose_training_rejects_unknown_color_range(
     )
     crop_video.parent.mkdir(parents=True, exist_ok=True)
     crop_video.write_bytes(b"placeholder")
+    _write_lossless_summary(crop_video)
     _write_crop_meta(crop_meta)
     _write_source_zarr(zarr_path)
 

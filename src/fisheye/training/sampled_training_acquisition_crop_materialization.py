@@ -18,6 +18,11 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.orange_crop_compression import (
+    CQP_GOP1_RULE_ID,
+    CropCompressionRefusal,
+    cqp_gop1_compression,
+)
 from fisheye.shared.crop_roi_layout import (
     build_canonical_crop_roi_layout,
     build_crop_roi_create_kwargs,
@@ -178,7 +183,15 @@ def resolve_acquisition_crop_source(
     metadata_path: str | Path | None = None,
     summary_path: str | Path | None = None,
 ) -> AcquisitionCropSource:
-    """Resolve and fail closed on Orange's exact lossless crop declaration."""
+    """Resolve and fail closed on Orange's exact crop encoder declaration.
+
+    Two declarations are admitted. The frozen lossless contract
+    (``external_crop_hevc_lossless_gop1``) is unchanged. A constant-QP crop is
+    admitted only under ``palette.orange_crop_cqp_gop1.v1``
+    (``fisheye.shared.orange_crop_compression``); its encoder contract then
+    carries ``crop_compression`` with the QP, and the materialized run's
+    ``source_pixels`` names the constant-QP source. Anything else is refused.
+    """
 
     recording = Path(recording_dir).expanduser().resolve()
     manifest_path = recording / "recording_manifest.json"
@@ -226,6 +239,27 @@ def resolve_acquisition_crop_source(
         "output_width": 384,
         "output_height": 384,
     }
+    crop_compression = None
+    if encoder.get("tuning") != "lossless":
+        try:
+            crop_compression = cqp_gop1_compression(document)
+        except CropCompressionRefusal as exc:
+            raise ValueError(
+                "Acquisition crop stream is not the frozen lossless contract "
+                f"or {CQP_GOP1_RULE_ID}: {exc}"
+            ) from exc
+        required_encoder = {
+            "codec": "hevc",
+            "tuning": crop_compression["tuning"],
+            "rate_control_strategy": "cqp",
+            "profile_name": crop_compression["profile_name"],
+            "qp": crop_compression["qp"],
+            "resize_enabled": False,
+            "resolved_gop_length": 1,
+            "source_format": "mono8",
+            "output_width": 384,
+            "output_height": 384,
+        }
     mismatches = {
         key: {"expected": expected, "observed": encoder.get(key)}
         for key, expected in required_encoder.items()
@@ -261,8 +295,9 @@ def resolve_acquisition_crop_source(
             "observed": document.get("encode_dropped"),
         }
     if mismatches:
+        contract = "frozen lossless contract" if crop_compression is None else CQP_GOP1_RULE_ID
         raise ValueError(
-            f"Acquisition crop stream is not the frozen lossless contract: {mismatches}"
+            f"Acquisition crop stream is not the {contract}: {mismatches}"
         )
     stat = video.stat()
     encoder_contract = {
@@ -274,6 +309,10 @@ def resolve_acquisition_crop_source(
         "frames_encoded": int(document.get("frames_encoded", 0)),
         "encode_dropped": int(document.get("encode_dropped", 0)),
     }
+    if crop_compression is not None:
+        # Lossless contracts keep their exact bytes; only constant-QP sources
+        # carry the rule and QP.
+        encoder_contract["crop_compression"] = dict(crop_compression)
     return AcquisitionCropSource(
         recording_dir=recording,
         video_path=video,
@@ -670,7 +709,11 @@ def write_sampled_acquisition_crop_hybrid(
             "pixel_source_code_map": PIXEL_SOURCE_CODE_MAP,
             "fallback_reason_code_map": FALLBACK_REASON_CODE_MAP,
             "fallback_policy": "sampled_images_full_zero_padded_v1",
-            "source_pixels": "lossless_acquisition_crop_or_explicit_full_frame_fallback",
+            "source_pixels": (
+                "lossless_acquisition_crop_or_explicit_full_frame_fallback"
+                if "crop_compression" not in source.encoder_contract
+                else "cqp_acquisition_crop_or_explicit_full_frame_fallback"
+            ),
             "source_pixel_range": "0_255",
             "crop_storage_mode": "materialized",
             "coordinate_contract": "sampled_training_local_to_acquisition_v1",

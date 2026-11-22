@@ -36,6 +36,9 @@ def _write_crop_meta(path: Path) -> None:
     )
 
 
+_LOSSLESS = {"rule": "palette.orange_crop_lossless.v1", "tuning": "lossless", "lossless": True}
+
+
 def _patch_ffprobe(monkeypatch, *, color_range: str | None = "tv") -> None:
     monkeypatch.setattr(
         mod,
@@ -51,6 +54,7 @@ def _patch_ffprobe(monkeypatch, *, color_range: str | None = "tv") -> None:
             color_space="bt709",
             nb_frames="10",
             frame_format_confirmation_status="pending_orange_confirmation",
+            source_compression=_LOSSLESS,
         ),
     )
 
@@ -140,6 +144,7 @@ def test_append_acquisition_crop_video_training_writes_crop_run(
     assert crop.attrs["source_pixels"] == "acquisition_crop_video"
     assert crop.attrs["container_color_range_observed"] == color_range
     assert crop.attrs["frame_format_confirmation_status"] == "pending_orange_confirmation"
+    assert crop.attrs["source_crop_compression"] == _LOSSLESS
     assert crop.attrs["crop_detection_required"] is True
     assert crop.attrs["blank_crop_frames_excluded"] is True
     assert crop.attrs["source_sample_count"] == 4
