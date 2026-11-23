@@ -235,3 +235,80 @@ def test_decoding_leaves_the_callers_standard_input_alone(tmp_path: Path) -> Non
     ).stdout
 
     assert out == b"next recording\n"
+
+
+def _fake_video(monkeypatch, *, pix_fmt: str = "yuvj420p") -> None:
+    monkeypatch.setattr(
+        stage,
+        "probe_video",
+        lambda path: {"pix_fmt": pix_fmt, "width": SHAPE[1], "height": SHAPE[0], "nb_frames": FRAMES},
+    )
+
+    def fake_decode(video_path, *, declared_keyframes, wanted, shape_hw, threads=4):
+        return np.stack([_frame(index) for index in wanted]), "sha256:" + "cd" * 32
+
+    monkeypatch.setattr(stage, "decode_keyframes", fake_decode)
+
+
+def _open_for_import(recording_dir: Path) -> tuple[zarr.Group, Path]:
+    zarr_path = recording_dir / "zarr" / "rec_analysis.zarr"
+    return zarr.open_group(str(zarr_path), mode="r+", use_consolidated=False), zarr_path
+
+
+def test_import_writes_a_whole_recording_run_from_every_keyframe_when_there_are_few(
+    tmp_path: Path, monkeypatch
+) -> None:
+    recording_dir = _recording(tmp_path, with_video=False)  # 12 declared keyframes
+    _fake_video(monkeypatch)
+    root, zarr_path = _open_for_import(recording_dir)
+
+    result = stage.import_recording_background(root, recording_dir, zarr_path=zarr_path)
+
+    assert result["status"] == "written" and result["keyframe_count"] == 12
+    group = root["background_runs"][result["run_name"]]
+    assert group.attrs["source_frame_indices"] == list(range(0, FRAMES, GOP))
+    parameters = group.attrs["parameters"]
+    assert parameters["window_first_frame"] is None and parameters["window_last_frame"] is None
+    assert parameters["window_note"] == "whole recording (import default)"
+    assert group["background_ds"].shape == (640, 640)
+    assert resolve_latest_complete_run_name(root["background_runs"], legacy_default=False) == result["run_name"]
+
+    again = stage.import_recording_background(root, recording_dir, zarr_path=zarr_path)
+    assert again == {"status": "already_present", "run_name": result["run_name"]}
+    assert len(list(root["background_runs"].group_keys())) == 1
+
+
+def test_import_leaves_a_recording_without_a_full_frame_video_alone(tmp_path: Path) -> None:
+    recording_dir = _recording(tmp_path, with_video=False)
+    folder = recording_dir / "cams" / "acquisition" / "external_recorder"
+    (folder / f"Cam{CAMERA}_external.mp4").unlink()
+    root, zarr_path = _open_for_import(recording_dir)
+
+    assert stage.import_recording_background(root, recording_dir, zarr_path=zarr_path) is None
+    assert "background_runs" not in root
+
+
+def test_import_records_a_refused_video_and_writes_nothing(tmp_path: Path, monkeypatch) -> None:
+    recording_dir = _recording(tmp_path, with_video=False)
+    _fake_video(monkeypatch, pix_fmt="yuv420p")
+    root, zarr_path = _open_for_import(recording_dir)
+
+    result = stage.import_recording_background(root, recording_dir, zarr_path=zarr_path)
+
+    assert result["status"] == "refused" and "not a full-range luma source" in result["detail"]
+    assert "background_runs" not in root
+
+
+def test_import_skips_a_recording_with_fewer_than_three_keyframes(tmp_path: Path, monkeypatch) -> None:
+    recording_dir = _recording(tmp_path, with_video=False)
+    folder = recording_dir / "cams" / "acquisition" / "external_recorder"
+    (folder / f"Cam{CAMERA}_external_keyframes.json").write_text(
+        json.dumps({"fps": 30, "total_frames": FRAMES, "keyframe_video_frame_indices": [0, 25]})
+    )
+    _fake_video(monkeypatch)
+    root, zarr_path = _open_for_import(recording_dir)
+
+    result = stage.import_recording_background(root, recording_dir, zarr_path=zarr_path)
+
+    assert result == {"status": "skipped", "reason": "too_few_keyframes", "declared_keyframe_count": 2}
+    assert "background_runs" not in root
