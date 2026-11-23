@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 
-pytest_plugins = ["tests.unit.fisheye.chaser_test_fixtures"]
+pytest_plugins = ["tests.registry_isolation", "tests.unit.fisheye.chaser_test_fixtures"]
 
 _PALETTE_TEST_FORBIDDEN_HOSTS = frozenset({"login1", "login2"})
 
