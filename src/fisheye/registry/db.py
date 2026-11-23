@@ -42,12 +42,14 @@ from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from .analytics_reports import RegistryAnalyticsReportMixin
 from .realtime_products import RegistryRealtimeProductsMixin
 from .orientation_status import RegistryOrientationStatusMixin
+from .acquisition_video_stream_encoders import RegistryAcquisitionVideoStreamEncodersMixin
 from .extractors.acquisition_video_streams import (
     _extract_acquisition_video_stream_rows,
     collection_video_facts,
 )
 from .extractors.realtime_products import extract_realtime_product_rows
 from .extractors.orientation_status import extract_recording_orientation_status
+from fisheye.shared.recording_dish_design import recording_dish_design
 from .extractors.chaser_metadata import extract_recording_chaser_metadata
 from .extractors.stimulus_metadata import extract_stimulus_metadata
 from .extractors.crop import _extract_crop_quality_rows
@@ -755,6 +757,7 @@ def _extract_recording_context(
     if stimulus_runs_available is None:
         stimulus_runs_available = context.get("stimulus_runs_available")
 
+    declared_dish = first_text("dish_design") or _decode_attr(acquisition.get("dish_design"))
     return {
         "recording_id": str(recording_id),
         "session_uuid": metadata.session_uuid or first_text("session_uuid", "session_id"),
@@ -774,11 +777,9 @@ def _extract_recording_context(
         "camera_id": first_text("camera_id"),
         "canvas_name": first_text("canvas_name"),
         "protocol_name": (first_text("protocol_name", "protocol_name_from_definition") or protocol_name),
-        "dish_design": first_text("dish_design") or _decode_attr(acquisition.get("dish_design")),
+        "dish_design": recording_dish_design(recording_path, first_text("camera_id"), declared=declared_dish),
         "context_source": first_text("context_source"),
-        "recording_context_schema_version": _optional_int(
-            first_text("recording_context_schema_version")
-        ),
+        "recording_context_schema_version": _optional_int(first_text("recording_context_schema_version")),
         "recording_intent": first_text("recording_intent"),
         "data_origin": first_text("data_origin"),
     }
@@ -1236,6 +1237,7 @@ class Registry(
     RegistryAnalyticsReportMixin,
     RegistryRealtimeProductsMixin,
     RegistryOrientationStatusMixin,
+    RegistryAcquisitionVideoStreamEncodersMixin,
     RegistryRecordingIdentityMixin,
     RegistryMigrationMixin,
 ):
@@ -6656,6 +6658,7 @@ class Registry(
             root, zarr_path=zarr_path, recording_id=recording_id, zarr_use=zarr_use
         )
         self.replace_acquisition_video_streams(dataset_id, acquisition_rows)
+        self.project_acquisition_video_stream_encoders(dataset_id, zarr_path, acquisition_rows)
         self.replace_recording_realtime_products(
             dataset_id, extract_realtime_product_rows(root, recording_id=recording_id)
         )
