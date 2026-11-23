@@ -103,6 +103,7 @@ def probe_video(video_path: Path) -> dict[str, Any]:
         ],
         check=True,
         capture_output=True,
+        stdin=subprocess.DEVNULL,
     ).stdout
     stream = json.loads(out)["streams"][0]
     return {
@@ -142,9 +143,12 @@ def decode_keyframes(
     stack = np.empty((len(wanted), height, width), dtype=np.uint8)
     process = subprocess.Popen(
         [
-            "ffmpeg", "-v", "error", "-threads", str(int(threads)), "-skip_frame", "nokey",
+            # -nostdin and a closed stdin: ffmpeg otherwise reads its caller's standard
+            # input for interactive commands and consumes whatever a loop or pipeline feeds.
+            "ffmpeg", "-nostdin", "-v", "error", "-threads", str(int(threads)), "-skip_frame", "nokey",
             "-i", str(video_path), "-vsync", "0", "-f", "rawvideo", "-pix_fmt", "gray", "-",
         ],
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         bufsize=frame_bytes,
     )
@@ -239,11 +243,12 @@ def plan_recording(
     count: int = DEFAULT_KEYFRAME_COUNT,
     first_frame: int | None = None,
     last_frame: int | None = None,
+    zarr_path: Path | None = None,
 ) -> dict[str, Any]:
     """Resolve the video, its declared keyframes and the frames to sample. Reads only."""
 
     recording_dir = Path(recording_dir)
-    zarr_path = analysis_zarr_path(recording_dir)
+    zarr_path = Path(zarr_path) if zarr_path is not None else analysis_zarr_path(recording_dir)
     manifest = json.loads((recording_dir / "recording_manifest.json").read_text(encoding="utf-8"))
     camera = str(manifest.get("camera_id"))
     folder = recording_dir / "cams" / "acquisition" / "external_recorder"
@@ -296,7 +301,40 @@ def compute_recording(
     """Compute and publish the keyframe-median background run for one recording."""
 
     plan = plan_recording(recording_dir, count=count, first_frame=first_frame, last_frame=last_frame)
+    median, source, parameters = _median_of_plan(plan, window_note=window_note, threads=threads)
+    stack_sha256 = source["decoded_keyframes_sha256"]
+    zarr_path = Path(plan["zarr_path"])
+    with archive_metadata_publication_lock(zarr_path):
+        root = zarr.open_group(str(zarr_path), mode="r+", use_consolidated=False)
+        run_name = write_video_keyframe_median_background(
+            root, background_full=median, source=source, parameters=parameters
+        )
+        consolidate_metadata_capture_expected_warnings(zarr_path)
+        published = zarr.open_group(str(zarr_path), mode="r", use_consolidated=True)
+        runs = published["background_runs"]
+        if run_name not in runs or not {"background_full", "background_ds"} <= set(runs[run_name].array_keys()):
+            raise ValueError(f"{plan['recording']}: consolidated metadata lacks {run_name}")
+        latest = runs.attrs.get("latest")
+    summary = {key: value for key, value in plan.items() if key != "declared_keyframes"}
+    return {
+        **summary,
+        "status": "written",
+        "run_name": run_name,
+        "latest": latest,
+        "selected_as_latest": latest == run_name,
+        "decoded_keyframes_sha256": stack_sha256,
+        "background_full_mean": float(median.mean()),
+    }
+
+
+def _median_of_plan(
+    plan: dict[str, Any], *, window_note: str | None, threads: int
+) -> tuple[np.ndarray, dict[str, Any], dict[str, Any]]:
+    """Decode a plan's keyframes; return the median image, its source record and parameters."""
+
     probe = plan["video_probe"]
+    count = len(plan["source_frame_indices"])
+    first_frame, last_frame = plan["window_first_frame"], plan["window_last_frame"]
     stack, stack_sha256 = decode_keyframes(
         Path(plan["video_path"]),
         declared_keyframes=plan["declared_keyframes"],
@@ -327,27 +365,101 @@ def compute_recording(
         "decoder": "ffmpeg -skip_frame nokey, luma as gray",
         "camera_serial": plan["camera_serial"],
     }
-    zarr_path = Path(plan["zarr_path"])
-    with archive_metadata_publication_lock(zarr_path):
-        root = zarr.open_group(str(zarr_path), mode="r+", use_consolidated=False)
-        run_name = write_video_keyframe_median_background(
-            root, background_full=median, source=source, parameters=parameters
+    return median, source, parameters
+
+
+STATUS_WRITTEN = "written"
+STATUS_ALREADY_PRESENT = "already_present"
+STATUS_SKIPPED = "skipped"
+STATUS_REFUSED = "refused"
+IMPORT_WINDOW_NOTE = "whole recording (import default)"
+
+
+def _whole_recording_run(root: zarr.Group) -> str | None:
+    """Name of a complete whole-recording run of this method already in the archive."""
+
+    if "background_runs" not in root:
+        return None
+    for name, group in sorted(root["background_runs"].groups()):
+        attrs = dict(group.attrs)
+        parameters = attrs.get("parameters") or {}
+        if (
+            attrs.get("method") == METHOD
+            and "background_full" in group
+            and "background_ds" in group
+            and parameters.get("window_first_frame") is None
+            and parameters.get("window_last_frame") is None
+        ):
+            return name
+    return None
+
+
+def full_frame_video_inputs(recording_dir: Path) -> tuple[Path, Path] | None:
+    """The recording's full-frame video and keyframe list, or None when it has none."""
+
+    recording_dir = Path(recording_dir)
+    manifest_path = recording_dir / "recording_manifest.json"
+    if not manifest_path.is_file():
+        return None
+    camera = str(json.loads(manifest_path.read_text(encoding="utf-8")).get("camera_id"))
+    folder = recording_dir / "cams" / "acquisition" / "external_recorder"
+    video = folder / f"Cam{camera}_external.mp4"
+    keyframe_path = folder / f"Cam{camera}_external_keyframes.json"
+    if not video.is_file() or not keyframe_path.is_file():
+        return None
+    return video, keyframe_path
+
+
+def import_recording_background(
+    root: zarr.Group, recording_dir: Path, *, zarr_path: Path, threads: int = 4
+) -> dict[str, Any] | None:
+    """Import-time form: a whole-recording median written into an archive being built.
+
+    Called while import still owns the archive, so it neither takes the
+    publication lock nor consolidates; import consolidates when it finishes.
+
+    - No full-frame external-recorder video or keyframe list: returns None.
+    - Fewer than three declared keyframes: ``skipped``.
+    - A video this stage refuses to decode (pixel format, keyframe list that
+      disagrees with the video): ``refused`` with the reason; nothing is written.
+    - A whole-recording run already present: ``already_present``.
+
+    A recording with fewer than 61 keyframes uses all of them. A decode that
+    fails part-way raises: the video import just accepted cannot be read.
+    """
+
+    recording_dir = Path(recording_dir)
+    inputs = full_frame_video_inputs(recording_dir)
+    if inputs is None:
+        return None
+    _, keyframe_path = inputs
+    existing = _whole_recording_run(root)
+    if existing is not None:
+        return {"status": STATUS_ALREADY_PRESENT, "run_name": existing}
+    try:
+        payload = json.loads(keyframe_path.read_text(encoding="utf-8"))
+        available = len(keyframe_video_frame_indices(payload, label=str(keyframe_path)))
+        if available < MIN_KEYFRAME_COUNT:
+            return {
+                "status": STATUS_SKIPPED,
+                "reason": "too_few_keyframes",
+                "declared_keyframe_count": available,
+            }
+        plan = plan_recording(
+            recording_dir, count=min(DEFAULT_KEYFRAME_COUNT, available), zarr_path=zarr_path
         )
-        consolidate_metadata_capture_expected_warnings(zarr_path)
-        published = zarr.open_group(str(zarr_path), mode="r", use_consolidated=True)
-        runs = published["background_runs"]
-        if run_name not in runs or not {"background_full", "background_ds"} <= set(runs[run_name].array_keys()):
-            raise ValueError(f"{plan['recording']}: consolidated metadata lacks {run_name}")
-        latest = runs.attrs.get("latest")
-    summary = {key: value for key, value in plan.items() if key != "declared_keyframes"}
+    except ValueError as exc:
+        return {"status": STATUS_REFUSED, "detail": str(exc)[:500]}
+    median, source, parameters = _median_of_plan(plan, window_note=IMPORT_WINDOW_NOTE, threads=threads)
+    run_name = write_video_keyframe_median_background(
+        root, background_full=median, source=source, parameters=parameters
+    )
     return {
-        **summary,
-        "status": "written",
+        "status": STATUS_WRITTEN,
         "run_name": run_name,
-        "latest": latest,
-        "selected_as_latest": latest == run_name,
-        "decoded_keyframes_sha256": stack_sha256,
-        "background_full_mean": float(median.mean()),
+        "keyframe_count": len(plan["source_frame_indices"]),
+        "declared_keyframe_count": plan["declared_keyframe_count"],
+        "decoded_keyframes_sha256": source["decoded_keyframes_sha256"],
     }
 
 
@@ -386,6 +498,8 @@ __all__ = [
     "RUN_PREFIX",
     "compute_recording",
     "decode_keyframes",
+    "full_frame_video_inputs",
+    "import_recording_background",
     "downsample_background",
     "plan_recording",
     "select_keyframes",

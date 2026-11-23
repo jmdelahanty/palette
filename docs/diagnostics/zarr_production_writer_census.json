@@ -38926,7 +38926,7 @@
       "enclosing_symbol": "fisheye.preprocessing.video_keyframe_median_background:write_video_keyframe_median_background",
       "file": "src/fisheye/preprocessing/video_keyframe_median_background.py",
       "filters_expression": null,
-      "line": 188,
+      "line": 192,
       "parent_path_pattern": "<require_runs_parent(root, 'background_runs')>/<run_name>",
       "path_pattern": "<require_runs_parent(root, 'background_runs')>/<run_name>/<name>",
       "receiver_expression": "group",
@@ -38934,7 +38934,7 @@
       "shape_expression": "data.shape",
       "shape_template": null,
       "shards_expression": null,
-      "site_id": "writer-4acca3e29cecac1a",
+      "site_id": "writer-68cd21ce31a79737",
       "status": "current",
       "status_basis": "packaged Palette module without a maintenance marker",
       "surface_class": "production",
@@ -70629,7 +70629,7 @@
     "writer_wrapper_call_site_count": 1001
   },
   "wrapper_analysis": {
-    "function_definition_count": 10712,
+    "function_definition_count": 10716,
     "writer_function_count": 249,
     "writer_functions": [
       "chaser_analysis.calculate_speed:save_speed_to_zarr",
