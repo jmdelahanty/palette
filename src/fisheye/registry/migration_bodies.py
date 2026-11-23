@@ -9473,3 +9473,72 @@ class RegistryMigrationMixin:
             "CREATE INDEX IF NOT EXISTS idx_recording_orientation_status_status "
             "ON recording_orientation_status(orientation_status);"
         )
+
+    def _migration_079_acquisition_video_stream_encoders(self) -> None:
+        """Encoder settings and crop compression of each acquisition video stream.
+
+        One row per ``acquisition_video_streams`` row, projected on every
+        registry refresh from the stream's Orange recorder summary by
+        ``fisheye.registry.extractors.acquisition_video_stream_encoders``.
+        ``summary_sha256`` binds the bytes read. For crop streams,
+        ``crop_compression_*`` records the admitted rule (lossless, QP 0, or
+        ``palette.orange_crop_cqp_gop1.v1`` with its QP) or the refusal.
+        A projection, not an authority. Additive: a new table only.
+        """
+
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS acquisition_video_stream_encoders (
+                dataset_id TEXT NOT NULL,
+                stream_key TEXT NOT NULL,
+                recording_id TEXT,
+                output_kind TEXT,
+                camera_id TEXT,
+                summary_relative_path TEXT,
+                summary_status TEXT NOT NULL
+                    CHECK (summary_status IN ('read', 'missing', 'unreadable', 'unlocated')),
+                summary_sha256 TEXT,
+                encoder_block_present INTEGER,
+                encoder_name TEXT,
+                encoder_codec TEXT,
+                encoder_profile_name TEXT,
+                tuning TEXT,
+                encoder_tuning TEXT,
+                preset TEXT,
+                rate_control_strategy TEXT,
+                const_qp INTEGER,
+                quality_value INTEGER,
+                target_bps INTEGER,
+                max_bps INTEGER,
+                gop_length INTEGER,
+                source_format TEXT,
+                output_width INTEGER,
+                output_height INTEGER,
+                crop_compression_status TEXT
+                    CHECK (crop_compression_status IS NULL
+                        OR crop_compression_status IN ('admitted', 'refused')),
+                crop_compression_rule TEXT,
+                crop_compression_qp INTEGER,
+                crop_compression_lossless INTEGER,
+                crop_compression_refusal TEXT,
+                updated_utc TEXT NOT NULL,
+                PRIMARY KEY (dataset_id, stream_key),
+                CHECK ((summary_status = 'read') = (summary_sha256 IS NOT NULL)),
+                CHECK (
+                    (crop_compression_status = 'admitted'
+                        AND crop_compression_rule IS NOT NULL
+                        AND crop_compression_qp IS NOT NULL
+                        AND crop_compression_refusal IS NULL)
+                    OR (crop_compression_status = 'refused'
+                        AND crop_compression_rule IS NULL
+                        AND crop_compression_refusal IS NOT NULL)
+                    OR crop_compression_status IS NULL
+                ),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_acquisition_video_stream_encoders_crop_rule "
+            "ON acquisition_video_stream_encoders(crop_compression_rule, crop_compression_qp);"
+        )

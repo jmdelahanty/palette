@@ -42,6 +42,7 @@ from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from .analytics_reports import RegistryAnalyticsReportMixin
 from .realtime_products import RegistryRealtimeProductsMixin
 from .orientation_status import RegistryOrientationStatusMixin
+from .acquisition_video_stream_encoders import RegistryAcquisitionVideoStreamEncodersMixin
 from .extractors.acquisition_video_streams import (
     _extract_acquisition_video_stream_rows,
     collection_video_facts,
@@ -1236,6 +1237,7 @@ class Registry(
     RegistryAnalyticsReportMixin,
     RegistryRealtimeProductsMixin,
     RegistryOrientationStatusMixin,
+    RegistryAcquisitionVideoStreamEncodersMixin,
     RegistryRecordingIdentityMixin,
     RegistryMigrationMixin,
 ):
@@ -6656,6 +6658,7 @@ class Registry(
             root, zarr_path=zarr_path, recording_id=recording_id, zarr_use=zarr_use
         )
         self.replace_acquisition_video_streams(dataset_id, acquisition_rows)
+        self.project_acquisition_video_stream_encoders(dataset_id, zarr_path, acquisition_rows)
         self.replace_recording_realtime_products(
             dataset_id, extract_realtime_product_rows(root, recording_id=recording_id)
         )
