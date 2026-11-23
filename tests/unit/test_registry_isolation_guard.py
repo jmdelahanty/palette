@@ -30,6 +30,7 @@ def test_default_registry_path_is_a_session_temporary(tmp_path: Path) -> None:
         (os.fsencode(str(LIVE)), False),
         (f"file:{LIVE}?mode=ro", True),
         (str(guard.CANONICAL_REGISTRY_DIR / "backups" / "copy.sqlite"), False),
+        (str(LIVE), True),
     ],
 )
 def test_protected_paths_are_refused(database, uri: bool) -> None:
@@ -37,6 +38,17 @@ def test_protected_paths_are_refused(database, uri: bool) -> None:
         sqlite3.connect(database, uri=uri)
 
     assert len(guard.take_violations()) == 1
+
+
+def test_positional_arguments_cannot_unprotect_a_path() -> None:
+    for args in (
+        (5.0, 0, "DEFERRED", True, sqlite3.Connection),
+        (5.0, 0, "DEFERRED", True, sqlite3.Connection, 128, True),
+    ):
+        with pytest.raises(guard.LiveRegistryAccessError):
+            sqlite3.connect(str(LIVE), *args)
+
+    assert len(guard.take_violations()) == 2
 
 
 def test_registry_constructor_is_refused_on_the_live_path() -> None:

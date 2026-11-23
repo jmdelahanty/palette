@@ -67,15 +67,20 @@ def protected_registry_dirs() -> tuple[str, ...]:
 _PROTECTED = protected_registry_dirs()
 
 
-def _database_path(database: Any, uri: bool) -> str | None:
+def _database_path(database: Any) -> str | None:
+    """The file a connect would open, read conservatively.
+
+    ``uri`` is deliberately ignored: a ``file:`` string is parsed whether or not
+    SQLite will treat it as a URI, and any other string is a path either way
+    (with ``uri=True`` SQLite opens a non-``file:`` string as a plain filename).
+    """
+
     if isinstance(database, bytes):
         database = os.fsdecode(database)
     text = os.fspath(database) if isinstance(database, (str, os.PathLike)) else None
     if not text or text == ":memory:":
         return None
-    if uri or text.startswith("file:"):
-        if not text.startswith("file:"):
-            return None
+    if text.startswith("file:"):
         path = unquote(urlsplit(text).path)
         if not path or path == ":memory:" or "mode=memory" in text:
             return None
@@ -83,16 +88,15 @@ def _database_path(database: Any, uri: bool) -> str | None:
     return os.path.realpath(text)
 
 
-def is_protected(database: Any, *, uri: bool = False) -> bool:
-    path = _database_path(database, uri)
+def is_protected(database: Any) -> bool:
+    path = _database_path(database)
     return path is not None and any(
         path == root or path.startswith(root + os.sep) for root in _PROTECTED
     )
 
 
 def _guarded_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
-    uri = bool(kwargs.get("uri", args[4] if len(args) > 4 else False))
-    if is_protected(database, uri=uri):
+    if is_protected(database):
         message = (
             f"test opened {database!r}, inside a protected registry directory "
             f"{_PROTECTED}; pass an explicit temporary registry"
