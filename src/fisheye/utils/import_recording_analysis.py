@@ -889,6 +889,26 @@ def import_empty_background(plan: RecordingAnalysisPlan) -> Optional[dict[str, A
     )
 
 
+def import_video_keyframe_median_background(plan: RecordingAnalysisPlan) -> Optional[dict[str, Any]]:
+    """Store a background computed from the recording's own full-frame video.
+
+    The median of keyframes spread over the whole recording, at the native
+    raster and at 640 x 640. A recording without an external-recorder video and
+    keyframe list is left untouched. Written after Orange's empty-dish capture,
+    so it is the run ``latest`` selects.
+    """
+
+    from fisheye.preprocessing.video_keyframe_median_background import (
+        full_frame_video_inputs,
+        import_recording_background,
+    )
+
+    if full_frame_video_inputs(plan.recording_dir) is None:
+        return None
+    root = zarr.open_group(str(plan.zarr_path), mode="r+", use_consolidated=False)
+    return import_recording_background(root, plan.recording_dir, zarr_path=plan.zarr_path)
+
+
 def _sealed_spec_copy(recording_dir: Path, sealed: Mapping[str, dict], requester: Mapping[str, Any]) -> str | None:
     """The organized path of the sealed run_spec copy, or None if it is not proven.
 
@@ -1836,6 +1856,21 @@ def process_recording_import(
             recording_dir=str(plan.recording_dir),
             zarr_path=str(plan.zarr_path),
             **empty_background,
+        )
+
+    try:
+        video_background = import_video_keyframe_median_background(plan)
+    except Exception as exc:
+        return RecordingImportResult(
+            ok=False, failed_step="import_video_keyframe_median_background", error=str(exc)
+        )
+    if video_background is not None:
+        _log(
+            logger,
+            "video_keyframe_median_background_imported",
+            recording_dir=str(plan.recording_dir),
+            zarr_path=str(plan.zarr_path),
+            **video_background,
         )
 
     crop_ledger = (
